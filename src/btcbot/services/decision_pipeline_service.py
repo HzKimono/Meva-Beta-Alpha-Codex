@@ -113,11 +113,17 @@ class DecisionPipelineService:
         order_requests: list[Order] = []
         for action in allocation.actions:
             symbol = canonical_symbol(action.symbol)
+            pair = pair_info_by_symbol.get(symbol)
+            if pair is None:
+                dropped_reasons["dropped_missing_pair_info"] = (
+                    dropped_reasons.get("dropped_missing_pair_info", 0) + 1
+                )
+                continue
             order, drop_reason = sized_action_to_order(
                 action,
                 mode=("live" if live_mode else "dry_run"),
                 mark_price=mark_prices.get(symbol),
-                pair_info=pair_info_by_symbol.get(symbol),
+                pair_info=pair,
                 created_at=now_ts,
             )
             if order is None:

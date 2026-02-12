@@ -16,16 +16,7 @@ def build_deterministic_client_order_id(action: SizedAction) -> str:
     return sanitized[:64]
 
 
-def build_exchange_rules(pair: PairInfo | None) -> ExchangeRules:
-    if pair is None:
-        return ExchangeRules(
-            tick_size=Decimal("0"),
-            step_size=Decimal("0"),
-            min_notional_try=Decimal("0"),
-            price_precision=2,
-            qty_precision=6,
-        )
-
+def build_exchange_rules(pair: PairInfo) -> ExchangeRules:
     price_precision = int(pair.denominator_scale)
     qty_precision = int(pair.numerator_scale)
     return ExchangeRules(
@@ -45,6 +36,8 @@ def sized_action_to_order(
     pair_info: PairInfo | None,
     created_at: datetime | None = None,
 ) -> tuple[Order | None, str | None]:
+    if pair_info is None:
+        return None, "dropped_missing_pair_info"
     if mark_price is None or mark_price <= Decimal("0"):
         return None, "missing_mark_price"
 

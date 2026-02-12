@@ -94,6 +94,30 @@ def test_orchestrator_reports_dropped_min_notional_mapping() -> None:
     assert report.dropped_reasons["dropped_min_notional_after_quantize"] == 1
 
 
+def test_orchestrator_skips_missing_pair_info() -> None:
+    fixed_now = datetime(2024, 1, 1, tzinfo=UTC)
+    service = DecisionPipelineService(
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="BTC_TRY"),
+        now_provider=lambda: fixed_now,
+    )
+
+    report = service.run_cycle(
+        cycle_id="cycle-1",
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        open_orders=[],
+        pair_info=[],
+        bootstrap_enabled=True,
+        live_mode=False,
+    )
+
+    assert len(report.allocation_actions) == 1
+    assert len(report.order_requests) == 0
+    assert report.dropped_actions_count == 1
+    assert report.dropped_reasons["dropped_missing_pair_info"] == 1
+
+
 def test_orchestrator_deterministic_for_same_input() -> None:
     fixed_now = datetime(2024, 1, 1, tzinfo=UTC)
     service = DecisionPipelineService(

@@ -84,6 +84,28 @@ def test_sized_action_to_order_drops_min_notional_after_quantize() -> None:
     assert reason == "dropped_min_notional_after_quantize"
 
 
+def test_sized_action_to_order_drops_missing_pair_info() -> None:
+    action = SizedAction(
+        symbol="BTC_TRY",
+        side="buy",
+        notional_try=Decimal("25"),
+        qty=Decimal("0.25"),
+        rationale="allocation:ok",
+        strategy_id="baseline_mean_reversion_v1",
+        intent_index=3,
+    )
+
+    order, reason = sized_action_to_order(
+        action,
+        mode="dry_run",
+        mark_price=Decimal("100"),
+        pair_info=None,
+    )
+
+    assert order is None
+    assert reason == "dropped_missing_pair_info"
+
+
 def test_client_order_id_is_deterministic() -> None:
     action = SizedAction(
         symbol="ETH_TRY",

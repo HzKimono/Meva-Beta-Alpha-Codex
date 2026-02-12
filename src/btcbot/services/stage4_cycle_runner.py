@@ -6,10 +6,11 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
+from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo, normalize_symbol
-from btcbot.domain.stage4 import Order, Position
+from btcbot.domain.stage4 import Order, Position, Quantizer
 from btcbot.domain.strategy_core import PositionSummary
 from btcbot.services.accounting_service_stage4 import AccountingService
 from btcbot.services.decision_pipeline_service import DecisionPipelineService
@@ -171,7 +172,7 @@ class Stage4CycleRunner:
                 for order in decision_report.order_requests
                 if self.norm(order.symbol) not in failed_symbols
             ]
-            intents = pipeline_orders or self._build_intents(
+            bootstrap_intents, bootstrap_drop_reasons = self._build_intents(
                 cycle_id=cycle_id,
                 symbols=[
                     symbol for symbol in settings.symbols if self.norm(symbol) not in failed_symbols
@@ -181,7 +182,9 @@ class Stage4CycleRunner:
                 open_orders=current_open_orders,
                 live_mode=live_mode,
                 bootstrap_enabled=settings.stage4_bootstrap_intents,
+                pair_info=pair_info,
             )
+            intents = pipeline_orders or bootstrap_intents
             mid_price = next(iter(mark_prices.values()), Decimal("0"))
             lifecycle_plan = lifecycle_service.plan(
                 intents, current_open_orders, mid_price=mid_price
@@ -249,6 +252,8 @@ class Stage4CycleRunner:
                 "pipeline_order_requests": len(decision_report.order_requests),
                 "pipeline_mapped_orders": decision_report.mapped_orders_count,
                 "pipeline_dropped_actions": decision_report.dropped_actions_count,
+                "bootstrap_mapped_orders": len(bootstrap_intents),
+                "bootstrap_dropped_symbols": sum(bootstrap_drop_reasons.values()),
                 "accepted_actions": len(accepted_actions),
                 "executed": execution_report.executed_total,
                 "submitted": execution_report.submitted,
@@ -267,6 +272,12 @@ class Stage4CycleRunner:
                 {
                     f"pipeline_drop_{key}": value
                     for key, value in dict(decision_report.dropped_reasons).items()
+                }
+            )
+            counts.update(
+                {
+                    f"bootstrap_drop_{key}": value
+                    for key, value in dict(bootstrap_drop_reasons).items()
                 }
             )
             state_store.record_cycle_audit(
@@ -395,31 +406,53 @@ class Stage4CycleRunner:
         open_orders: list[Order],
         live_mode: bool,
         bootstrap_enabled: bool,
-    ) -> list[Order]:
+        pair_info: list[PairInfo] | None,
+    ) -> tuple[list[Order], dict[str, int]]:
         if not bootstrap_enabled:
-            return []
+            return [], {}
+
+        pair_info_by_symbol = {self.norm(item.pair_symbol): item for item in (pair_info or [])}
         intents: list[Order] = []
+        drop_reasons: dict[str, int] = {}
         existing_keys = {(self.norm(order.symbol), order.side) for order in open_orders}
         for symbol in sorted(symbols):
             normalized = self.norm(symbol)
+            rules_source = pair_info_by_symbol.get(normalized)
+            if rules_source is None:
+                self._inc_reason(drop_reasons, "missing_pair_info")
+                continue
+
             mark = mark_prices.get(normalized)
             if mark is None or mark <= 0:
+                self._inc_reason(drop_reasons, "missing_mark_price")
                 continue
             if (normalized, "buy") in existing_keys:
                 continue
+
             budget = min(try_cash, Decimal("50"))
             if budget <= 0:
                 continue
-            qty = budget / mark
-            if qty <= 0:
+            qty_raw = budget / mark
+            if qty_raw <= 0:
                 continue
+
+            rules = build_exchange_rules(rules_source)
+            price_q = Quantizer.quantize_price(mark, rules)
+            qty_q = Quantizer.quantize_qty(qty_raw, rules)
+            if qty_q <= 0:
+                self._inc_reason(drop_reasons, "qty_became_zero")
+                continue
+            if not Quantizer.validate_min_notional(price_q, qty_q, rules):
+                self._inc_reason(drop_reasons, "min_notional")
+                continue
+
             intents.append(
                 Order(
                     symbol=symbol,
                     side="buy",
                     type="limit",
-                    price=mark,
-                    qty=qty,
+                    price=price_q,
+                    qty=qty_q,
                     status="new",
                     created_at=datetime.now(UTC),
                     updated_at=datetime.now(UTC),
@@ -427,4 +460,8 @@ class Stage4CycleRunner:
                     mode=("live" if live_mode else "dry_run"),
                 )
             )
-        return intents
+        return intents, drop_reasons
+
+    @staticmethod
+    def _inc_reason(reasons: dict[str, int], key: str) -> None:
+        reasons[key] = reasons.get(key, 0) + 1
