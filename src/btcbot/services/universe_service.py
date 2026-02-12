@@ -27,8 +27,9 @@ def _spread_bps(orderbook: OrderBookSummary) -> Decimal | None:
 
 
 def _quote_matches(symbol: SymbolInfo, expected_quote: str) -> bool:
-    if symbol.quote:
-        return symbol.quote == expected_quote
+    normalized_quote = symbol.quote.upper() if symbol.quote is not None else None
+    if normalized_quote is not None:
+        return normalized_quote == expected_quote
 
     try:
         return quote_currency(symbol.symbol) == expected_quote
@@ -71,21 +72,19 @@ def select_universe(
         if knobs.require_active and not symbol.active:
             continue
 
-        orderbook = normalized_orderbooks.get(symbol.symbol)
+        if (
+            symbol.min_notional_try is not None
+            and symbol.min_notional_try > knobs.max_exchange_min_total_try
+        ):
+            continue
+
+        orderbook = normalized_orderbooks.get(canonical_symbol(symbol.symbol))
         spread_bps = None
         if orderbook is not None:
             spread_bps = _spread_bps(orderbook)
             if spread_bps is None:
                 continue
             if spread_bps > knobs.max_spread_bps:
-                continue
-
-            mid = (orderbook.best_bid + orderbook.best_ask) / Decimal("2")
-            effective_min_notional = max(
-                knobs.min_notional_try,
-                symbol.min_notional_try if symbol.min_notional_try is not None else Decimal("0"),
-            )
-            if mid < effective_min_notional:
                 continue
 
         ranked.append(

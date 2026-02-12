@@ -59,23 +59,40 @@ def test_active_filter() -> None:
     assert result == ["ETHTRY"]
 
 
-def test_min_notional_filter_uses_knobs_and_symbol_override() -> None:
+def test_exchange_min_total_filter_rejects_high_min_total() -> None:
     symbols = [
         SymbolInfo(symbol="BTC_TRY", base="BTC", quote="TRY", min_notional_try=Decimal("150")),
         SymbolInfo(symbol="ETH_TRY", base="ETH", quote="TRY", min_notional_try=Decimal("100")),
     ]
+
+    result = select_universe(
+        symbols=symbols,
+        orderbooks=None,
+        knobs=UniverseKnobs(max_exchange_min_total_try=Decimal("120")),
+    )
+
+    assert result == ["ETHTRY"]
+
+
+def test_low_price_does_not_get_rejected_by_min_notional_knob() -> None:
+    symbols = [
+        SymbolInfo(symbol="BTC_TRY", base="BTC", quote="TRY", min_notional_try=Decimal("100")),
+    ]
     orderbooks = {
-        "BTC_TRY": OrderBookSummary(best_bid=Decimal("119"), best_ask=Decimal("121")),
-        "ETH_TRY": OrderBookSummary(best_bid=Decimal("149"), best_ask=Decimal("151")),
+        "BTC_TRY": OrderBookSummary(best_bid=Decimal("0.09"), best_ask=Decimal("0.1")),
     }
 
     result = select_universe(
         symbols=symbols,
         orderbooks=orderbooks,
-        knobs=UniverseKnobs(min_notional_try=Decimal("120")),
+        knobs=UniverseKnobs(
+            min_notional_try=Decimal("100000"),
+            max_exchange_min_total_try=Decimal("120"),
+            max_spread_bps=Decimal("2000"),
+        ),
     )
 
-    assert result == ["ETHTRY"]
+    assert result == ["BTCTRY"]
 
 
 def test_spread_filter_rejects_above_threshold() -> None:

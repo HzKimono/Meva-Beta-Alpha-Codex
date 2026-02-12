@@ -15,6 +15,7 @@ class UniverseKnobs:
     max_universe_size: int = 20
     min_notional_try: Decimal = Decimal("50")
     max_spread_bps: Decimal = Decimal("200")
+    max_exchange_min_total_try: Decimal = Decimal("1000000")
     allow_symbols: tuple[str, ...] = ()
     deny_symbols: tuple[str, ...] = ()
     require_active: bool = True
