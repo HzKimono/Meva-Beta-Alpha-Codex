@@ -7,6 +7,9 @@ from typing import Annotated
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from btcbot.domain.symbols import canonical_symbol
+from btcbot.domain.universe_models import UniverseKnobs
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -60,6 +63,26 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    universe_quote_currency: str = Field(default="TRY", alias="UNIVERSE_QUOTE_CURRENCY")
+    universe_max_size: int = Field(default=20, alias="UNIVERSE_MAX_SIZE")
+    universe_min_notional_try: Decimal = Field(
+        default=Decimal("50"), alias="UNIVERSE_MIN_NOTIONAL_TRY"
+    )
+    universe_max_spread_bps: Decimal = Field(
+        default=Decimal("200"), alias="UNIVERSE_MAX_SPREAD_BPS"
+    )
+    universe_max_exchange_min_total_try: Decimal = Field(
+        default=Decimal("1000000"), alias="UNIVERSE_MAX_EXCHANGE_MIN_TOTAL_TRY"
+    )
+    universe_allow_symbols: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, alias="UNIVERSE_ALLOW_SYMBOLS"
+    )
+    universe_deny_symbols: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, alias="UNIVERSE_DENY_SYMBOLS"
+    )
+    universe_require_active: bool = Field(default=True, alias="UNIVERSE_REQUIRE_ACTIVE")
+    universe_require_try_quote: bool = Field(default=True, alias="UNIVERSE_REQUIRE_TRY_QUOTE")
+
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTC_TRY", "ETH_TRY", "SOL_TRY"],
         alias="SYMBOLS",
@@ -77,19 +100,64 @@ class Settings(BaseSettings):
                     msg = "SYMBOLS JSON value must be a list"
                     raise ValueError(msg)
                 return [
-                    cls._normalize_symbol(item) for item in parsed if cls._normalize_symbol(item)
+                    cls._normalize_legacy_symbol(item)
+                    for item in parsed
+                    if cls._normalize_legacy_symbol(item)
                 ]
             return [
-                cls._normalize_symbol(item)
+                cls._normalize_legacy_symbol(item)
                 for item in raw.split(",")
-                if cls._normalize_symbol(item)
+                if cls._normalize_legacy_symbol(item)
             ]
 
-        return [cls._normalize_symbol(item) for item in value if cls._normalize_symbol(item)]
+        return [
+            cls._normalize_legacy_symbol(item)
+            for item in value
+            if cls._normalize_legacy_symbol(item)
+        ]
+
+    @field_validator("universe_allow_symbols", "universe_deny_symbols", mode="before")
+    def parse_universe_symbols(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    msg = "UNIVERSE symbols JSON value must be a list"
+                    raise ValueError(msg)
+                return [
+                    cls._normalize_universe_symbol(item)
+                    for item in parsed
+                    if cls._normalize_universe_symbol(item)
+                ]
+            return [
+                cls._normalize_universe_symbol(item)
+                for item in raw.split(",")
+                if cls._normalize_universe_symbol(item)
+            ]
+
+        return [
+            cls._normalize_universe_symbol(item)
+            for item in value
+            if cls._normalize_universe_symbol(item)
+        ]
 
     @staticmethod
-    def _normalize_symbol(value: object) -> str:
+    def _normalize_legacy_symbol(value: object) -> str:
+        if value is None:
+            return ""
         return str(value).strip().strip("[]").strip('"').strip("'").upper()
+
+    @staticmethod
+    def _normalize_universe_symbol(value: object) -> str:
+        if value is None:
+            return ""
+        cleaned = str(value).strip().strip("[]").strip('"').strip("'").strip()
+        if not cleaned:
+            return ""
+        return canonical_symbol(cleaned)
 
     @field_validator("target_try")
     def validate_target_try(cls, value: float) -> float:
@@ -126,6 +194,19 @@ class Settings(BaseSettings):
         if value < 0:
             raise ValueError("COOLDOWN_SECONDS must be >= 0")
         return value
+
+    def universe_knobs(self) -> UniverseKnobs:
+        return UniverseKnobs(
+            quote_currency=self.universe_quote_currency,
+            max_universe_size=self.universe_max_size,
+            min_notional_try=self.universe_min_notional_try,
+            max_spread_bps=self.universe_max_spread_bps,
+            max_exchange_min_total_try=self.universe_max_exchange_min_total_try,
+            allow_symbols=tuple(self.universe_allow_symbols),
+            deny_symbols=tuple(self.universe_deny_symbols),
+            require_active=self.universe_require_active,
+            require_try_quote=self.universe_require_try_quote,
+        )
 
     def is_live_trading_enabled(self) -> bool:
         return self.live_trading and self.live_trading_ack == "I_UNDERSTAND"
