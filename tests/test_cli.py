@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from btcbot import cli
+from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import (
     ConfigurationError,
     DryRunExchangeClient,
@@ -12,6 +13,7 @@ from btcbot.adapters.btcturk_http import (
 from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import Balance, OrderSide, PairInfo
+from btcbot.domain.stage4 import Quantizer
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 
 
@@ -716,7 +718,15 @@ def test_run_cycle_stage4_dry_run_writes_stage4_tables(monkeypatch, tmp_path) ->
 
 def test_stage4_cycle_runner_build_intents_sets_live_mode_flag() -> None:
     runner = Stage4CycleRunner()
-    intents_live = runner._build_intents(
+    pair_info = [
+        PairInfo(
+            pairSymbol="BTCTRY",
+            numeratorScale=4,
+            denominatorScale=2,
+            minTotalAmount=Decimal("10"),
+        )
+    ]
+    intents_live, drops_live = runner._build_intents(
         cycle_id="abc123",
         symbols=["BTC_TRY"],
         mark_prices={"BTCTRY": Decimal("100")},
@@ -724,8 +734,9 @@ def test_stage4_cycle_runner_build_intents_sets_live_mode_flag() -> None:
         open_orders=[],
         live_mode=True,
         bootstrap_enabled=True,
+        pair_info=pair_info,
     )
-    intents_dry = runner._build_intents(
+    intents_dry, drops_dry = runner._build_intents(
         cycle_id="abc123",
         symbols=["BTC_TRY"],
         mark_prices={"BTCTRY": Decimal("100")},
@@ -733,13 +744,62 @@ def test_stage4_cycle_runner_build_intents_sets_live_mode_flag() -> None:
         open_orders=[],
         live_mode=False,
         bootstrap_enabled=True,
+        pair_info=pair_info,
     )
 
     assert intents_live and intents_dry
+    assert drops_live == {}
+    assert drops_dry == {}
     assert intents_live[0].mode == "live"
     assert intents_dry[0].mode == "dry_run"
     assert intents_live[0].created_at <= datetime.now(UTC)
     assert intents_dry[0].created_at <= datetime.now(UTC)
+
+
+def test_stage4_cycle_runner_build_intents_quantized_and_valid_min_notional() -> None:
+    runner = Stage4CycleRunner()
+    pair = PairInfo(
+        pairSymbol="BTCTRY",
+        numeratorScale=4,
+        denominatorScale=2,
+        minTotalAmount=Decimal("10"),
+    )
+    intents, drops = runner._build_intents(
+        cycle_id="abc123",
+        symbols=["BTC_TRY"],
+        mark_prices={"BTCTRY": Decimal("100.129")},
+        try_cash=Decimal("100"),
+        open_orders=[],
+        live_mode=False,
+        bootstrap_enabled=True,
+        pair_info=[pair],
+    )
+
+    assert drops == {}
+    assert len(intents) == 1
+    rules = build_exchange_rules(pair)
+    expected_price = Quantizer.quantize_price(Decimal("100.129"), rules)
+    expected_qty = Quantizer.quantize_qty(Decimal("50") / Decimal("100.129"), rules)
+    assert intents[0].price == expected_price
+    assert intents[0].qty == expected_qty
+    assert Quantizer.validate_min_notional(intents[0].price, intents[0].qty, rules)
+
+
+def test_stage4_cycle_runner_build_intents_skips_missing_pair_info() -> None:
+    runner = Stage4CycleRunner()
+    intents, drops = runner._build_intents(
+        cycle_id="abc123",
+        symbols=["BTC_TRY"],
+        mark_prices={"BTCTRY": Decimal("100")},
+        try_cash=Decimal("100"),
+        open_orders=[],
+        live_mode=False,
+        bootstrap_enabled=True,
+        pair_info=[],
+    )
+
+    assert intents == []
+    assert drops["missing_pair_info"] == 1
 
 
 def test_run_cycle_stage4_policy_block_records_audit(tmp_path, capsys) -> None:
