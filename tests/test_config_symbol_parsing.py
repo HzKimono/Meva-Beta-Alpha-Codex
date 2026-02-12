@@ -35,3 +35,13 @@ def test_symbols_invalid_json_object_has_symbols_message() -> None:
 def test_universe_invalid_json_object_has_universe_message() -> None:
     with pytest.raises(ValueError, match="UNIVERSE symbols JSON value must be a list"):
         Settings(UNIVERSE_ALLOW_SYMBOLS='{"BTC_TRY": true}')
+
+
+def test_symbols_dedupes_preserving_first_seen_order() -> None:
+    settings = Settings(SYMBOLS="BTC_TRY,btctry, ETH_TRY,ETH_TRY,BTC_TRY")
+    assert settings.symbols == ["BTCTRY", "ETHTRY"]
+
+
+def test_universe_allow_dedupes_preserving_first_seen_order() -> None:
+    settings = Settings(UNIVERSE_ALLOW_SYMBOLS='["btc_try","BTCTRY","eth_try","ETHTRY"]')
+    assert settings.universe_allow_symbols == ["BTCTRY", "ETHTRY"]
