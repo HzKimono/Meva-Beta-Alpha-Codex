@@ -22,13 +22,14 @@ def _context(
     sell_count: int = 0,
     qty: str = "0.2",
     max_notional: str = "100",
+    try_balance: str = "120",
 ) -> StrategyContext:
     return StrategyContext(
         timestamp=datetime.now(UTC),
         symbol="btc_try",
         mark_price=Decimal(mark_price),
         orderbook=OrderBookSummary(best_bid=Decimal("99"), best_ask=Decimal("101")),
-        balances={"TRY": Decimal("120")},
+        balances={"TRY": Decimal(try_balance)},
         position=(
             PositionSummary(symbol="BTCTRY", qty=Decimal(qty), avg_cost=Decimal("100"))
             if has_position
@@ -131,6 +132,40 @@ def test_no_intent_inside_threshold() -> None:
 
     intents = strategy.generate_intents(
         _context(mark_price="100.2", anchor_price="100", has_position=True)
+    )
+
+    assert intents == []
+
+
+def test_sell_emits_when_try_balance_is_zero_and_position_exists() -> None:
+    strategy = BaselineMeanReversionStrategy()
+
+    intents = strategy.generate_intents(
+        _context(
+            mark_price="102",
+            anchor_price="100",
+            has_position=True,
+            qty="0.2",
+            max_notional="100",
+            try_balance="0",
+        )
+    )
+
+    assert len(intents) == 1
+    assert intents[0].side == "sell"
+    assert intents[0].target_notional_try == Decimal("20.4")
+
+
+def test_buy_does_not_emit_when_try_balance_is_zero() -> None:
+    strategy = BaselineMeanReversionStrategy()
+
+    intents = strategy.generate_intents(
+        _context(
+            mark_price="98",
+            anchor_price="100",
+            has_position=True,
+            try_balance="0",
+        )
     )
 
     assert intents == []
