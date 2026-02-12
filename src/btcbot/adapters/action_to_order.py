@@ -19,9 +19,11 @@ def build_deterministic_client_order_id(action: SizedAction) -> str:
 def build_exchange_rules(pair: PairInfo) -> ExchangeRules:
     price_precision = int(pair.denominator_scale)
     qty_precision = int(pair.numerator_scale)
+    tick_size = pair.tick_size if pair.tick_size is not None and pair.tick_size > 0 else None
+    step_size = pair.step_size if pair.step_size is not None and pair.step_size > 0 else None
     return ExchangeRules(
-        tick_size=Decimal("1").scaleb(-price_precision),
-        step_size=Decimal("1").scaleb(-qty_precision),
+        tick_size=tick_size or Decimal("1").scaleb(-price_precision),
+        step_size=step_size or Decimal("1").scaleb(-qty_precision),
         min_notional_try=Decimal(str(pair.min_total_amount or Decimal("0"))),
         price_precision=price_precision,
         qty_precision=qty_precision,
