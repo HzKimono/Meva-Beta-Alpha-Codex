@@ -88,7 +88,7 @@ class Settings(BaseSettings):
         alias="SYMBOLS",
     )
 
-    @field_validator("symbols", "universe_allow_symbols", "universe_deny_symbols", mode="before")
+    @field_validator("symbols", mode="before")
     def parse_symbols(cls, value: str | list[str]) -> list[str]:
         return cls._parse_symbol_list(
             value,
