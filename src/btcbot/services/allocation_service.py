@@ -4,13 +4,34 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
-from btcbot.domain.allocation import AllocationDecision, AllocationResult, SizedAction
+from btcbot.domain.allocation import (
+    AllocationDecision,
+    AllocationResult,
+    ReasonCode,
+    SizedAction,
+)
 from btcbot.domain.strategy_core import Intent, PositionSummary
 from btcbot.domain.symbols import canonical_symbol
+
+REASON_OK: ReasonCode = "ok"
+REASON_NOT_IMPLEMENTED: ReasonCode = "not_implemented_in_pr3"
+REASON_NO_MARK_PRICE: ReasonCode = "no_mark_price"
+REASON_CASH_TARGET: ReasonCode = "cash_target"
+REASON_MIN_NOTIONAL: ReasonCode = "min_notional"
+REASON_MAX_INTENT_CAP: ReasonCode = "max_intent_cap"
+REASON_CYCLE_CAP: ReasonCode = "cycle_notional_cap"
+REASON_MAX_POSITION_CAP: ReasonCode = "max_position_exposure_cap"
+REASON_NO_POSITION: ReasonCode = "no_position"
+REASON_POSITION_VALUE_CAP: ReasonCode = "position_value_cap"
 
 
 @dataclass(frozen=True)
 class AllocationKnobs:
+    """Allocation controls.
+
+    Any cap field set to Decimal("0") is treated as disabled.
+    """
+
     target_try_cash: Decimal = Decimal("300")
     min_order_notional_try: Decimal = Decimal("10")
     max_intent_notional_try: Decimal = Decimal("0")
@@ -43,214 +64,155 @@ class AllocationService:
         counters: dict[str, int] = {}
 
         remaining_cash = max(
-            normalized_balances.get("TRY", Decimal("0")) - knobs.target_try_cash, Decimal("0")
+            normalized_balances.get("TRY", Decimal("0")) - knobs.target_try_cash,
+            Decimal("0"),
         )
         remaining_cycle_notional = knobs.max_total_notional_try_per_cycle
 
-        for intent in intents:
+        for intent_index, intent in enumerate(intents):
             symbol = canonical_symbol(intent.symbol)
             requested_notional = intent.target_notional_try
 
             if intent.intent_type != "place":
-                decision = AllocationDecision(
-                    symbol=symbol,
-                    side=intent.side,
-                    intent_type=intent.intent_type,
-                    requested_notional_try=requested_notional,
-                    allocated_notional_try=None,
-                    allocated_qty=None,
-                    status="rejected",
-                    reason="not_implemented_in_pr3",
-                    strategy_id=intent.strategy_id,
+                _append_decision(
+                    decisions,
+                    counters,
+                    AllocationDecision(
+                        symbol=symbol,
+                        side=intent.side,
+                        intent_type=intent.intent_type,
+                        requested_notional_try=requested_notional,
+                        allocated_notional_try=None,
+                        allocated_qty=None,
+                        status="rejected",
+                        reason=REASON_NOT_IMPLEMENTED,
+                        strategy_id=intent.strategy_id,
+                        intent_index=intent_index,
+                    ),
                 )
-                decisions.append(decision)
-                _increment(counters, "rejected_not_implemented_in_pr3")
                 continue
 
             if requested_notional is None or requested_notional <= Decimal("0"):
-                decision = AllocationDecision(
-                    symbol=symbol,
-                    side=intent.side,
-                    intent_type=intent.intent_type,
-                    requested_notional_try=requested_notional,
-                    allocated_notional_try=None,
-                    allocated_qty=None,
-                    status="rejected",
-                    reason="invalid_notional",
-                    strategy_id=intent.strategy_id,
+                _append_decision(
+                    decisions,
+                    counters,
+                    AllocationDecision(
+                        symbol=symbol,
+                        side=intent.side,
+                        intent_type=intent.intent_type,
+                        requested_notional_try=requested_notional,
+                        allocated_notional_try=None,
+                        allocated_qty=None,
+                        status="rejected",
+                        reason=REASON_MIN_NOTIONAL,
+                        strategy_id=intent.strategy_id,
+                        intent_index=intent_index,
+                    ),
                 )
-                decisions.append(decision)
-                _increment(counters, "rejected_invalid_notional")
                 continue
-
-            mark_price = normalized_prices.get(symbol)
-            if mark_price is None or mark_price <= Decimal("0"):
-                decision = AllocationDecision(
-                    symbol=symbol,
-                    side=intent.side,
-                    intent_type=intent.intent_type,
-                    requested_notional_try=requested_notional,
-                    allocated_notional_try=None,
-                    allocated_qty=None,
-                    status="rejected",
-                    reason="no_mark_price",
-                    strategy_id=intent.strategy_id,
-                )
-                decisions.append(decision)
-                _increment(counters, "rejected_no_mark_price")
-                continue
-
-            max_intent_cap = knobs.max_intent_notional_try
-            capped_requested = requested_notional
-            if max_intent_cap > Decimal("0"):
-                capped_requested = min(capped_requested, max_intent_cap)
 
             if intent.side == "buy":
-                current_position_notional = Decimal("0")
+                mark_price = normalized_prices.get(symbol)
+                if mark_price is None or mark_price <= Decimal("0"):
+                    _append_decision(
+                        decisions,
+                        counters,
+                        AllocationDecision(
+                            symbol=symbol,
+                            side=intent.side,
+                            intent_type=intent.intent_type,
+                            requested_notional_try=requested_notional,
+                            allocated_notional_try=None,
+                            allocated_qty=None,
+                            status="rejected",
+                            reason=REASON_NO_MARK_PRICE,
+                            strategy_id=intent.strategy_id,
+                            intent_index=intent_index,
+                        ),
+                    )
+                    continue
+
                 position = normalized_positions.get(symbol)
+                current_position_notional = Decimal("0")
                 if position is not None and position.qty > Decimal("0"):
                     current_position_notional = position.qty * mark_price
 
-                allocated_notional = capped_requested
+                limits = {
+                    REASON_CASH_TARGET: remaining_cash,
+                    REASON_MAX_POSITION_CAP: _max_new_position_notional(
+                        current_position_notional,
+                        knobs.max_position_try_per_symbol,
+                    ),
+                    REASON_CYCLE_CAP: _apply_optional_cap(
+                        requested_notional,
+                        remaining_cycle_notional,
+                        knobs.max_total_notional_try_per_cycle,
+                    ),
+                    REASON_MAX_INTENT_CAP: _apply_optional_cap(
+                        requested_notional,
+                        requested_notional,
+                        knobs.max_intent_notional_try,
+                    ),
+                }
 
-                if knobs.max_total_notional_try_per_cycle > Decimal("0"):
-                    allocated_notional = min(
-                        allocated_notional, max(remaining_cycle_notional, Decimal("0"))
-                    )
-
-                if knobs.max_position_try_per_symbol > Decimal("0"):
-                    max_new_for_symbol = (
-                        knobs.max_position_try_per_symbol - current_position_notional
-                    )
-                    allocated_notional = min(
-                        allocated_notional, max(max_new_for_symbol, Decimal("0"))
-                    )
-
-                allocated_notional = min(allocated_notional, remaining_cash)
+                allocated_notional = min(requested_notional, *limits.values())
+                binding = _first_binding_reason(
+                    requested_notional=requested_notional,
+                    allocated_notional=allocated_notional,
+                    limits=limits,
+                    precedence=(
+                        REASON_CASH_TARGET,
+                        REASON_MAX_POSITION_CAP,
+                        REASON_CYCLE_CAP,
+                        REASON_MAX_INTENT_CAP,
+                    ),
+                )
 
                 if allocated_notional <= Decimal("0"):
-                    reason = "cash_target"
-                    if (
-                        knobs.max_position_try_per_symbol > Decimal("0")
-                        and current_position_notional >= knobs.max_position_try_per_symbol
-                    ):
-                        reason = "max_exposure"
-                    elif knobs.max_total_notional_try_per_cycle > Decimal(
-                        "0"
-                    ) and remaining_cycle_notional <= Decimal("0"):
-                        reason = "cycle_notional_cap"
-                    decision = AllocationDecision(
-                        symbol=symbol,
-                        side=intent.side,
-                        intent_type=intent.intent_type,
-                        requested_notional_try=requested_notional,
-                        allocated_notional_try=None,
-                        allocated_qty=None,
-                        status="rejected",
-                        reason=reason,
-                        strategy_id=intent.strategy_id,
+                    _append_decision(
+                        decisions,
+                        counters,
+                        AllocationDecision(
+                            symbol=symbol,
+                            side=intent.side,
+                            intent_type=intent.intent_type,
+                            requested_notional_try=requested_notional,
+                            allocated_notional_try=None,
+                            allocated_qty=None,
+                            status="rejected",
+                            reason=binding,
+                            strategy_id=intent.strategy_id,
+                            intent_index=intent_index,
+                        ),
                     )
-                    decisions.append(decision)
-                    _increment(counters, f"rejected_{reason}")
                     continue
 
                 if allocated_notional < knobs.min_order_notional_try:
-                    reason = "min_notional"
-                    if remaining_cash < knobs.min_order_notional_try:
-                        reason = "cash_target"
-                    decision = AllocationDecision(
-                        symbol=symbol,
-                        side=intent.side,
-                        intent_type=intent.intent_type,
-                        requested_notional_try=requested_notional,
-                        allocated_notional_try=None,
-                        allocated_qty=None,
-                        status="rejected",
-                        reason=reason,
-                        strategy_id=intent.strategy_id,
+                    reject_reason = (
+                        REASON_CASH_TARGET if binding == REASON_CASH_TARGET else REASON_MIN_NOTIONAL
                     )
-                    decisions.append(decision)
-                    _increment(counters, f"rejected_{reason}")
+                    _append_decision(
+                        decisions,
+                        counters,
+                        AllocationDecision(
+                            symbol=symbol,
+                            side=intent.side,
+                            intent_type=intent.intent_type,
+                            requested_notional_try=requested_notional,
+                            allocated_notional_try=None,
+                            allocated_qty=None,
+                            status="rejected",
+                            reason=reject_reason,
+                            strategy_id=intent.strategy_id,
+                            intent_index=intent_index,
+                        ),
+                    )
                     continue
 
-                status = "accepted" if allocated_notional == requested_notional else "scaled"
+                decision_reason = REASON_OK if allocated_notional == requested_notional else binding
                 qty = allocated_notional / mark_price
-                decisions.append(
-                    AllocationDecision(
-                        symbol=symbol,
-                        side=intent.side,
-                        intent_type=intent.intent_type,
-                        requested_notional_try=requested_notional,
-                        allocated_notional_try=allocated_notional,
-                        allocated_qty=qty,
-                        status=status,
-                        reason="ok",
-                        strategy_id=intent.strategy_id,
-                    )
-                )
-                actions.append(
-                    SizedAction(
-                        symbol=symbol,
-                        side=intent.side,
-                        notional_try=allocated_notional,
-                        qty=qty,
-                        rationale=intent.rationale,
-                        strategy_id=intent.strategy_id,
-                    )
-                )
-                _increment(counters, status)
-                remaining_cash -= allocated_notional
-                if knobs.max_total_notional_try_per_cycle > Decimal("0"):
-                    remaining_cycle_notional -= allocated_notional
-                continue
-
-            position = normalized_positions.get(symbol)
-            if position is None or position.qty <= Decimal("0"):
-                decisions.append(
-                    AllocationDecision(
-                        symbol=symbol,
-                        side=intent.side,
-                        intent_type=intent.intent_type,
-                        requested_notional_try=requested_notional,
-                        allocated_notional_try=None,
-                        allocated_qty=None,
-                        status="rejected",
-                        reason="no_position",
-                        strategy_id=intent.strategy_id,
-                    )
-                )
-                _increment(counters, "rejected_no_position")
-                continue
-
-            position_value = position.qty * mark_price
-            allocated_notional = min(capped_requested, position_value)
-
-            if knobs.max_total_notional_try_per_cycle > Decimal("0"):
-                allocated_notional = min(
-                    allocated_notional, max(remaining_cycle_notional, Decimal("0"))
-                )
-
-            if allocated_notional < knobs.min_order_notional_try:
-                decisions.append(
-                    AllocationDecision(
-                        symbol=symbol,
-                        side=intent.side,
-                        intent_type=intent.intent_type,
-                        requested_notional_try=requested_notional,
-                        allocated_notional_try=None,
-                        allocated_qty=None,
-                        status="rejected",
-                        reason="min_notional",
-                        strategy_id=intent.strategy_id,
-                    )
-                )
-                _increment(counters, "rejected_min_notional")
-                continue
-
-            qty = allocated_notional / mark_price
-            status = "accepted" if allocated_notional == requested_notional else "scaled"
-            decisions.append(
-                AllocationDecision(
+                status = "accepted" if decision_reason == REASON_OK else "scaled"
+                decision = AllocationDecision(
                     symbol=symbol,
                     side=intent.side,
                     intent_type=intent.intent_type,
@@ -258,25 +220,189 @@ class AllocationService:
                     allocated_notional_try=allocated_notional,
                     allocated_qty=qty,
                     status=status,
-                    reason="ok",
+                    reason=decision_reason,
                     strategy_id=intent.strategy_id,
+                    intent_index=intent_index,
                 )
+                _append_decision(decisions, counters, decision)
+                actions.append(
+                    SizedAction(
+                        symbol=symbol,
+                        side=intent.side,
+                        notional_try=allocated_notional,
+                        qty=qty,
+                        rationale=f"allocation:{decision.reason}",
+                        strategy_id=intent.strategy_id,
+                        intent_index=intent_index,
+                    )
+                )
+                remaining_cash -= allocated_notional
+                if knobs.max_total_notional_try_per_cycle > Decimal("0"):
+                    remaining_cycle_notional -= allocated_notional
+                continue
+
+            position = normalized_positions.get(symbol)
+            if position is None or position.qty <= Decimal("0"):
+                _append_decision(
+                    decisions,
+                    counters,
+                    AllocationDecision(
+                        symbol=symbol,
+                        side=intent.side,
+                        intent_type=intent.intent_type,
+                        requested_notional_try=requested_notional,
+                        allocated_notional_try=None,
+                        allocated_qty=None,
+                        status="rejected",
+                        reason=REASON_NO_POSITION,
+                        strategy_id=intent.strategy_id,
+                        intent_index=intent_index,
+                    ),
+                )
+                continue
+
+            mark_price = normalized_prices.get(symbol)
+            if mark_price is None or mark_price <= Decimal("0"):
+                _append_decision(
+                    decisions,
+                    counters,
+                    AllocationDecision(
+                        symbol=symbol,
+                        side=intent.side,
+                        intent_type=intent.intent_type,
+                        requested_notional_try=requested_notional,
+                        allocated_notional_try=None,
+                        allocated_qty=None,
+                        status="rejected",
+                        reason=REASON_NO_MARK_PRICE,
+                        strategy_id=intent.strategy_id,
+                        intent_index=intent_index,
+                    ),
+                )
+                continue
+
+            position_value = position.qty * mark_price
+            limits = {
+                REASON_POSITION_VALUE_CAP: position_value,
+                REASON_CYCLE_CAP: _apply_optional_cap(
+                    requested_notional,
+                    remaining_cycle_notional,
+                    knobs.max_total_notional_try_per_cycle,
+                ),
+                REASON_MAX_INTENT_CAP: _apply_optional_cap(
+                    requested_notional,
+                    requested_notional,
+                    knobs.max_intent_notional_try,
+                ),
+            }
+            allocated_notional = min(requested_notional, *limits.values())
+            binding = _first_binding_reason(
+                requested_notional=requested_notional,
+                allocated_notional=allocated_notional,
+                limits=limits,
+                precedence=(
+                    REASON_POSITION_VALUE_CAP,
+                    REASON_CYCLE_CAP,
+                    REASON_MAX_INTENT_CAP,
+                ),
             )
+
+            if allocated_notional < knobs.min_order_notional_try:
+                _append_decision(
+                    decisions,
+                    counters,
+                    AllocationDecision(
+                        symbol=symbol,
+                        side=intent.side,
+                        intent_type=intent.intent_type,
+                        requested_notional_try=requested_notional,
+                        allocated_notional_try=None,
+                        allocated_qty=None,
+                        status="rejected",
+                        reason=REASON_MIN_NOTIONAL,
+                        strategy_id=intent.strategy_id,
+                        intent_index=intent_index,
+                    ),
+                )
+                continue
+
+            decision_reason = REASON_OK if allocated_notional == requested_notional else binding
+            qty = allocated_notional / mark_price
+            status = "accepted" if decision_reason == REASON_OK else "scaled"
+            decision = AllocationDecision(
+                symbol=symbol,
+                side=intent.side,
+                intent_type=intent.intent_type,
+                requested_notional_try=requested_notional,
+                allocated_notional_try=allocated_notional,
+                allocated_qty=qty,
+                status=status,
+                reason=decision_reason,
+                strategy_id=intent.strategy_id,
+                intent_index=intent_index,
+            )
+            _append_decision(decisions, counters, decision)
             actions.append(
                 SizedAction(
                     symbol=symbol,
                     side=intent.side,
                     notional_try=allocated_notional,
                     qty=qty,
-                    rationale=intent.rationale,
+                    rationale=f"allocation:{decision.reason}",
                     strategy_id=intent.strategy_id,
+                    intent_index=intent_index,
                 )
             )
-            _increment(counters, status)
             if knobs.max_total_notional_try_per_cycle > Decimal("0"):
                 remaining_cycle_notional -= allocated_notional
 
-        return AllocationResult(actions=actions, decisions=decisions, counters=counters)
+        return AllocationResult(
+            actions=tuple(actions), decisions=tuple(decisions), counters=counters
+        )
+
+
+def _apply_optional_cap(
+    requested_notional: Decimal,
+    cap_value: Decimal,
+    configured_cap: Decimal,
+) -> Decimal:
+    if configured_cap <= Decimal("0"):
+        return requested_notional
+    return max(cap_value, Decimal("0"))
+
+
+def _max_new_position_notional(
+    current_position_notional: Decimal,
+    max_position_try_per_symbol: Decimal,
+) -> Decimal:
+    if max_position_try_per_symbol <= Decimal("0"):
+        return Decimal("Infinity")
+    return max(max_position_try_per_symbol - current_position_notional, Decimal("0"))
+
+
+def _first_binding_reason(
+    *,
+    requested_notional: Decimal,
+    allocated_notional: Decimal,
+    limits: Mapping[ReasonCode, Decimal],
+    precedence: tuple[ReasonCode, ...],
+) -> ReasonCode:
+    if allocated_notional >= requested_notional:
+        return REASON_OK
+    for reason in precedence:
+        if limits[reason] == allocated_notional:
+            return reason
+    return precedence[-1]
+
+
+def _append_decision(
+    decisions: list[AllocationDecision],
+    counters: dict[str, int],
+    decision: AllocationDecision,
+) -> None:
+    decisions.append(decision)
+    _increment(counters, decision.status)
+    _increment(counters, f"{decision.status}_{decision.reason}")
 
 
 def _increment(counters: dict[str, int], key: str) -> None:
