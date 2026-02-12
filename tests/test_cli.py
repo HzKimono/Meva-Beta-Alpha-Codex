@@ -655,10 +655,10 @@ def test_stage3_acceptance_run_cycle_dry_run_logs_cycle_completed(monkeypatch, c
 def test_run_cycle_stage4_dry_run_writes_stage4_tables(monkeypatch, tmp_path) -> None:
     dry_client = DryRunExchangeClient(
         balances=[Balance(asset="TRY", free=1000.0)],
-        orderbooks={"BTC_TRY": (1000.0, 1001.0)},
+        orderbooks={"BTCTRY": (1000.0, 1001.0)},
         exchange_info=[
             PairInfo(
-                pairSymbol="BTC_TRY",
+                pairSymbol="BTCTRY",
                 numeratorScale=6,
                 denominatorScale=2,
                 minTotalAmount=Decimal("10"),
@@ -671,7 +671,7 @@ def test_run_cycle_stage4_dry_run_writes_stage4_tables(monkeypatch, tmp_path) ->
         TradeFill(
             fill_id="seed-fill-1",
             order_id="seed-order-1",
-            symbol="BTC_TRY",
+            symbol="BTCTRY",
             side=OrderSide.BUY,
             price=Decimal("1000"),
             qty=Decimal("0.01"),
