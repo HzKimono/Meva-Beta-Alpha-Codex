@@ -9,12 +9,12 @@ from btcbot.config import Settings
 
 def test_parse_symbols_json_list() -> None:
     settings = Settings(SYMBOLS='["BTC_TRY","ETH_TRY","SOL_TRY"]')
-    assert settings.symbols == ["BTC_TRY", "ETH_TRY", "SOL_TRY"]
+    assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
 
 
 def test_parse_symbols_csv() -> None:
     settings = Settings(SYMBOLS="BTC_TRY, ETH_TRY ,SOL_TRY")
-    assert settings.symbols == ["BTC_TRY", "ETH_TRY", "SOL_TRY"]
+    assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
 
 
 def test_loads_values_from_env_file(monkeypatch, tmp_path: Path) -> None:
@@ -38,7 +38,7 @@ def test_loads_values_from_env_file(monkeypatch, tmp_path: Path) -> None:
     assert settings.kill_switch is False
     assert settings.dry_run is True
     assert settings.target_try == 345.0
-    assert settings.symbols == ["BTC_TRY", "ETH_TRY"]
+    assert settings.symbols == ["BTCTRY", "ETHTRY"]
 
 
 @pytest.mark.parametrize(
@@ -58,7 +58,7 @@ def test_invalid_settings_raise(field: str, value: int) -> None:
 
 def test_parse_symbols_normalizes_case_and_quotes() -> None:
     settings = Settings(SYMBOLS='["btc_try", "Eth_Try", "SOL_TRY"]')
-    assert settings.symbols == ["BTC_TRY", "ETH_TRY", "SOL_TRY"]
+    assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
 
 
 @pytest.mark.parametrize(
@@ -98,4 +98,4 @@ def test_settings_defaults_are_prod_safe() -> None:
 def test_parse_symbols_csv_handles_whitespace_and_case() -> None:
     settings = Settings(SYMBOLS=" btc_try , Eth_Try,  sol_try ")
 
-    assert settings.symbols == ["BTC_TRY", "ETH_TRY", "SOL_TRY"]
+    assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
