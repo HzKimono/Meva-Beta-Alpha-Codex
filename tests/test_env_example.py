@@ -66,7 +66,7 @@ def test_env_example_values_load_into_settings(monkeypatch, tmp_path: Path) -> N
     assert settings.live_trading_ack == ""
     assert settings.offset_bps == 20
     assert settings.ttl_seconds == 120
-    assert settings.symbols == ["BTC_TRY", "ETH_TRY", "SOL_TRY"]
+    assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
     assert settings.state_db_path == "btcbot_state.db"
     assert settings.dry_run_try_balance == 1000
     assert settings.min_order_notional_try == 10

@@ -84,21 +84,39 @@ class Settings(BaseSettings):
     universe_require_try_quote: bool = Field(default=True, alias="UNIVERSE_REQUIRE_TRY_QUOTE")
 
     symbols: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["BTC_TRY", "ETH_TRY", "SOL_TRY"],
+        default_factory=lambda: ["BTCTRY", "ETHTRY", "SOLTRY"],
         alias="SYMBOLS",
     )
 
     @field_validator("symbols", "universe_allow_symbols", "universe_deny_symbols", mode="before")
     def parse_symbols(cls, value: str | list[str]) -> list[str]:
+        return cls._parse_symbol_list(
+            value,
+            invalid_json_message="SYMBOLS JSON value must be a list",
+        )
+
+    @field_validator("universe_allow_symbols", "universe_deny_symbols", mode="before")
+    def parse_universe_symbols(cls, value: str | list[str]) -> list[str]:
+        return cls._parse_symbol_list(
+            value,
+            invalid_json_message="UNIVERSE symbols JSON value must be a list",
+        )
+
+    @classmethod
+    def _parse_symbol_list(
+        cls,
+        value: str | list[str],
+        *,
+        invalid_json_message: str,
+    ) -> list[str]:
         if isinstance(value, str):
             raw = value.strip()
             if not raw:
                 return []
-            if raw.startswith("["):
+            if raw.startswith("[") or raw.startswith("{"):
                 parsed = json.loads(raw)
                 if not isinstance(parsed, list):
-                    msg = "SYMBOLS JSON value must be a list"
-                    raise ValueError(msg)
+                    raise ValueError(invalid_json_message)
                 return [
                     cls._normalize_legacy_symbol(item)
                     for item in parsed
@@ -145,10 +163,13 @@ class Settings(BaseSettings):
         ]
 
     @staticmethod
-    def _normalize_legacy_symbol(value: object) -> str:
+    def _normalize_symbol(value: object) -> str:
         if value is None:
             return ""
-        return str(value).strip().strip("[]").strip('"').strip("'").upper()
+        cleaned = str(value).strip().strip("[]").strip('"').strip("'").strip()
+        if not cleaned:
+            return ""
+        return canonical_symbol(cleaned)
 
     @staticmethod
     def _normalize_universe_symbol(value: object) -> str:

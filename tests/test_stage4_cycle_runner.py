@@ -47,7 +47,7 @@ class FakeExchange:
     def get_exchange_info(self) -> list[PairInfo]:
         return [
             PairInfo(
-                pairSymbol="BTC_TRY",
+                pairSymbol="BTCTRY",
                 numeratorScale=6,
                 denominatorScale=2,
                 minTotalAmount=Decimal("10"),
@@ -126,7 +126,7 @@ def test_runner_per_symbol_failure_is_non_fatal(monkeypatch, tmp_path) -> None:
     exchange = FakeExchange()
 
     def flaky_open_orders(symbol: str):
-        if symbol == "ETH_TRY":
+        if symbol == "ETHTRY":
             raise RuntimeError("boom")
         return []
 
