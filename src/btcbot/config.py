@@ -88,7 +88,7 @@ class Settings(BaseSettings):
         alias="SYMBOLS",
     )
 
-    @field_validator("symbols", mode="before")
+    @field_validator("symbols", "universe_allow_symbols", "universe_deny_symbols", mode="before")
     def parse_symbols(cls, value: str | list[str]) -> list[str]:
         return cls._parse_symbol_list(
             value,
@@ -118,18 +118,61 @@ class Settings(BaseSettings):
                 if not isinstance(parsed, list):
                     raise ValueError(invalid_json_message)
                 return [
-                    cls._normalize_symbol(item) for item in parsed if cls._normalize_symbol(item)
+                    cls._normalize_legacy_symbol(item)
+                    for item in parsed
+                    if cls._normalize_legacy_symbol(item)
                 ]
             return [
-                cls._normalize_symbol(item)
+                cls._normalize_legacy_symbol(item)
                 for item in raw.split(",")
-                if cls._normalize_symbol(item)
+                if cls._normalize_legacy_symbol(item)
             ]
 
-        return [cls._normalize_symbol(item) for item in value if cls._normalize_symbol(item)]
+        return [
+            cls._normalize_legacy_symbol(item)
+            for item in value
+            if cls._normalize_legacy_symbol(item)
+        ]
+
+    @field_validator("universe_allow_symbols", "universe_deny_symbols", mode="before")
+    def parse_universe_symbols(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    msg = "UNIVERSE symbols JSON value must be a list"
+                    raise ValueError(msg)
+                return [
+                    cls._normalize_universe_symbol(item)
+                    for item in parsed
+                    if cls._normalize_universe_symbol(item)
+                ]
+            return [
+                cls._normalize_universe_symbol(item)
+                for item in raw.split(",")
+                if cls._normalize_universe_symbol(item)
+            ]
+
+        return [
+            cls._normalize_universe_symbol(item)
+            for item in value
+            if cls._normalize_universe_symbol(item)
+        ]
 
     @staticmethod
     def _normalize_symbol(value: object) -> str:
+        if value is None:
+            return ""
+        cleaned = str(value).strip().strip("[]").strip('"').strip("'").strip()
+        if not cleaned:
+            return ""
+        return canonical_symbol(cleaned)
+
+    @staticmethod
+    def _normalize_universe_symbol(value: object) -> str:
         if value is None:
             return ""
         cleaned = str(value).strip().strip("[]").strip('"').strip("'").strip()
