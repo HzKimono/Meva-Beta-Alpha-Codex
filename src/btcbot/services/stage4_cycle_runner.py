@@ -8,9 +8,11 @@ from uuid import uuid4
 
 from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
-from btcbot.domain.models import normalize_symbol
-from btcbot.domain.stage4 import Order
+from btcbot.domain.models import PairInfo, normalize_symbol
+from btcbot.domain.stage4 import Order, Position
+from btcbot.domain.strategy_core import PositionSummary
 from btcbot.services.accounting_service_stage4 import AccountingService
+from btcbot.services.decision_pipeline_service import DecisionPipelineService
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
@@ -83,6 +85,7 @@ class Stage4CycleRunner:
                 settings=settings,
                 rules_service=rules_service,
             )
+            decision_pipeline = DecisionPipelineService(settings=settings)
 
             mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, settings.symbols)
             try_cash = self._resolve_try_cash(
@@ -146,7 +149,29 @@ class Stage4CycleRunner:
             }
 
             current_open_orders = state_store.list_stage4_open_orders()
-            intents = self._build_intents(
+            positions = state_store.list_stage4_positions()
+            positions_by_symbol = {self.norm(position.symbol): position for position in positions}
+            pair_info = self._resolve_pair_info(exchange)
+
+            decision_report = decision_pipeline.run_cycle(
+                cycle_id=cycle_id,
+                balances={"TRY": try_cash},
+                positions={
+                    symbol: self._to_position_summary(position)
+                    for symbol, position in positions_by_symbol.items()
+                },
+                mark_prices=mark_prices,
+                open_orders=current_open_orders,
+                pair_info=pair_info,
+                bootstrap_enabled=settings.stage4_bootstrap_intents,
+                live_mode=live_mode,
+            )
+            pipeline_orders = [
+                order
+                for order in decision_report.order_requests
+                if self.norm(order.symbol) not in failed_symbols
+            ]
+            intents = pipeline_orders or self._build_intents(
                 cycle_id=cycle_id,
                 symbols=[
                     symbol for symbol in settings.symbols if self.norm(symbol) not in failed_symbols
@@ -162,8 +187,6 @@ class Stage4CycleRunner:
                 intents, current_open_orders, mid_price=mid_price
             )
 
-            positions = state_store.list_stage4_positions()
-            positions_by_symbol = {self.norm(position.symbol): position for position in positions}
             current_position_notional = Decimal("0")
             for position in positions:
                 mark = mark_prices.get(self.norm(position.symbol), position.avg_cost_try)
@@ -189,6 +212,15 @@ class Stage4CycleRunner:
                 f"risk:{item.action.client_order_id or 'missing'}:{item.reason}"
                 for item in risk_decisions
             ]
+            decisions.extend(
+                f"allocation:{item.status}:{item.reason}:{item.symbol}:{item.intent_index}"
+                for item in decision_report.allocation_decisions
+            )
+            decisions.extend(
+                f"action:{item.symbol}:{item.side}:{item.qty}:{item.notional_try}:"
+                f"{item.strategy_id}:{item.intent_index}"
+                for item in decision_report.allocation_actions
+            )
             risk_decisions_from_audit = [
                 entry for entry in decisions if isinstance(entry, str) and entry.startswith("risk:")
             ]
@@ -213,6 +245,10 @@ class Stage4CycleRunner:
                 "cursor_before": sum(1 for value in cursor_before.values() if value is not None),
                 "cursor_after": sum(1 for value in cursor_after.values() if value is not None),
                 "planned_actions": len(lifecycle_plan.actions),
+                "pipeline_intents": len(decision_report.intents),
+                "pipeline_order_requests": len(decision_report.order_requests),
+                "pipeline_mapped_orders": decision_report.mapped_orders_count,
+                "pipeline_dropped_actions": decision_report.dropped_actions_count,
                 "accepted_actions": len(accepted_actions),
                 "executed": execution_report.executed_total,
                 "submitted": execution_report.submitted,
@@ -224,6 +260,15 @@ class Stage4CycleRunner:
                 "fills_failures": fills_failures,
                 "mark_price_failures": len(mark_price_errors),
             }
+            counts.update(
+                {f"alloc_{key}": value for key, value in dict(decision_report.counters).items()}
+            )
+            counts.update(
+                {
+                    f"pipeline_drop_{key}": value
+                    for key, value in dict(decision_report.dropped_reasons).items()
+                }
+            )
             state_store.record_cycle_audit(
                 cycle_id=cycle_id, counts=counts, decisions=decisions, envelope=envelope
             )
@@ -322,6 +367,23 @@ class Stage4CycleRunner:
 
     def _fills_cursor_key(self, symbol: str) -> str:
         return f"fills_cursor:{self.norm(symbol)}"
+
+    def _to_position_summary(self, position: Position) -> PositionSummary:
+        return PositionSummary(
+            symbol=position.symbol,
+            qty=position.qty,
+            avg_cost=position.avg_cost_try,
+        )
+
+    def _resolve_pair_info(self, exchange: object) -> list[PairInfo] | None:
+        base = getattr(exchange, "client", exchange)
+        get_exchange_info = getattr(base, "get_exchange_info", None)
+        if not callable(get_exchange_info):
+            return None
+        try:
+            return list(get_exchange_info())
+        except Exception:  # noqa: BLE001
+            return None
 
     def _build_intents(
         self,
