@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+import json
+import logging
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from btcbot.domain.intent import Intent
+from btcbot.domain.models import OrderSide, PairInfo, SymbolRules
+from btcbot.logging_utils import JsonFormatter
+from btcbot.risk.exchange_rules import ExchangeRules, MarketDataExchangeRulesProvider
+from btcbot.risk.policy import RiskPolicy, RiskPolicyContext
+from btcbot.services.market_data_service import MarketDataService
+
+
+class StaticRules:
+    def get_rules(self, symbol: str) -> ExchangeRules:
+        del symbol
+        return ExchangeRules(
+            min_notional=Decimal("10"),
+            price_tick=Decimal("0.1"),
+            qty_step=Decimal("0.01"),
+        )
+
+
+class FixedClock:
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
+
+
+class CountingMarketDataService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_symbol_rules(self, symbol: str) -> SymbolRules:
+        self.calls += 1
+        return SymbolRules(
+            pair_symbol=symbol,
+            price_scale=2,
+            quantity_scale=8,
+            min_total=Decimal("10"),
+            tick_size=Decimal("0.01"),
+            step_size=Decimal("0.00000001"),
+        )
+
+
+class FailingMarketDataService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_symbol_rules(self, symbol: str):
+        del symbol
+        self.calls += 1
+        raise RuntimeError("rules unavailable")
+
+
+class FakeExchangeWithRules:
+    def get_exchange_info(self) -> list[PairInfo]:
+        return [
+            PairInfo(
+                pairSymbol="BTC_TRY",
+                numeratorScale=8,
+                denominatorScale=2,
+                minTotalAmount=Decimal("10"),
+                tickSize=Decimal("0.1"),
+                stepSize=Decimal("0.0001"),
+            ),
+            PairInfo(
+                pairSymbol="ETH_TRY",
+                numeratorScale=8,
+                denominatorScale=2,
+                minTotalAmount=Decimal("20"),
+                tickSize=Decimal("0.01"),
+                stepSize=Decimal("0.001"),
+            ),
+        ]
+
+
+def _intent(reason: str = "test") -> Intent:
+    return Intent.create(
+        cycle_id="c1",
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        qty=Decimal("0.2"),
+        limit_price=Decimal("100"),
+        reason=reason,
+    )
+
+
+def test_policy_quantizes_and_filters() -> None:
+    clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+    policy = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=2,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=60,
+        notional_cap_try_per_cycle=Decimal("50"),
+        now_provider=clock.now,
+    )
+    intents = [
+        Intent.create(
+            cycle_id="c1",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            qty=Decimal("0.123"),
+            limit_price=Decimal("100.17"),
+            reason="test",
+        ),
+        Intent.create(
+            cycle_id="c1",
+            symbol="ETH_TRY",
+            side=OrderSide.BUY,
+            qty=Decimal("0.05"),
+            limit_price=Decimal("100"),
+            reason="too_small",
+        ),
+    ]
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={"ETHTRY": 1},
+        last_intent_ts_by_symbol_side={
+            ("BTCTRY", "buy"): clock.now() - timedelta(seconds=120),
+        },
+        mark_prices={},
+    )
+
+    approved = policy.evaluate(context, intents)
+    assert len(approved) == 1
+    assert approved[0].limit_price == Decimal("100.1")
+    assert approved[0].qty == Decimal("0.12")
+
+
+def test_policy_cooldown_allows_when_zero() -> None:
+    clock = FixedClock(datetime(2025, 1, 1, 12, 0, tzinfo=UTC))
+    policy = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=1,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=0,
+        notional_cap_try_per_cycle=Decimal("100"),
+        now_provider=clock.now,
+    )
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={("BTCTRY", "buy"): clock.now() - timedelta(seconds=1)},
+        mark_prices={},
+    )
+
+    approved = policy.evaluate(context, [_intent("cooldown_zero")])
+    assert len(approved) == 1
+
+
+def test_policy_blocks_when_within_positive_cooldown_window() -> None:
+    clock = FixedClock(datetime(2025, 1, 1, 12, 0, tzinfo=UTC))
+    policy = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=1,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=60,
+        notional_cap_try_per_cycle=Decimal("100"),
+        now_provider=clock.now,
+    )
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={("BTCTRY", "buy"): clock.now() - timedelta(seconds=10)},
+        mark_prices={},
+    )
+
+    assert policy.evaluate(context, [_intent("cooldown_block")]) == []
+
+
+def test_policy_cooldown_is_deterministic_with_injected_clock() -> None:
+    frozen_now = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    policy_a = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=1,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=60,
+        notional_cap_try_per_cycle=Decimal("100"),
+        now_provider=lambda: frozen_now,
+    )
+    policy_b = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=1,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=60,
+        notional_cap_try_per_cycle=Decimal("100"),
+        now_provider=lambda: frozen_now,
+    )
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={("BTCTRY", "buy"): frozen_now - timedelta(seconds=10)},
+        mark_prices={},
+    )
+
+    assert policy_a.evaluate(context, [_intent("deterministic")]) == []
+    assert policy_b.evaluate(context, [_intent("deterministic")]) == []
+
+
+def test_market_data_rules_provider_uses_ttl_cache() -> None:
+    clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+    service = CountingMarketDataService()
+    provider = MarketDataExchangeRulesProvider(
+        service,
+        cache_ttl_seconds=600,
+        now_provider=clock.now,
+    )
+
+    first = provider.get_rules("BTC_TRY")
+    second = provider.get_rules("BTCTRY")
+
+    assert first == second
+    assert service.calls == 1
+
+
+def test_market_data_rules_provider_returns_defaults_on_error() -> None:
+    clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+    service = FailingMarketDataService()
+    provider = MarketDataExchangeRulesProvider(
+        service,
+        cache_ttl_seconds=600,
+        now_provider=clock.now,
+    )
+
+    rules = provider.get_rules("BTC_TRY")
+
+    assert rules.min_notional == Decimal("10")
+    assert rules.price_tick == Decimal("0.01")
+    assert rules.qty_step == Decimal("0.00000001")
+    assert service.calls == 1
+
+
+def test_policy_allows_evaluation_when_rules_unavailable() -> None:
+    clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+    policy = RiskPolicy(
+        rules_provider=MarketDataExchangeRulesProvider(
+            FailingMarketDataService(),
+            now_provider=clock.now,
+        ),
+        max_orders_per_cycle=1,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=60,
+        notional_cap_try_per_cycle=Decimal("100"),
+        now_provider=clock.now,
+    )
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={},
+        mark_prices={},
+    )
+
+    approved = policy.evaluate(context, [_intent("fallback_rules")])
+
+    assert len(approved) == 1
+
+
+def test_market_data_rules_provider_logs_traceback_on_fallback(caplog) -> None:
+    clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+    provider = MarketDataExchangeRulesProvider(FailingMarketDataService(), now_provider=clock.now)
+
+    caplog.set_level(logging.WARNING, logger="btcbot.risk.exchange_rules")
+    provider.get_rules("BTC_TRY")
+
+    assert caplog.records
+    payload = json.loads(JsonFormatter().format(caplog.records[-1]))
+    assert payload["message"] == "Exchange rules unavailable; using defaults"
+    assert payload["error_type"] == "RuntimeError"
+    assert "traceback" in payload
+    assert "RuntimeError: rules unavailable" in payload["traceback"]
+
+
+def test_market_data_rules_provider_returns_non_default_rules_from_exchange_info() -> None:
+    market_data_service = MarketDataService(exchange=FakeExchangeWithRules())
+    provider = MarketDataExchangeRulesProvider(market_data_service)
+
+    btc_rules = provider.get_rules("BTCTRY")
+    eth_rules = provider.get_rules("ETHTRY")
+
+    assert btc_rules.min_notional == Decimal("10")
+    assert btc_rules.price_tick == Decimal("0.1")
+    assert btc_rules.qty_step == Decimal("0.0001")
+    assert eth_rules.min_notional == Decimal("20")
+    assert eth_rules.price_tick == Decimal("0.01")
+    assert eth_rules.qty_step == Decimal("0.001")
+
+
+def test_market_data_rules_provider_uses_market_rules_without_fallback_warning(caplog) -> None:
+    market_data_service = MarketDataService(exchange=FakeExchangeWithRules())
+    provider = MarketDataExchangeRulesProvider(market_data_service)
+
+    caplog.set_level(logging.WARNING, logger="btcbot.risk.exchange_rules")
+    rules = provider.get_rules("BTCTRY")
+
+    assert rules.min_notional == Decimal("10")
+    assert not any(
+        record.getMessage() == "Exchange rules unavailable; using defaults"
+        for record in caplog.records
+    )
+
+
+def test_exchange_rules_provider_resolves_underscore_and_canonical_same() -> None:
+    market_data_service = MarketDataService(exchange=FakeExchangeWithRules())
+    provider = MarketDataExchangeRulesProvider(market_data_service)
+
+    canonical = provider.get_rules("BTCTRY")
+    underscore = provider.get_rules("BTC_TRY")
+
+    assert canonical == underscore

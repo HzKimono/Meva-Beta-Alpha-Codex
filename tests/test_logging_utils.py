@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+import json
+import logging
+import sys
+
+from btcbot.logging_utils import JsonFormatter, setup_logging
+
+
+def test_json_formatter_includes_exception_details() -> None:
+    formatter = JsonFormatter()
+
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        record = logging.LogRecord(
+            name="btcbot.test",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="Cycle failed",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+        rendered = formatter.format(record)
+
+    payload = json.loads(rendered)
+    assert payload["message"] == "Cycle failed"
+    assert payload["error_type"] == "ValueError"
+    assert payload["error_message"] == "boom"
+    assert "ValueError: boom" in payload["traceback"]
+
+
+def test_setup_logging_uses_log_level_env(monkeypatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+    setup_logging()
+
+    assert logging.getLogger().level == logging.DEBUG
+
+
+def test_setup_logging_defaults_http_loggers_for_info() -> None:
+    setup_logging("INFO")
+
+    assert logging.getLogger("httpx").level == logging.INFO
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+def test_setup_logging_debug_enables_http_debug() -> None:
+    setup_logging("DEBUG")
+
+    assert logging.getLogger("httpx").level == logging.DEBUG
+    assert logging.getLogger("httpcore").level == logging.DEBUG
