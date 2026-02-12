@@ -1,0 +1,1125 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from btcbot.domain.accounting import Position, TradeFill
+from btcbot.domain.intent import Intent
+from btcbot.domain.models import Order, OrderStatus, normalize_symbol
+from btcbot.domain.stage4 import Fill as Stage4Fill
+from btcbot.domain.stage4 import PnLSnapshot
+from btcbot.domain.stage4 import Position as Stage4Position
+
+
+@dataclass
+class StoredOrder:
+    order_id: str
+    symbol: str
+    client_order_id: str | None
+    side: str
+    price: Decimal
+    quantity: Decimal
+    status: OrderStatus
+    last_seen_at: int | None
+    reconciled: bool
+    exchange_status_raw: str | None
+
+
+@dataclass
+class StoredIntentTs:
+    symbol: str
+    side: str
+    created_at: datetime
+
+
+class StateStore:
+    def __init__(self, db_path: str = "btcbot_state.db") -> None:
+        self.db_path = db_path
+        self._init_db()
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cycle_id TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    dedupe_key TEXT,
+                    created_at_epoch INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_actions_type_hash_created
+                ON actions(action_type, payload_hash, created_at_epoch)
+                """
+            )
+            self._ensure_actions_metadata_columns(conn)
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_dedupe_key_unique
+                ON actions(dedupe_key)
+                WHERE dedupe_key IS NOT NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    qty TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self._ensure_orders_columns(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fills (
+                    fill_id TEXT PRIMARY KEY,
+                    order_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    qty TEXT NOT NULL,
+                    fee TEXT NOT NULL,
+                    fee_currency TEXT NOT NULL,
+                    ts TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS positions (
+                    symbol TEXT PRIMARY KEY,
+                    qty TEXT NOT NULL,
+                    avg_cost TEXT NOT NULL,
+                    realized_pnl TEXT NOT NULL,
+                    unrealized_pnl TEXT NOT NULL,
+                    fees_paid TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS intents (
+                    intent_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_intents_idempotency_key
+                ON intents(idempotency_key)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            self._ensure_stage4_schema(conn)
+
+    def _ensure_stage4_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage4_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                client_order_id TEXT,
+                exchange_order_id TEXT,
+                side TEXT NOT NULL,
+                price TEXT NOT NULL,
+                qty TEXT NOT NULL,
+                status TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'dry_run',
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_stage4_orders_client_order_id_unique
+            ON stage4_orders(client_order_id)
+            WHERE client_order_id IS NOT NULL
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_stage4_orders_status ON stage4_orders(status)")
+        order_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage4_orders)")
+        }
+        if "mode" not in order_columns:
+            conn.execute(
+                "ALTER TABLE stage4_orders ADD COLUMN mode TEXT NOT NULL DEFAULT 'dry_run'"
+            )
+        if "last_error" not in order_columns:
+            conn.execute("ALTER TABLE stage4_orders ADD COLUMN last_error TEXT")
+        if "exchange_order_id" not in order_columns:
+            conn.execute("ALTER TABLE stage4_orders ADD COLUMN exchange_order_id TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage4_fills (
+                fill_id TEXT PRIMARY KEY,
+                order_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price TEXT NOT NULL,
+                qty TEXT NOT NULL,
+                fee TEXT NOT NULL,
+                fee_asset TEXT NOT NULL,
+                ts TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage4_positions (
+                symbol TEXT PRIMARY KEY,
+                qty TEXT NOT NULL,
+                avg_cost_try TEXT NOT NULL,
+                realized_pnl_try TEXT NOT NULL,
+                last_update_ts TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pnl_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                total_equity_try TEXT NOT NULL,
+                realized_today_try TEXT NOT NULL,
+                realized_total_try TEXT NOT NULL DEFAULT '0',
+                drawdown_pct TEXT NOT NULL,
+                ts TEXT NOT NULL
+            )
+            """
+        )
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(pnl_snapshots)")}
+        if "realized_total_try" not in columns:
+            conn.execute(
+                "ALTER TABLE pnl_snapshots ADD COLUMN realized_total_try TEXT NOT NULL DEFAULT '0'"
+            )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_snapshots_ts ON pnl_snapshots(ts)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cursors (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cycle_audit (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                counts_json TEXT NOT NULL,
+                decisions_json TEXT NOT NULL,
+                envelope_json TEXT
+            )
+            """
+        )
+        cycle_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(cycle_audit)")}
+        if "envelope_json" not in cycle_columns:
+            conn.execute("ALTER TABLE cycle_audit ADD COLUMN envelope_json TEXT")
+
+    def _ensure_actions_metadata_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(actions)")}
+        if "client_order_id" not in columns:
+            conn.execute("ALTER TABLE actions ADD COLUMN client_order_id TEXT")
+        if "order_id" not in columns:
+            conn.execute("ALTER TABLE actions ADD COLUMN order_id TEXT")
+        if "metadata_json" not in columns:
+            conn.execute("ALTER TABLE actions ADD COLUMN metadata_json TEXT")
+
+    def _ensure_orders_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(orders)")}
+        if "client_order_id" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN client_order_id TEXT")
+        if "last_seen_at" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN last_seen_at INTEGER")
+        if "reconciled" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN reconciled INTEGER NOT NULL DEFAULT 0")
+        if "exchange_status_raw" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN exchange_status_raw TEXT")
+        if "idempotency_key" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN idempotency_key TEXT")
+        if "intent_id" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN intent_id TEXT")
+
+    def record_action(
+        self,
+        cycle_id: str,
+        action_type: str,
+        payload_hash: str,
+        dedupe_window_seconds: int = 300,
+    ) -> int | None:
+        now_epoch = int(datetime.now(UTC).timestamp())
+        dedupe_window = max(1, dedupe_window_seconds)
+        dedupe_bucket = now_epoch // dedupe_window
+        dedupe_key = f"{action_type}:{payload_hash}:{dedupe_bucket}"
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO actions (
+                    cycle_id, action_type, payload_hash, dedupe_key, created_at_epoch
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (cycle_id, action_type, payload_hash, dedupe_key, now_epoch),
+            )
+            if cursor.rowcount == 0:
+                return None
+            return int(cursor.lastrowid)
+
+    def attach_action_metadata(
+        self,
+        *,
+        action_id: int,
+        client_order_id: str | None,
+        order_id: str | None,
+        reconciled: bool,
+        reconcile_status: str | None,
+        reconcile_reason: str | None,
+        idempotency_key: str | None = None,
+        intent_id: str | None = None,
+    ) -> None:
+        metadata_payload = {
+            "reconciled": reconciled,
+            "reconcile_status": reconcile_status,
+            "reconcile_reason": reconcile_reason,
+            "idempotency_key": idempotency_key,
+            "intent_id": intent_id,
+        }
+        metadata_json = json.dumps(metadata_payload, sort_keys=True)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE actions
+                SET client_order_id = ?, order_id = ?, metadata_json = ?
+                WHERE id = ?
+                """,
+                (client_order_id, order_id, metadata_json, action_id),
+            )
+
+    def action_count(self, action_type: str, payload_hash: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM actions
+                WHERE action_type = ? AND payload_hash = ?
+                """,
+                (action_type, payload_hash),
+            ).fetchone()
+        return int(row["count"] if row else 0)
+
+    def get_action_by_id(self, action_id: int) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+
+    def get_latest_action(self, action_type: str, payload_hash: str) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT *
+                FROM actions
+                WHERE action_type = ? AND payload_hash = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (action_type, payload_hash),
+            ).fetchone()
+
+    def save_order(
+        self,
+        order: Order,
+        *,
+        reconciled: bool = False,
+        exchange_status_raw: str | None = None,
+        idempotency_key: str | None = None,
+        intent_id: str | None = None,
+    ) -> None:
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    order_id, symbol, client_order_id, side, price, qty, status,
+                    created_at, updated_at, last_seen_at, reconciled, exchange_status_raw,
+                    idempotency_key, intent_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(order_id) DO UPDATE SET
+                    client_order_id=excluded.client_order_id,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at,
+                    last_seen_at=excluded.last_seen_at,
+                    reconciled=excluded.reconciled,
+                    exchange_status_raw=excluded.exchange_status_raw,
+                    idempotency_key=COALESCE(excluded.idempotency_key, orders.idempotency_key),
+                    intent_id=COALESCE(excluded.intent_id, orders.intent_id)
+                """,
+                (
+                    order.order_id,
+                    normalize_symbol(order.symbol),
+                    order.client_order_id,
+                    order.side.value,
+                    str(Decimal(str(order.price))),
+                    str(Decimal(str(order.quantity))),
+                    order.status.value,
+                    order.created_at.isoformat(),
+                    order.updated_at.isoformat(),
+                    now_ms,
+                    1 if reconciled else 0,
+                    exchange_status_raw,
+                    idempotency_key,
+                    intent_id,
+                ),
+            )
+
+    def save_fill(self, fill: TradeFill) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO fills (
+                    fill_id, order_id, symbol, side, price, qty, fee, fee_currency, ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fill.fill_id,
+                    fill.order_id,
+                    normalize_symbol(fill.symbol),
+                    fill.side.value,
+                    str(fill.price),
+                    str(fill.qty),
+                    str(fill.fee),
+                    fill.fee_currency,
+                    fill.ts.isoformat(),
+                ),
+            )
+        return bool(cur.rowcount)
+
+    def save_position(self, position: Position) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    symbol, qty, avg_cost, realized_pnl, unrealized_pnl, fees_paid, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    qty=excluded.qty,
+                    avg_cost=excluded.avg_cost,
+                    realized_pnl=excluded.realized_pnl,
+                    unrealized_pnl=excluded.unrealized_pnl,
+                    fees_paid=excluded.fees_paid,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    normalize_symbol(position.symbol),
+                    str(position.qty),
+                    str(position.avg_cost),
+                    str(position.realized_pnl),
+                    str(position.unrealized_pnl),
+                    str(position.fees_paid),
+                    position.updated_at.isoformat(),
+                ),
+            )
+
+    def get_position(self, symbol: str) -> Position | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM positions WHERE symbol = ?", (normalize_symbol(symbol),)
+            ).fetchone()
+        if row is None:
+            return None
+        return Position(
+            symbol=str(row["symbol"]),
+            qty=Decimal(str(row["qty"])),
+            avg_cost=Decimal(str(row["avg_cost"])),
+            realized_pnl=Decimal(str(row["realized_pnl"])),
+            unrealized_pnl=Decimal(str(row["unrealized_pnl"])),
+            fees_paid=Decimal(str(row["fees_paid"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
+
+    def get_positions(self) -> list[Position]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM positions ORDER BY symbol").fetchall()
+        return [
+            Position(
+                symbol=str(row["symbol"]),
+                qty=Decimal(str(row["qty"])),
+                avg_cost=Decimal(str(row["avg_cost"])),
+                realized_pnl=Decimal(str(row["realized_pnl"])),
+                unrealized_pnl=Decimal(str(row["unrealized_pnl"])),
+                fees_paid=Decimal(str(row["fees_paid"])),
+                updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            )
+            for row in rows
+        ]
+
+    def record_intent(self, intent: Intent, ts: datetime | None = None) -> None:
+        created_at = (ts or intent.created_at).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO intents (intent_id, symbol, side, idempotency_key, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    intent.intent_id,
+                    normalize_symbol(intent.symbol),
+                    intent.side.value,
+                    intent.idempotency_key,
+                    created_at,
+                ),
+            )
+
+    def get_last_intent_ts_by_symbol_side(self) -> dict[tuple[str, str], datetime]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT symbol, side, MAX(created_at) as created_at
+                FROM intents
+                GROUP BY symbol, side
+                """
+            ).fetchall()
+        return {
+            (str(row["symbol"]), str(row["side"])): datetime.fromisoformat(str(row["created_at"]))
+            for row in rows
+        }
+
+    def update_order_status(
+        self,
+        *,
+        order_id: str,
+        status: OrderStatus,
+        exchange_status_raw: str | None = None,
+        reconciled: bool | None = None,
+        last_seen_at: int | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE orders
+                SET status = ?,
+                    updated_at = ?,
+                    last_seen_at = COALESCE(?, last_seen_at),
+                    exchange_status_raw = COALESCE(?, exchange_status_raw),
+                    reconciled = COALESCE(?, reconciled)
+                WHERE order_id = ?
+                """,
+                (
+                    status.value,
+                    datetime.now(UTC).isoformat(),
+                    last_seen_at,
+                    exchange_status_raw,
+                    (1 if reconciled else 0) if reconciled is not None else None,
+                    order_id,
+                ),
+            )
+
+    def find_open_or_unknown_orders(self, symbols: list[str] | None = None) -> list[StoredOrder]:
+        query = """
+            SELECT order_id, symbol, client_order_id, side, price, qty, status,
+                   last_seen_at, reconciled, exchange_status_raw
+            FROM orders
+            WHERE status IN ('new', 'open', 'partial', 'unknown')
+        """
+        params: list[str] = []
+        if symbols:
+            normalized = [normalize_symbol(value) for value in symbols]
+            query += f" AND symbol IN ({','.join('?' for _ in normalized)})"
+            params.extend(normalized)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [
+            StoredOrder(
+                order_id=str(row["order_id"]),
+                symbol=str(row["symbol"]),
+                client_order_id=row["client_order_id"],
+                side=str(row["side"]),
+                price=Decimal(str(row["price"])),
+                quantity=Decimal(str(row["qty"])),
+                status=OrderStatus(str(row["status"])),
+                last_seen_at=(
+                    int(row["last_seen_at"]) if row["last_seen_at"] is not None else None
+                ),
+                reconciled=bool(row["reconciled"]),
+                exchange_status_raw=row["exchange_status_raw"],
+            )
+            for row in rows
+        ]
+
+    def mark_order_canceled(self, order_id: str) -> None:
+        self.update_order_status(order_id=order_id, status=OrderStatus.CANCELED)
+
+    def set_last_cycle_id(self, cycle_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES ('last_cycle_id', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+                """,
+                (cycle_id,),
+            )
+
+    def get_last_cycle_id(self) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key='last_cycle_id'").fetchone()
+        return row["value"] if row else None
+
+    # Stage 4 helpers
+    def client_order_id_exists(self, client_order_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM stage4_orders WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+        return row is not None
+
+    def get_stage4_order_by_client_id(self, client_order_id: str):
+        from btcbot.domain.stage4 import Order as Stage4Order
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage4_orders WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Stage4Order(
+            symbol=str(row["symbol"]),
+            side=str(row["side"]),
+            type="limit",
+            price=Decimal(str(row["price"])),
+            qty=Decimal(str(row["qty"])),
+            status=str(row["status"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            exchange_order_id=(str(row["exchange_order_id"]) if row["exchange_order_id"] else None),
+            client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+            mode=str(row["mode"]),
+        )
+
+    def list_stage4_open_orders(
+        self,
+        symbol: str | None = None,
+        *,
+        include_external: bool = False,
+    ):
+        from btcbot.domain.stage4 import Order as Stage4Order
+
+        query = (
+            "SELECT * FROM stage4_orders WHERE status IN ('open','submitted','cancel_requested')"
+        )
+        if not include_external:
+            query += " AND mode != 'external'"
+        params: list[str] = []
+        if symbol is not None:
+            query += " AND symbol = ?"
+            params.append(normalize_symbol(symbol))
+        query += " ORDER BY symbol, side, created_at"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            Stage4Order(
+                symbol=str(row["symbol"]),
+                side=str(row["side"]),
+                type="limit",
+                price=Decimal(str(row["price"])),
+                qty=Decimal(str(row["qty"])),
+                status=str(row["status"]),
+                created_at=datetime.fromisoformat(str(row["created_at"])),
+                updated_at=datetime.fromisoformat(str(row["updated_at"])),
+                exchange_order_id=(
+                    str(row["exchange_order_id"]) if row["exchange_order_id"] else None
+                ),
+                client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+                mode=str(row["mode"]),
+            )
+            for row in rows
+        ]
+
+    def is_order_terminal(self, client_order_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM stage4_orders WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        return str(row["status"]).lower() in {
+            "filled",
+            "canceled",
+            "rejected",
+            "unknown_closed",
+        }
+
+    def record_stage4_order_submitted(
+        self,
+        *,
+        symbol: str,
+        client_order_id: str,
+        exchange_order_id: str,
+        side: str,
+        price: Decimal,
+        qty: Decimal,
+        mode: str,
+        status: str = "open",
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM stage4_orders WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO stage4_orders(
+                        symbol, client_order_id, exchange_order_id, side, price, qty,
+                        status, mode, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalize_symbol(symbol),
+                        client_order_id,
+                        exchange_order_id,
+                        side,
+                        str(price),
+                        str(qty),
+                        status,
+                        mode,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE stage4_orders
+                    SET exchange_order_id=?, status=?, mode=?, updated_at=?
+                    WHERE client_order_id=?
+                    """,
+                    (exchange_order_id, status, mode, now, client_order_id),
+                )
+
+    def record_stage4_order_simulated_submit(
+        self,
+        *,
+        symbol: str,
+        client_order_id: str,
+        side: str,
+        price: Decimal,
+        qty: Decimal,
+    ) -> None:
+        self.record_stage4_order_submitted(
+            symbol=symbol,
+            client_order_id=client_order_id,
+            exchange_order_id=f"sim-{client_order_id}",
+            side=side,
+            price=price,
+            qty=qty,
+            mode="dry_run",
+            status="open",
+        )
+
+    def record_stage4_order_cancel_requested(self, client_order_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE stage4_orders
+                SET status='cancel_requested', updated_at=?
+                WHERE client_order_id=? AND status IN ('open','submitted')
+                """,
+                (datetime.now(UTC).isoformat(), client_order_id),
+            )
+
+    def record_stage4_order_canceled(self, client_order_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE stage4_orders SET status='canceled', updated_at=? WHERE client_order_id=?",
+                (datetime.now(UTC).isoformat(), client_order_id),
+            )
+
+    def record_stage4_order_error(
+        self,
+        *,
+        client_order_id: str,
+        reason: str,
+        symbol: str,
+        side: str,
+        price: Decimal,
+        qty: Decimal,
+        mode: str,
+        status: str = "error",
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM stage4_orders WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO stage4_orders(
+                        symbol, client_order_id, exchange_order_id, side, price, qty,
+                        status, mode, last_error, created_at, updated_at
+                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalize_symbol(symbol),
+                        client_order_id,
+                        side,
+                        str(price),
+                        str(qty),
+                        status,
+                        mode,
+                        reason,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE stage4_orders
+                    SET symbol=?, side=?, price=?, qty=?,
+                        status=?, mode=?, last_error=?, updated_at=?
+                    WHERE client_order_id=?
+                    """,
+                    (
+                        normalize_symbol(symbol),
+                        side,
+                        str(price),
+                        str(qty),
+                        status,
+                        mode,
+                        reason,
+                        now,
+                        client_order_id,
+                    ),
+                )
+
+    def record_stage4_order_rejected(
+        self,
+        client_order_id: str,
+        reason: str,
+        *,
+        symbol: str = "UNKNOWN",
+        side: str = "unknown",
+        price: Decimal = Decimal("0"),
+        qty: Decimal = Decimal("0"),
+        mode: str = "dry_run",
+    ) -> None:
+        self.record_stage4_order_error(
+            client_order_id=client_order_id,
+            reason=reason,
+            symbol=symbol,
+            side=side,
+            price=price,
+            qty=qty,
+            mode=mode,
+            status="rejected",
+        )
+
+    def update_stage4_order_exchange_id(self, client_order_id: str, exchange_order_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE stage4_orders
+                SET exchange_order_id=?, updated_at=?
+                WHERE client_order_id=?
+                """,
+                (exchange_order_id, datetime.now(UTC).isoformat(), client_order_id),
+            )
+
+    def mark_stage4_unknown_closed(self, client_order_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE stage4_orders
+                SET status='unknown_closed', updated_at=?
+                WHERE client_order_id=?
+                """,
+                (datetime.now(UTC).isoformat(), client_order_id),
+            )
+
+    def import_stage4_external_order(self, order) -> None:
+        client_order_id = getattr(order, "client_order_id", None)
+        exchange_order_id = getattr(order, "exchange_order_id", None)
+        if exchange_order_id is None:
+            return
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            existing = None
+            if client_order_id is not None:
+                existing = conn.execute(
+                    "SELECT id, exchange_order_id FROM stage4_orders WHERE client_order_id = ?",
+                    (client_order_id,),
+                ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO stage4_orders(
+                        symbol, client_order_id, exchange_order_id, side, price, qty,
+                        status, mode, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'external', ?, ?)
+                    """,
+                    (
+                        normalize_symbol(str(getattr(order, "symbol", "UNKNOWN"))),
+                        client_order_id,
+                        exchange_order_id,
+                        str(getattr(order, "side", "unknown")),
+                        str(getattr(order, "price", Decimal("0"))),
+                        str(getattr(order, "qty", Decimal("0"))),
+                        str(getattr(order, "status", "open")),
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE stage4_orders
+                    SET exchange_order_id=COALESCE(exchange_order_id, ?), updated_at=?
+                    WHERE client_order_id=?
+                    """,
+                    (exchange_order_id, now, client_order_id),
+                )
+
+    def get_stage4_order_by_exchange_id(self, exchange_order_id: str):
+        from btcbot.domain.stage4 import Order as Stage4Order
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage4_orders WHERE exchange_order_id = ?",
+                (exchange_order_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Stage4Order(
+            symbol=str(row["symbol"]),
+            side=str(row["side"]),
+            type="limit",
+            price=Decimal(str(row["price"])),
+            qty=Decimal(str(row["qty"])),
+            status=str(row["status"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            exchange_order_id=(str(row["exchange_order_id"]) if row["exchange_order_id"] else None),
+            client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+            mode=str(row["mode"]),
+        )
+
+    def save_stage4_fill(self, fill: Stage4Fill) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO stage4_fills(
+                    fill_id, order_id, symbol, side, price, qty, fee, fee_asset, ts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fill.fill_id,
+                    fill.order_id,
+                    normalize_symbol(fill.symbol),
+                    fill.side,
+                    str(fill.price),
+                    str(fill.qty),
+                    str(fill.fee),
+                    fill.fee_asset,
+                    fill.ts.isoformat(),
+                ),
+            )
+        return bool(cur.rowcount)
+
+    def save_stage4_position(self, position: Stage4Position) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage4_positions(
+                    symbol, qty, avg_cost_try, realized_pnl_try, last_update_ts
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    qty=excluded.qty,
+                    avg_cost_try=excluded.avg_cost_try,
+                    realized_pnl_try=excluded.realized_pnl_try,
+                    last_update_ts=excluded.last_update_ts
+                """,
+                (
+                    normalize_symbol(position.symbol),
+                    str(position.qty),
+                    str(position.avg_cost_try),
+                    str(position.realized_pnl_try),
+                    position.last_update_ts.isoformat(),
+                ),
+            )
+
+    def get_stage4_position(self, symbol: str) -> Stage4Position | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage4_positions WHERE symbol=?",
+                (normalize_symbol(symbol),),
+            ).fetchone()
+        if row is None:
+            return None
+        return Stage4Position(
+            symbol=str(row["symbol"]),
+            qty=Decimal(str(row["qty"])),
+            avg_cost_try=Decimal(str(row["avg_cost_try"])),
+            realized_pnl_try=Decimal(str(row["realized_pnl_try"])),
+            last_update_ts=datetime.fromisoformat(str(row["last_update_ts"])),
+        )
+
+    def list_stage4_positions(self) -> list[Stage4Position]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM stage4_positions ORDER BY symbol").fetchall()
+        return [
+            Stage4Position(
+                symbol=str(row["symbol"]),
+                qty=Decimal(str(row["qty"])),
+                avg_cost_try=Decimal(str(row["avg_cost_try"])),
+                realized_pnl_try=Decimal(str(row["realized_pnl_try"])),
+                last_update_ts=datetime.fromisoformat(str(row["last_update_ts"])),
+            )
+            for row in rows
+        ]
+
+    def save_stage4_pnl_snapshot(self, snapshot: PnLSnapshot) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO pnl_snapshots(
+                    total_equity_try, realized_today_try, realized_total_try, drawdown_pct, ts
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(snapshot.total_equity_try),
+                    str(snapshot.realized_today_try),
+                    str(snapshot.realized_total_try),
+                    str(snapshot.drawdown_pct),
+                    snapshot.ts.isoformat(),
+                ),
+            )
+
+    def realized_total_at_day_start(self, day_start: datetime) -> Decimal:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT realized_total_try
+                FROM pnl_snapshots
+                WHERE ts >= ?
+                ORDER BY ts ASC
+                LIMIT 1
+                """,
+                (day_start.isoformat(),),
+            ).fetchone()
+        return Decimal(str(row["realized_total_try"])) if row else Decimal("0")
+
+    def compute_drawdown_pct(self, equity_now: Decimal) -> Decimal:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT total_equity_try FROM pnl_snapshots").fetchall()
+        values = [Decimal(str(row["total_equity_try"])) for row in rows]
+        peak = max(values + [equity_now]) if values else equity_now
+        if peak <= 0:
+            return Decimal("0")
+        return max(Decimal("0"), ((peak - equity_now) / peak) * Decimal("100"))
+
+    def record_cycle_audit(
+        self,
+        cycle_id: str,
+        counts: dict[str, int],
+        decisions: list[str],
+        envelope: dict[str, object] | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cycle_audit(cycle_id, ts, counts_json, decisions_json, envelope_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts=excluded.ts,
+                    counts_json=excluded.counts_json,
+                    decisions_json=excluded.decisions_json,
+                    envelope_json=excluded.envelope_json
+                """,
+                (
+                    cycle_id,
+                    datetime.now(UTC).isoformat(),
+                    json.dumps(counts, sort_keys=True),
+                    json.dumps(decisions, sort_keys=True),
+                    json.dumps(envelope, sort_keys=True) if envelope is not None else None,
+                ),
+            )
+
+    def get_cursor(self, key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM cursors WHERE key=?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_cursor(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cursors(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+                """,
+                (key, value),
+            )

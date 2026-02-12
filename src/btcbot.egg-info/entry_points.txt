@@ -1,0 +1,2 @@
+[console_scripts]
+btcbot = btcbot.cli:main

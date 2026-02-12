@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from uuid import uuid4
+
+from btcbot.adapters.btcturk_http import ConfigurationError
+from btcbot.config import Settings
+from btcbot.domain.models import normalize_symbol
+from btcbot.domain.stage4 import Order
+from btcbot.services.accounting_service_stage4 import AccountingService
+from btcbot.services.exchange_factory import build_exchange_stage4
+from btcbot.services.exchange_rules_service import ExchangeRulesService
+from btcbot.services.execution_service_stage4 import ExecutionService
+from btcbot.services.order_lifecycle_service import OrderLifecycleService
+from btcbot.services.reconcile_service import ReconcileService
+from btcbot.services.risk_policy import RiskPolicy
+from btcbot.services.state_store import StateStore
+
+logger = logging.getLogger(__name__)
+
+
+class Stage4ConfigurationError(RuntimeError):
+    pass
+
+
+class Stage4ExchangeError(RuntimeError):
+    pass
+
+
+class Stage4InvariantError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class Stage4CycleRunner:
+    command: str = "stage4-run"
+
+    @staticmethod
+    def norm(symbol: str) -> str:
+        return normalize_symbol(symbol)
+
+    def run_one_cycle(self, settings: Settings) -> int:
+        exchange = build_exchange_stage4(settings, dry_run=settings.dry_run)
+        live_mode = settings.is_live_trading_enabled() and not settings.dry_run
+        state_store = StateStore(db_path=settings.state_db_path)
+        cycle_id = uuid4().hex
+
+        envelope = {
+            "cycle_id": cycle_id,
+            "command": self.command,
+            "dry_run": settings.dry_run,
+            "live_mode": live_mode,
+            "symbols": sorted(self.norm(symbol) for symbol in settings.symbols),
+            "timestamp_utc": datetime.now(UTC).isoformat(),
+        }
+
+        try:
+            rules_service = ExchangeRulesService(
+                exchange, cache_ttl_sec=settings.rules_cache_ttl_sec
+            )
+            accounting_service = AccountingService(
+                exchange=exchange,
+                state_store=state_store,
+                lookback_minutes=settings.fills_poll_lookback_minutes,
+            )
+            lifecycle_service = OrderLifecycleService(stale_after_sec=settings.ttl_seconds)
+            reconcile_service = ReconcileService()
+            risk_policy = RiskPolicy(
+                max_open_orders=settings.max_open_orders,
+                max_position_notional_try=settings.max_position_notional_try,
+                max_daily_loss_try=settings.max_daily_loss_try,
+                max_drawdown_pct=settings.max_drawdown_pct,
+                fee_bps_taker=settings.fee_bps_taker,
+                slippage_bps_buffer=settings.slippage_bps_buffer,
+                min_profit_bps=Decimal(str(settings.min_profit_bps)),
+            )
+            execution_service = ExecutionService(
+                exchange=exchange,
+                state_store=state_store,
+                settings=settings,
+                rules_service=rules_service,
+            )
+
+            mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, settings.symbols)
+            try_cash = self._resolve_try_cash(
+                exchange, fallback=Decimal(str(settings.dry_run_try_balance))
+            )
+
+            exchange_open_orders: list[Order] = []
+            open_order_failures = 0
+            failed_symbols: set[str] = set(mark_price_errors)
+            for symbol in settings.symbols:
+                normalized = self.norm(symbol)
+                try:
+                    exchange_open_orders.extend(exchange.list_open_orders(symbol))
+                except Exception as exc:  # noqa: BLE001
+                    open_order_failures += 1
+                    failed_symbols.add(normalized)
+                    logger.warning(
+                        "stage4_open_orders_fetch_failed",
+                        extra={"extra": {"symbol": normalized, "error_type": type(exc).__name__}},
+                    )
+
+            db_open_orders = state_store.list_stage4_open_orders()
+            reconcile_result = reconcile_service.resolve(
+                exchange_open_orders=exchange_open_orders,
+                db_open_orders=db_open_orders,
+            )
+            for order in reconcile_result.import_external:
+                state_store.import_stage4_external_order(order)
+            for client_order_id, exchange_order_id in reconcile_result.enrich_exchange_ids:
+                state_store.update_stage4_order_exchange_id(client_order_id, exchange_order_id)
+            for client_order_id in reconcile_result.mark_unknown_closed:
+                state_store.mark_stage4_unknown_closed(client_order_id)
+
+            fills = []
+            fills_fetched = 0
+            fills_failures = 0
+            cursor_before = {
+                self.norm(symbol): state_store.get_cursor(self._fills_cursor_key(symbol))
+                for symbol in settings.symbols
+            }
+            for symbol in settings.symbols:
+                normalized = self.norm(symbol)
+                try:
+                    fetched = accounting_service.fetch_new_fills(symbol)
+                    fills.extend(fetched)
+                    fills_fetched += len(fetched)
+                except Exception as exc:  # noqa: BLE001
+                    fills_failures += 1
+                    failed_symbols.add(normalized)
+                    logger.warning(
+                        "stage4_fills_fetch_failed",
+                        extra={"extra": {"symbol": normalized, "error_type": type(exc).__name__}},
+                    )
+
+            snapshot = accounting_service.apply_fills(
+                fills, mark_prices=mark_prices, try_cash=try_cash
+            )
+            cursor_after = {
+                self.norm(symbol): state_store.get_cursor(self._fills_cursor_key(symbol))
+                for symbol in settings.symbols
+            }
+
+            current_open_orders = state_store.list_stage4_open_orders()
+            intents = self._build_intents(
+                cycle_id=cycle_id,
+                symbols=[
+                    symbol for symbol in settings.symbols if self.norm(symbol) not in failed_symbols
+                ],
+                mark_prices=mark_prices,
+                try_cash=try_cash,
+                open_orders=current_open_orders,
+                live_mode=live_mode,
+                bootstrap_enabled=settings.stage4_bootstrap_intents,
+            )
+            mid_price = next(iter(mark_prices.values()), Decimal("0"))
+            lifecycle_plan = lifecycle_service.plan(
+                intents, current_open_orders, mid_price=mid_price
+            )
+
+            positions = state_store.list_stage4_positions()
+            positions_by_symbol = {self.norm(position.symbol): position for position in positions}
+            current_position_notional = Decimal("0")
+            for position in positions:
+                mark = mark_prices.get(self.norm(position.symbol), position.avg_cost_try)
+                current_position_notional += position.qty * mark
+
+            safe_actions = [
+                action
+                for action in lifecycle_plan.actions
+                if self.norm(action.symbol) not in failed_symbols
+            ]
+            accepted_actions, risk_decisions = risk_policy.filter_actions(
+                safe_actions,
+                open_orders_count=len(current_open_orders),
+                current_position_notional_try=current_position_notional,
+                pnl=snapshot,
+                positions_by_symbol=positions_by_symbol,
+            )
+
+            execution_report = execution_service.execute_with_report(accepted_actions)
+            self._assert_execution_invariant(execution_report)
+
+            decisions = lifecycle_plan.audit_reasons + [
+                f"risk:{item.action.client_order_id or 'missing'}:{item.reason}"
+                for item in risk_decisions
+            ]
+            risk_decisions_from_audit = [
+                entry for entry in decisions if isinstance(entry, str) and entry.startswith("risk:")
+            ]
+            accepted_by_risk = sum(
+                1 for entry in risk_decisions_from_audit if entry.endswith(":accepted")
+            )
+            rejected_by_risk = sum(
+                1
+                for entry in risk_decisions_from_audit
+                if entry.endswith(":rejected") or ":reject" in entry
+            )
+
+            counts = {
+                "exchange_open": len(exchange_open_orders),
+                "db_open": len(db_open_orders),
+                "imported": len(reconcile_result.import_external),
+                "enriched": len(reconcile_result.enrich_exchange_ids),
+                "unknown_closed": len(reconcile_result.mark_unknown_closed),
+                "external_missing_client_id": len(reconcile_result.external_missing_client_id),
+                "fills_fetched": fills_fetched,
+                "fills_applied": len(fills),
+                "cursor_before": sum(1 for value in cursor_before.values() if value is not None),
+                "cursor_after": sum(1 for value in cursor_after.values() if value is not None),
+                "planned_actions": len(lifecycle_plan.actions),
+                "accepted_actions": len(accepted_actions),
+                "executed": execution_report.executed_total,
+                "submitted": execution_report.submitted,
+                "canceled": execution_report.canceled,
+                "rejected_min_notional": execution_report.rejected,
+                "accepted_by_risk": accepted_by_risk,
+                "rejected_by_risk": rejected_by_risk,
+                "open_order_failures": open_order_failures,
+                "fills_failures": fills_failures,
+                "mark_price_failures": len(mark_price_errors),
+            }
+            state_store.record_cycle_audit(
+                cycle_id=cycle_id, counts=counts, decisions=decisions, envelope=envelope
+            )
+            state_store.set_last_cycle_id(cycle_id)
+
+            logger.info(
+                "Stage 4 cycle completed", extra={"extra": {"cycle_id": cycle_id, **counts}}
+            )
+            return 0
+        except ConfigurationError as exc:
+            raise Stage4ConfigurationError(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            if isinstance(
+                exc, (Stage4ConfigurationError, Stage4ExchangeError, Stage4InvariantError)
+            ):
+                raise
+            raise Stage4ExchangeError(str(exc)) from exc
+        finally:
+            self._close_best_effort(exchange, "exchange_stage4")
+
+    def _close_best_effort(self, resource: object, label: str) -> None:
+        close = getattr(resource, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to close resource", extra={"extra": {"resource": label}}, exc_info=True
+            )
+
+    def _resolve_try_cash(self, exchange: object, *, fallback: Decimal) -> Decimal:
+        base = getattr(exchange, "client", exchange)
+        get_balances = getattr(base, "get_balances", None)
+        if not callable(get_balances):
+            return fallback
+        try:
+            balances = get_balances()
+        except Exception:  # noqa: BLE001
+            return fallback
+        for balance in balances:
+            if str(getattr(balance, "asset", "")).upper() == "TRY":
+                return Decimal(str(getattr(balance, "free", 0)))
+        return fallback
+
+    def _safe_decimal(self, value: object) -> Decimal | None:
+        try:
+            dec = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not dec.is_finite() or dec < 0:
+            return None
+        return dec
+
+    def _resolve_mark_prices(
+        self, exchange: object, symbols: list[str]
+    ) -> tuple[dict[str, Decimal], set[str]]:
+        base = getattr(exchange, "client", exchange)
+        get_orderbook = getattr(base, "get_orderbook", None)
+        mark_prices: dict[str, Decimal] = {}
+        anomalies: set[str] = set()
+        if not callable(get_orderbook):
+            return mark_prices, anomalies
+
+        for symbol in symbols:
+            normalized = self.norm(symbol)
+            try:
+                bid_raw, ask_raw = get_orderbook(symbol)
+            except Exception:  # noqa: BLE001
+                anomalies.add(normalized)
+                continue
+            bid = self._safe_decimal(bid_raw)
+            ask = self._safe_decimal(ask_raw)
+            if bid is not None and ask is not None and ask < bid:
+                bid, ask = ask, bid
+                anomalies.add(normalized)
+            if bid is not None and bid > 0 and ask is not None and ask > 0:
+                mark = (bid + ask) / Decimal("2")
+            elif bid is not None and bid > 0:
+                mark = bid
+            elif ask is not None and ask > 0:
+                mark = ask
+            else:
+                anomalies.add(normalized)
+                continue
+            mark_prices[normalized] = mark
+        return mark_prices, anomalies
+
+    def _assert_execution_invariant(self, report: object) -> None:
+        for field in ("executed_total", "submitted", "canceled", "simulated", "rejected"):
+            if not hasattr(report, field):
+                raise Stage4InvariantError(f"execution_report_missing_{field}")
+            value = getattr(report, field)
+            if not isinstance(value, int) or value < 0:
+                raise Stage4InvariantError(f"execution_report_invalid_{field}")
+
+    def _fills_cursor_key(self, symbol: str) -> str:
+        return f"fills_cursor:{self.norm(symbol)}"
+
+    def _build_intents(
+        self,
+        *,
+        cycle_id: str,
+        symbols: list[str],
+        mark_prices: dict[str, Decimal],
+        try_cash: Decimal,
+        open_orders: list[Order],
+        live_mode: bool,
+        bootstrap_enabled: bool,
+    ) -> list[Order]:
+        if not bootstrap_enabled:
+            return []
+        intents: list[Order] = []
+        existing_keys = {(self.norm(order.symbol), order.side) for order in open_orders}
+        for symbol in sorted(symbols):
+            normalized = self.norm(symbol)
+            mark = mark_prices.get(normalized)
+            if mark is None or mark <= 0:
+                continue
+            if (normalized, "buy") in existing_keys:
+                continue
+            budget = min(try_cash, Decimal("50"))
+            if budget <= 0:
+                continue
+            qty = budget / mark
+            if qty <= 0:
+                continue
+            intents.append(
+                Order(
+                    symbol=symbol,
+                    side="buy",
+                    type="limit",
+                    price=mark,
+                    qty=qty,
+                    status="new",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                    client_order_id=f"s4-{cycle_id[:12]}-{normalized.lower()}-buy",
+                    mode=("live" if live_mode else "dry_run"),
+                )
+            )
+        return intents
