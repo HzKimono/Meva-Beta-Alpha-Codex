@@ -247,6 +247,8 @@ class Stage4CycleRunner:
                 "planned_actions": len(lifecycle_plan.actions),
                 "pipeline_intents": len(decision_report.intents),
                 "pipeline_order_requests": len(decision_report.order_requests),
+                "pipeline_mapped_orders": decision_report.mapped_orders_count,
+                "pipeline_dropped_actions": decision_report.dropped_actions_count,
                 "accepted_actions": len(accepted_actions),
                 "executed": execution_report.executed_total,
                 "submitted": execution_report.submitted,
@@ -260,6 +262,12 @@ class Stage4CycleRunner:
             }
             counts.update(
                 {f"alloc_{key}": value for key, value in dict(decision_report.counters).items()}
+            )
+            counts.update(
+                {
+                    f"pipeline_drop_{key}": value
+                    for key, value in dict(decision_report.dropped_reasons).items()
+                }
             )
             state_store.record_cycle_audit(
                 cycle_id=cycle_id, counts=counts, decisions=decisions, envelope=envelope

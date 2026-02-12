@@ -20,6 +20,7 @@ from btcbot.domain.strategy_core import (
     StrategyContext,
     StrategyKnobs,
 )
+from btcbot.domain.symbols import canonical_symbol
 from btcbot.domain.universe_models import SymbolInfo
 from btcbot.services.allocation_service import AllocationKnobs, AllocationService
 from btcbot.services.universe_service import select_universe
@@ -37,6 +38,9 @@ class CycleDecisionReport:
     allocation_decisions: tuple[AllocationDecision, ...]
     counters: Mapping[str, int]
     order_requests: tuple[Order, ...]
+    mapped_orders_count: int
+    dropped_actions_count: int
+    dropped_reasons: Mapping[str, int]
 
 
 class DecisionPipelineService:
@@ -67,6 +71,7 @@ class DecisionPipelineService:
         bootstrap_enabled: bool,
         live_mode: bool,
     ) -> CycleDecisionReport:
+        del cycle_id
         now_ts = self.now_provider()
         selected_universe = self._select_universe(
             pair_info=pair_info,
@@ -89,22 +94,37 @@ class DecisionPipelineService:
             positions=positions,
             mark_prices=mark_prices,
             knobs=AllocationKnobs(
-                target_try_cash=self.settings.try_cash_target,
-                min_order_notional_try=Decimal(str(self.settings.min_order_notional_try)),
+                target_try_cash=self._to_decimal(self.settings.try_cash_target),
+                min_order_notional_try=self._to_decimal(self.settings.min_order_notional_try),
                 max_intent_notional_try=Decimal("0"),
-                max_position_try_per_symbol=self.settings.max_position_try_per_symbol,
-                max_total_notional_try_per_cycle=self.settings.notional_cap_try_per_cycle,
+                max_position_try_per_symbol=self._to_decimal(
+                    self.settings.max_position_try_per_symbol
+                ),
+                max_total_notional_try_per_cycle=self._to_decimal(
+                    self.settings.notional_cap_try_per_cycle
+                ),
             ),
         )
 
-        order_requests = tuple(
-            sized_action_to_order(
+        pair_info_by_symbol = {
+            canonical_symbol(item.pair_symbol): item for item in (pair_info or [])
+        }
+        dropped_reasons: dict[str, int] = {}
+        order_requests: list[Order] = []
+        for action in allocation.actions:
+            symbol = canonical_symbol(action.symbol)
+            order, drop_reason = sized_action_to_order(
                 action,
                 mode=("live" if live_mode else "dry_run"),
+                mark_price=mark_prices.get(symbol),
+                pair_info=pair_info_by_symbol.get(symbol),
                 created_at=now_ts,
             )
-            for action in allocation.actions
-        )
+            if order is None:
+                key = drop_reason or "dropped_unknown"
+                dropped_reasons[key] = dropped_reasons.get(key, 0) + 1
+                continue
+            order_requests.append(order)
 
         report = CycleDecisionReport(
             selected_universe=tuple(selected_universe),
@@ -112,7 +132,10 @@ class DecisionPipelineService:
             allocation_actions=allocation.actions,
             allocation_decisions=allocation.decisions,
             counters=allocation.counters,
-            order_requests=order_requests,
+            order_requests=tuple(order_requests),
+            mapped_orders_count=len(order_requests),
+            dropped_actions_count=sum(dropped_reasons.values()),
+            dropped_reasons=dropped_reasons,
         )
         self._log_report(report)
         return report
@@ -207,7 +230,9 @@ class DecisionPipelineService:
                     "universe_size": len(report.selected_universe),
                     "intent_count": len(report.intents),
                     "actions_count": len(report.allocation_actions),
-                    "order_request_count": len(report.order_requests),
+                    "mapped_orders_count": report.mapped_orders_count,
+                    "dropped_actions_count": report.dropped_actions_count,
+                    "dropped_reasons": dict(report.dropped_reasons),
                     "counters": dict(report.counters),
                 }
             },
@@ -242,3 +267,9 @@ class DecisionPipelineService:
                 }
             },
         )
+
+    @staticmethod
+    def _to_decimal(value: Decimal | float | int | str) -> Decimal:
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
