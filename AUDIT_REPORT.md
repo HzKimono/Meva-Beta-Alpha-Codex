@@ -1,288 +1,194 @@
-# Meva-Beta-Stage End-to-End Audit Report
+# Stage 6 Readiness Audit Report (Stage 5 + Stage 4 Integration)
 
-## 1) Executive Summary
-- **Overall readiness rating:** **CONDITIONAL PASS**
-- **Stage readiness ratings:**
-  - **Stage 3:** **CONDITIONAL PASS**
-  - **Stage 4:** **FAIL**
-  - **Stage 5:** **FAIL**
+## Executive summary
 
-### Top 10 risks (ranked)
-1. **High** — Private side-effect requests (`POST/DELETE`) are not retried at transport layer; uncertain outcomes rely on reconciliation, which can still return unknown and leave operator ambiguity.  
-2. **High** — `canonical_symbol()` removes underscores globally, while BTCTurk payload/params often use `pairSymbol` underscore form; this may cause symbol mismatches for some endpoints/venues depending on tolerance.  
-3. **High** — No explicit file locking / multi-process safety in SQLite store; concurrent bot runs can race and violate operator assumptions.  
-4. **Medium** — Risk policy enforces order-count/notional/cooldown, but does not enforce `MAX_POSITION_TRY_PER_SYMBOL` or portfolio allocation limits from settings.  
-5. **Medium** — Strategy profit-taking trigger uses `bid >= avg_cost * (1 + min_profit_bps)` but does not include explicit fee/slippage/spread-adjusted realized profitability model.  
-6. **Medium** — No Stage 5 universe discovery/auto-symbol selection module exists; symbol universe is static env config.  
-7. **Medium** — Exchange rules provider silently falls back to conservative defaults on failures; this protects continuity but can cause over/under-filtering without hard alerting.  
-8. **Medium** — Fills ingestion is adapter-optional (`get_recent_fills` default empty), so accounting can appear healthy while receiving no exchange fills if adapter lacks implementation.  
-9. **Low** — `LIVE_TRADING_ACK` gate checks exact literal; robust but operationally brittle if deployment templating trims/normalizes unexpectedly.  
-10. **Low** — Existing `AUDIT_REPORT.md` previously documented Stage 1; risk of stale docs if freeze artifacts include outdated report versions.
+**Readiness verdict:** **PASS WITH CONDITIONS** — core Stage 4/5 integration is sound and P0 hardening items in this audit PR are addressed; Stage 6 can start after merging this PR while tracking P1 typing/tooling debt.  
 
-### What is safe to freeze now vs must change first
-- **Safe to freeze now (Stage 3 baseline):** triple-gate safety semantics, idempotent action recording, deterministic tests, CI quality gates, dry-run workflow, structured logging.
-- **Must change first before live scaling/Stage 4+ freeze:** position cap enforcement, explicit concurrent-run guard, stronger submit/cancel uncertain-outcome handling SOP, and Stage 4/5 feature completion (profit loop completeness + universe discovery).
+- ✅ Strong architecture separation exists across `domain`, `services`, `adapters`, and CLI orchestration.
+- ✅ Stage 5 pipeline is integrated into Stage 4 and falls back to bootstrap intents when pipeline output is empty.
+- ✅ Live-trading safety gates (dry-run, kill-switch, explicit arming) are consistently applied.
+- ✅ P0 addressed in this PR: exchange rules now prefer exchange-provided `tickSize`/`stepSize` with safe fallback to scale-derived values.
+- ✅ P0 addressed in this PR: SQLite store now sets timeout + busy-timeout + WAL for better contention resilience.
+- ⚠️ P1: No CI workflow existed in-repo; quality gates were local-only.
+- ⚠️ P1: mypy readiness is currently low (34 errors) and no typed CI gate exists.
 
-## 2) Repository Inventory (100% coverage proof)
-### Reviewed files (all tracked files)
-- `.env.example`
-- `.gitattributes`
-- `.github/workflows/ci.yml`
-- `AUDIT_REPORT.md`
-- `README.md`
-- `pyproject.toml`
-- `scripts/guard_multiline.py`
-- `src/btcbot/__init__.py`
-- `src/btcbot/__main__.py`
-- `src/btcbot/accounting/__init__.py`
-- `src/btcbot/accounting/accounting_service.py`
-- `src/btcbot/adapters/btcturk_auth.py`
-- `src/btcbot/adapters/btcturk_http.py`
-- `src/btcbot/adapters/exchange.py`
-- `src/btcbot/cli.py`
-- `src/btcbot/config.py`
-- `src/btcbot/domain/accounting.py`
-- `src/btcbot/domain/intent.py`
-- `src/btcbot/domain/models.py`
-- `src/btcbot/domain/symbols.py`
-- `src/btcbot/logging_utils.py`
-- `src/btcbot/risk/__init__.py`
-- `src/btcbot/risk/exchange_rules.py`
-- `src/btcbot/risk/policy.py`
-- `src/btcbot/services/execution_service.py`
-- `src/btcbot/services/market_data_service.py`
-- `src/btcbot/services/portfolio_service.py`
-- `src/btcbot/services/risk_service.py`
-- `src/btcbot/services/state_store.py`
-- `src/btcbot/services/strategy_service.py`
-- `src/btcbot/services/sweep_service.py`
-- `src/btcbot/services/trading_policy.py`
-- `src/btcbot/strategies/__init__.py`
-- `src/btcbot/strategies/base.py`
-- `src/btcbot/strategies/context.py`
-- `src/btcbot/strategies/profit_v1.py`
-- `tests/test_accounting_stage3.py`
-- `tests/test_btcturk_auth.py`
-- `tests/test_btcturk_exchangeinfo_parsing.py`
-- `tests/test_btcturk_http.py`
-- `tests/test_btcturk_submit_cancel.py`
-- `tests/test_cli.py`
-- `tests/test_config.py`
-- `tests/test_domain_models.py`
-- `tests/test_env_example.py`
-- `tests/test_exchangeinfo.py`
-- `tests/test_execution_reconcile.py`
-- `tests/test_execution_service.py`
-- `tests/test_execution_service_live_arming.py`
-- `tests/test_guard_multiline.py`
-- `tests/test_logging_utils.py`
-- `tests/test_risk_policy_stage3.py`
-- `tests/test_state_store.py`
-- `tests/test_state_store_stage3.py`
-- `tests/test_strategy_stage3.py`
-- `tests/test_sweep_service.py`
-- `tests/test_trading_policy.py`
+## Phase 0 — Repository inventory
 
-### NOT REVIEWED
-- **None**.
+### Top-level inventory
+- Config / packaging: `pyproject.toml`, `.env.example`.
+- Docs: `README.md`, `docs/stage4.md`, `AUDIT_REPORT.md`.
+- Runtime artifact: `btcbot_state.db`.
+- Source root: `src/btcbot/` with modules:
+  - `domain/`, `services/`, `adapters/`, `risk/`, `strategies/`, `accounting/`, CLI files.
+- Tests: `tests/` with Stage 3/4/5 coverage.
+- Tooling script: `scripts/guard_multiline.py`.
+- CI config after this audit PR: `.github/workflows/ci.yml`.
 
-### Generated/artifact files vs source
-- Source/config/docs/tests/scripts: all files listed above.
-- Runtime/generated (not tracked): SQLite state DB (`STATE_DB_PATH`, default `btcbot_state.db`) and Python bytecode caches from local runs.
+### Key entrypoints
+- CLI entrypoint: `btcbot.cli:main` in `pyproject.toml`.
+- Runtime command entrypoints: `run`, `stage4-run`, and `health` in `src/btcbot/cli.py`.
+- Stage 5 orchestrator: `DecisionPipelineService.run_cycle` in `src/btcbot/services/decision_pipeline_service.py`.
+- Stage 4 cycle hook: Stage 4 runner invokes decision pipeline in `src/btcbot/services/stage4_cycle_runner.py`.
 
-## 3) Architecture Map (Expert-level)
-- **cli**: startup, argument parsing, policy gating, service wiring, cycle orchestration.
-- **adapters**: abstract exchange interface + BTCTurk HTTP/public-private implementation + auth signing.
-- **services**:
-  - market data (orderbook + symbol rules cache)
-  - portfolio (balances)
-  - strategy generation
-  - risk filtering
-  - execution + reconcile
-  - legacy sweep planner
-  - sqlite state persistence
-- **domain**: intents, orders, symbols, accounting models.
-- **risk/policy**: quantization + min_notional + caps/cooldown/open-order checks.
-- **accounting/positions**: fill application, avg-cost, realized/unrealized PnL.
-- **persistence**: `StateStore` tables for actions/orders/fills/positions/intents/meta.
-- **logging/observability**: JSON formatter + structured extra fields + request IDs.
+---
 
-Dependency direction is mostly clean (`cli -> services -> adapters/domain`). No import cycles observed in source tree. The main coupling concern is `StrategyService` + `RiskService` dependence on broad `StateStore` API by `getattr`, which weakens explicit contracts.
+## Phase 1 — Architectural boundary audit
 
-### One cycle (text sequence)
-`CLI.run_cycle -> policy validation -> build exchange -> StateStore init -> Execution.cancel_stale_orders -> Portfolio.get_balances -> MarketData.get_best_bids -> Accounting.refresh(fills+positions) -> Strategy.generate intents -> Risk.filter intents -> Execution.execute_intents (record_action + optional place/cancel + reconcile) -> StateStore.set_last_cycle_id -> close exchange`.
+## Layer responsibilities and boundary quality
 
-## 4) Safety & Live-Trading Controls (High Stakes)
-### Side-effect capable methods
-- `BtcturkHttpClient.submit_limit_order`, `place_limit_order`, `cancel_order` (private endpoints).
-- `ExecutionService.execute_intents` (place path).
-- `ExecutionService.cancel_stale_orders` (cancel path).
+### `domain/`
+- Contains immutable-ish contracts and quantization/rule types (`ExchangeRules`, `Order`, `Quantizer`, intent/allocation models).
+- No direct I/O observed in domain classes.
+- Boundary quality: **Good**.
 
-### Guard tracing
-- Triple gate check in policy: kill switch, dry-run, live armed.
-- CLI run gate blocks non-dry runs when not armed.
-- Execution service rechecks before each live side effect.
-- Kill switch short-circuits both cancel and place paths into logging-only mode.
+### `services/`
+- Orchestration and policy logic:
+  - Stage 4 cycle composition (`Stage4CycleRunner`).
+  - Stage 5 decision pipeline (`DecisionPipelineService`).
+  - Allocation/risk/execution/accounting orchestration.
+- Boundary quality: **Good**, with acceptable coupling to `StateStore`.
 
-### Bypass path assessment
-- **Observed:** no direct live side-effect call in CLI path bypasses `ExecutionService` gating when normal run orchestration is used.
-- **Residual risk:** direct adapter invocation by external code/tests is possible (outside CLI policy path), as expected in library-style architecture.
+### `adapters/`
+- Exchange protocol and HTTP boundary (`btcturk_http.py`, protocol interfaces, action-to-order adapter).
+- Boundary quality: **Good**. Conversion/parsing mostly kept here.
 
-### Idempotency strategy
-- Action dedupe via `actions.dedupe_key` unique index over `(action_type,payload_hash,time_bucket)`.
-- Stable idempotency keys on intents; deterministic client order IDs derived from intent fields.
-- Reconcile flow attempts `openOrders` and `allOrders` matching by client ID and fallback fields.
+### `cli`
+- Thin orchestration wrapper; no heavy business logic beyond wiring and top-level policy gate checks.
+- Boundary quality: **Good**.
 
-### Attack paths + mitigations
-- Misconfigured env enabling live while assuming dry mode -> mitigated by triple gate + ACK literal.
-- Network timeout after submit causing duplicate operator/manual resend -> partially mitigated by client order ID + reconcile.
-- Concurrent bot processes -> not mitigated enough; add process-level lock or DB lock discipline.
+## Stage 5 pipeline verification
+Implemented flow in code:  
+`universe -> strategies -> intents -> allocation -> action_to_order -> stage4 cycle lifecycle/risk/execution`.
 
-## 5) External I/O Audit (HTTP, time, filesystem)
-### HTTP endpoints used
-- Public: `/api/v2/server/exchangeinfo`, `/api/v2/orderbook`.
-- Private: `/api/v1/users/balances`, `/api/v1/openOrders`, `/api/v1/allOrders`, `/api/v1/order/{id}`, `/api/v1/order` (POST/DELETE).
+- Universe: `select_universe(...)`.
+- Strategy intent generation: registry in `DecisionPipelineService`.
+- Allocation: `AllocationService.allocate(...)`.
+- Mapping: `sized_action_to_order(...)`.
+- Stage 4 integration: Stage 4 runner uses pipeline order requests before bootstrap fallback.
 
-### Retry/backoff
-- Public GET `_get()` uses retry for timeout/429/5xx and transport, capped by attempt and total wait, parsing `Retry-After` (seconds/date) with per-sleep cap.
-- Private `_private_request()` has **no retry loop** (safer for side effects).
+## Stage 4 pipeline verification
+Implemented flow in code:  
+`reconcile(open orders) -> fills/accounting -> lifecycle planning -> risk policy -> execution -> state/audit persistence`.
 
-### Timeouts
-- `httpx.Timeout(timeout=..., connect=5s, read=10s, write=10s, pool=5s)` unless user passes custom timeout object.
+- Reconcile: `ReconcileService.resolve(...)`.
+- Risk gate: `RiskPolicy.filter_actions(...)`.
+- Execution side effects: `ExecutionService.execute_with_report(...)`.
+- Persistence/audit: `StateStore.record_cycle_audit(...)`, order/position/fill tables.
 
-### Logging sanitization
-- Request params/json sanitize sensitive keys before attaching to `ExchangeError` context.
-- API keys/secrets are not logged directly by observed code paths.
+---
 
-### Filesystem I/O
-- `.env` via pydantic settings.
-- SQLite DB created/updated at `STATE_DB_PATH`.
-- No uncontrolled file writes beyond DB and normal logging stdout.
+## Phase 2 — Correctness & safety audit
 
-## 6) Data Integrity & Persistence Audit
-### State DB schema
-- Tables: `actions`, `orders`, `fills`, `positions`, `intents`, `meta`.
-- Key invariants: primary keys on `order_id`, `fill_id`, `symbol`(positions), `intent_id`, `meta.key`; unique index on action dedupe key and intent idempotency key.
+## 1) Decimal usage
+- Most Stage 4/5 money and quantity calculations use `Decimal` throughout core services.
+- Residual float usage remains in legacy Stage 3-facing models (`Balance.free/locked`, some orderbook parsing as float).
+- Verdict: **Mostly correct for Stage 4/5 paths**, but typed legacy models still mix float/Decimal.
 
-### Idempotency/reconcile
-- Action-level dedupe window buckets prevent immediate duplicates.
-- Fill inserts are `INSERT OR IGNORE` on `fill_id`.
-- Execution reconciliation uses multi-source matching strategy after uncertain errors.
+## 2) Symbol normalization / canonicalization
+- Canonicalization is centralized (`canonical_symbol`), used in config parsing, allocation, strategy universe, and Stage 4 map keys.
+- Adapter pair symbol formatter currently maps to normalized symbol only; explicit venue-specific formatter abstraction is absent.
+- Verdict: **Acceptable**, but should be hardened before multi-venue support.
 
-### Failure modes
-- Missing DB: auto-created via `_init_db`.
-- Corrupt DB: not explicitly handled; runtime sqlite exceptions propagate.
-- Partial writes: context manager commits/rolls back transactionally per operation block.
-- Concurrent runs: sqlite default settings without explicit busy timeout/locking policy; race risk remains.
+## 3) PairInfo -> ExchangeRules correctness
+- Mapping now prefers exchange-provided `tickSize`/`stepSize` and falls back to precision-derived quantization when explicit values are unavailable.
+- Added regression coverage for tick/step precedence and quantization outcomes.
+- Verdict: **Resolved in this PR**.
 
-### Backup/restore (freeze)
-- Snapshot source + `.env.example` + CI + exact dependency metadata.
-- Include DB migration/restore note: current schema evolves via additive `ALTER TABLE`; no migration version table.
+## 4) Quantization + min-notional
+- Quantization and `validate_min_notional` are applied in Stage 5 mapping and bootstrap intent builder.
+- Execution layer re-validates min notional before submission, adding defense-in-depth.
+- Verdict: **Strong**.
 
-## 7) Strategy, Risk, and Profit Loop Readiness (Stage 4/5 oriented)
-### Current strategy behavior
-- `ProfitAwareStrategyV1`:
-  - If position exists and bid meets `avg_cost*(1+min_profit_bps)`, emits partial sell (25%).
-  - Else if no position and spread <=1%, places conservative buy using min(TRY balance, 100 TRY).
+## 5) Safety switches
+- Kill-switch blocks writes in execution service.
+- Dry-run/live gating requires full arming (`LIVE_TRADING`, ack, non-dry-run, kill switch off).
+- Policy block writes audit record in Stage 4 CLI flow.
+- Verdict: **Strong**.
 
-### Profit-aware sell completeness
-- Exists, but not explicitly fee-aware beyond avg_cost itself; no explicit slippage/bid-depth/fees buffer in sell trigger.
+## 6) Idempotency
+- Deterministic client order IDs in action mapping.
+- Stage 4 execution dedupes by `client_order_id_exists(...)` and terminal checks before submit/cancel.
+- Verdict: **Good**.
 
-### Positions/PnL ledger
-- Position ledger exists; handles buy/sell fill application and realized/unrealized PnL updates.
-- Partial fill handling exists through additive fill processing.
-- Accuracy depends on reliable fill ingestion; default adapter method may return no fills.
+## 7) Error handling / partial failures
+- Stage 4 handles symbol-local failures for open-order and fills fetch, continues cycle, and records counts.
+- Adapter retries GET/public and private GET requests with bounded backoff.
+- Private write operations (submit/cancel) intentionally do not retry, relying on reconcile.
+- Verdict: **Good with operational caveat** (needs runbook for uncertain outcomes).
 
-### Stage 5 discovery/allocation
-- No universe discovery module detected; symbols come from static settings env list.
-- No optimizer/allocation engine for dynamic portfolio weighting.
+## 8) State persistence / schema / migrations
+- Schema self-heals via `CREATE TABLE IF NOT EXISTS` + additive column checks.
+- No external migration framework/version history beyond lightweight schema table.
+- Before this PR there was no explicit busy timeout/WAL tuning.
+- Verdict: **Improved in this PR**, still lacking formal migration tooling.
 
-### Gap analysis
-- **Exists now:** Stage 3 safety, Stage 4-leaning accounting/reconcile hooks, basic profit-take strategy.
-- **Missing:** robust fill ingestion guarantees, explicit profit net-of-fee model, dynamic symbol discovery, allocation/risk budget framework.
-- **Risky to deploy early:** autonomous symbol expansion and aggressive sell loops without full fee/slippage accounting.
+---
 
-## 8) Test Suite Audit (strict)
-- Tests are deterministic/offline overall: extensive `httpx.MockTransport`, monkeypatching, in-memory/dry-run doubles.
-- No direct real-network test dependency observed in pytest suite.
-- Strong coverage for: safety gating, retry parsing/backoff behavior, exchangeinfo parsing, execution arming/reconcile, state store behavior.
-- Coverage gaps remain in: multi-process concurrency, long-run DB corruption recovery, comprehensive Stage 5 features (absent by design).
+## Phase 3 — Tests, CI, tooling audit
 
-### Minimal “golden” acceptance per stage
-- **Stage 3:** config + health + dry-run cycle + arming guard tests + action dedupe/state tests.
-- **Stage 4:** deterministic fill ingestion simulation, partial-fill realized/unrealized PnL assertions, submit/cancel uncertain reconcile scenarios.
-- **Stage 5:** universe discovery scoring deterministic fixture tests, allocation constraints, symbol admission/removal hysteresis tests.
+## Current tests
+- Unit/functional coverage is broad for config parsing, adapters, strategy/allocation, Stage 4 services, cycle runner, and persistence.
+- Deterministic tests exist for quantization and min-notional rejection paths.
 
-## 9) Code Quality & Maintainability
-- Typing is generally strong (pydantic models/dataclasses/protocols), but dynamic `getattr` usage in services reduces interface explicitness.
-- Error handling is mostly consistent with explicit exchange errors and structured logs.
-- Logging is structured JSON with extra fields; correlation-like request IDs used in HTTP calls.
-- CI alignment is good: guard script + ruff + compileall + pytest.
-- Refactor candidates:
-  1) Introduce explicit Protocols for `StateStore`-consuming services.
-  2) Add migration versioning table.
-  3) Centralize symbol normalization semantics for BTCTurk endpoint formatting.
+## Missing/high-risk tests
+- Added in this PR: direct tests for `PairInfo.tickSize/stepSize` precedence over scale mapping.
+- Multi-process SQLite contention behavior lacks stress tests.
+- More edge cases desirable for extreme precision and tiny balances on Stage 5 mapped orders.
 
-## 10) Security Review (practical)
-- Secret management via env and `SecretStr` settings fields; `.env.example` provides non-secret template.
-- BTCTurk auth signing uses HMAC-SHA256 with base64-decoded secret; invalid base64 rejected.
-- Dependencies are modern but not lockfile-pinned in repo; reproducibility depends on index state.
-- GitHub Actions workflow is straightforward; no dangerous elevated permissions block observed.
+## CI/tooling
+- Before this PR, repository did not contain `.github/workflows/*`.
+- This PR adds a minimal CI workflow running format-check, lint, and pytest on Python 3.12.
+- mypy is not configured as a required gate and currently fails with many issues.
 
-## 11) Findings Table (Actionable)
-| ID | Stage | Severity | Area | File(s) + lines | Symptom | Root cause | Recommended fix | Regression tests | Freeze blocker? |
-|---|---|---|---|---|---|---|---|---|---|
-| F-001 | 4/Cross | High | Execution reliability | `execution_service.py`, `btcturk_http.py` | Uncertain submit/cancel outcomes can remain unresolved | Side-effects non-retried + reconcile can return unknown | Add explicit unresolved-action escalation state + operator alert channel + replay-safe recovery command | Add tests for repeated unknown reconcile and recovery workflow | Yes |
-| F-002 | Cross | High | Symbol normalization | `domain/symbols.py`, `btcturk_http.py` | Canonical symbols strip underscore; endpoint params may mismatch venue expectations | Global canonicalization reused for all contexts | Add explicit pair formatting helper per endpoint and preserve exchange-specific form | Add tests for BTC_TRY/BTCTRY roundtrip across all adapter calls | Yes |
-| F-003 | 3/Cross | High | Persistence concurrency | `state_store.py` | Concurrent bot runs can race | No process lock / busy timeout strategy | Add single-instance lock file or sqlite BEGIN IMMEDIATE + busy_timeout and startup guard | Add integration test simulating two processes | Yes |
-| F-004 | 4 | Medium | Risk policy completeness | `config.py`, `risk_service.py`, `risk/policy.py` | `MAX_POSITION_TRY_PER_SYMBOL` exists in config but not enforced | Setting not wired into policy evaluation | Implement position-size cap checks using mark prices and positions | Add policy tests for cap blocks/permits | Yes |
-| F-005 | 4 | Medium | Profit realism | `strategies/profit_v1.py`, `accounting_service.py` | Profit sells may trigger without explicit fee/slippage cushion | Trigger checks min_profit_bps on avg_cost only | Add net-profit threshold formula including fee estimate + spread safety margin | Add strategy tests with fee/slippage fixtures | No |
-| F-006 | 5 | Medium | Universe discovery | `config.py`, strategy/services modules | Static symbol list only | No discovery/scoring pipeline exists | Add Stage 5 module for discovery/scoring with conservative allowlist & risk caps | Add deterministic fixture tests | Yes |
-| F-007 | 4 | Medium | Fill ingestion robustness | `adapters/exchange.py`, `accounting_service.py` | Accounting can process zero fills silently | `get_recent_fills` optional default empty | Make fill source explicit in live mode; alert on prolonged no-fill state with open orders | Add test for no-fill alert behavior | No |
-| F-008 | Cross | Medium | Observability | `state_store.py`, `execution_service.py` | No explicit escalation artifact for unresolved actions | Metadata captures status but not alert lifecycle | Add unresolved_actions view/table + metrics/log counters | Add tests for unresolved lifecycle transitions | No |
-| F-009 | Cross | Low | Reproducibility | `pyproject.toml` | No lockfile in repo | Floating transitive versions possible | Add pinned lock workflow (uv/pip-tools/poetry) | CI test using lock install path | No |
-| F-010 | Cross | Low | Documentation drift | `AUDIT_REPORT.md`, `README.md` | Prior report stage mismatch risk | historical doc retained | Keep latest audit timestamped and archive old audits separately | Doc consistency check test/script | No |
+## Packaging/dependency posture
+- `pyproject.toml` is structurally valid and defines CLI script.
+- Dependencies are version-ranged (not lockfile-pinned).
+- Security/reproducibility could improve with pinned lock workflow.
 
-## 12) Stage Freeze Checklist (what to run next)
-### Windows PowerShell verification commands
-```powershell
-# clean venv
-Remove-Item -Recurse -Force .venv -ErrorAction SilentlyContinue
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+---
 
-# install deps
-pip install -e ".[dev]"
+## Phase 4 — Performance & maintainability audit
 
-# env template
-Copy-Item .env.example .env -Force
+- Hot path orchestration is straightforward and mostly linear per symbol.
+- Logging is structured and audit-rich in Stage 4 runner.
+- `StateStore` has grown large; partitioning read/write concerns could improve maintainability later.
+- Type coverage is partial; mypy debt is substantial.
 
-# static + tests
-ruff check .
-python -m compileall src tests
-pytest -q
+---
 
-# health + dry run
-python -m btcbot.cli health
-python -m btcbot.cli run --dry-run
-```
+## Prioritized fix list
 
-Expected dry-run logs: kill-switch/dry-run policy messages and cycle completion summary with no live side effects.
+## P0 (blockers before Stage 6)
+- None remaining in this audit branch after hardening changes in this PR.
 
-### Freeze artifacts to archive
-- Full source tree
-- `pyproject.toml` and dependency export/lock artifact (if created)
-- `.github/workflows/ci.yml`
-- `README.md`, `.env.example`, this audit report
-- Suggested tag: `v0.3.0-stage3-freeze-candidate`
+## P1 (high priority)
+1. **CI absent in-repo**
+   - **Files:** `.github/workflows/ci.yml` (added in this PR).
+   - **Risk:** Regressions not automatically caught on push/PR.
+   - **Fix:** Enforce lint + tests in GitHub Actions.
+   - **Blocker:** No, but high priority.
 
-### Release notes template
-- Scope: Stage 3 baseline freeze candidate
-- Safety: triple-gate enforcement summary
-- Data: state schema and migration notes
-- Tests: CI command matrix and results
-- Known gaps: Stage 4/5 backlog + blockers
+2. **Typing readiness (mypy debt)**
+   - **Files:** multiple (`config.py`, `state_store.py`, `btcturk_http.py`, `allocation_service.py`, etc.).
+   - **Risk:** Hidden interface/type bugs in Stage 6 changes.
+   - **Fix:** Introduce staged mypy cleanup and then CI gate.
+   - **Blocker:** No, but high priority.
 
-### Freeze recommendation
-- **Recommendation: fix blockers first, then freeze.**
+## P2 (medium)
+- Add formal migration system (Alembic or explicit migration scripts).
+- Add stronger rule/symbol invariants at adapter boundaries.
+- Improve uncertain submit/cancel operational observability (explicit unresolved action states).
+
+## P3 (nice-to-have)
+- Introduce lockfile/pinned dependency workflow.
+- Break `StateStore` into smaller repository modules.
+
+---
+
+## Audit PR scope (this PR)
+This PR addresses selected P0/P1 hardening items only (no Stage 6 features):
+1. Exchange rules hardening: `build_exchange_rules(...)` now honors explicit exchange `tickSize`/`stepSize` when present (with precision fallback).
+2. Added regression test for tick/step precedence and quantization behavior.
+3. SQLite connection hardening in `StateStore` (`timeout`, `busy_timeout`, `journal_mode=WAL`).
+4. Added regression test validating SQLite operational pragmas.
+5. Added baseline GitHub Actions CI workflow for `ruff format --check`, `ruff check`, and `pytest -q`.

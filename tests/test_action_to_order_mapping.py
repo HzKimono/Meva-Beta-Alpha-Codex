@@ -123,3 +123,22 @@ def test_client_order_id_is_deterministic() -> None:
     assert first == second
     assert len(first) <= 64
     assert all(ch.isalnum() or ch in {":", "|", "-", "_"} for ch in first)
+
+
+def test_build_exchange_rules_prefers_explicit_tick_and_step_size() -> None:
+    pair = PairInfo(
+        pairSymbol="BTCTRY",
+        numeratorScale=6,
+        denominatorScale=2,
+        minTotalAmount=Decimal("10"),
+        tickSize=Decimal("0.05"),
+        stepSize=Decimal("0.0005"),
+        status="TRADING",
+    )
+
+    rules = build_exchange_rules(pair)
+
+    assert rules.tick_size == Decimal("0.05")
+    assert rules.step_size == Decimal("0.0005")
+    assert Quantizer.quantize_price(Decimal("100.13"), rules) == Decimal("100.10")
+    assert Quantizer.quantize_qty(Decimal("0.1237"), rules) == Decimal("0.1235")

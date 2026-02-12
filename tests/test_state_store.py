@@ -171,6 +171,17 @@ def test_update_order_status_marks_reconciled_for_open_exchange_observation(
     assert row["last_seen_at"] == 1_700_000_000_200
 
 
+def test_state_store_sets_sqlite_busy_timeout_and_wal(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+
+    with store._connect() as conn:
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert int(busy_timeout) >= 5000
+    assert str(journal_mode).lower() == "wal"
+
+
 def test_connect_context_manager_commits_and_closes(monkeypatch) -> None:
     class FakeConnection:
         def __init__(self) -> None:
@@ -178,6 +189,9 @@ def test_connect_context_manager_commits_and_closes(monkeypatch) -> None:
             self.committed = False
             self.rolled_back = False
             self.closed = False
+
+        def execute(self, _query: str):
+            return None
 
         def commit(self) -> None:
             self.committed = True
@@ -189,7 +203,7 @@ def test_connect_context_manager_commits_and_closes(monkeypatch) -> None:
             self.closed = True
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda _: fake_conn)
+    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -210,6 +224,9 @@ def test_connect_context_manager_rolls_back_and_closes_on_error(monkeypatch) -> 
             self.rolled_back = False
             self.closed = False
 
+        def execute(self, _query: str):
+            return None
+
         def commit(self) -> None:
             self.committed = True
 
@@ -220,7 +237,7 @@ def test_connect_context_manager_rolls_back_and_closes_on_error(monkeypatch) -> 
             self.closed = True
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda _: fake_conn)
+    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -283,6 +300,9 @@ def test_connect_close_failure_does_not_mask_primary_error(monkeypatch) -> None:
             self.committed = False
             self.rolled_back = False
 
+        def execute(self, _query: str):
+            return None
+
         def commit(self) -> None:
             self.committed = True
 
@@ -293,7 +313,7 @@ def test_connect_close_failure_does_not_mask_primary_error(monkeypatch) -> None:
             raise RuntimeError("close boom")
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda _: fake_conn)
+    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
