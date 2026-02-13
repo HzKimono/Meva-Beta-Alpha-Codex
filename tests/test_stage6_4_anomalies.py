@@ -26,6 +26,7 @@ def test_decide_degrade_cooldown_active_keeps_override_and_reasons() -> None:
         recent_warn_count=999,
         warn_threshold=3,
         warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
     )
     assert decision.mode_override == Mode.REDUCE_RISK_ONLY
     assert decision.cooldown_until == now + timedelta(minutes=5)
@@ -50,6 +51,7 @@ def test_decide_degrade_error_forces_observe_only() -> None:
         recent_warn_count=0,
         warn_threshold=3,
         warn_codes={AnomalyCode.PNL_DIVERGENCE},
+        recent_warn_codes={AnomalyCode.PNL_DIVERGENCE},
     )
     assert decision.mode_override == Mode.OBSERVE_ONLY
     assert decision.cooldown_until == now + timedelta(minutes=30)
@@ -70,9 +72,27 @@ def test_decide_degrade_warn_threshold_sets_reduce_risk() -> None:
         recent_warn_count=3,
         warn_threshold=3,
         warn_codes={AnomalyCode.STALE_MARKET_DATA},
+        recent_warn_codes={AnomalyCode.STALE_MARKET_DATA},
     )
     assert decision.mode_override == Mode.REDUCE_RISK_ONLY
     assert decision.cooldown_until == now + timedelta(minutes=15)
+
+
+def test_decide_degrade_warn_threshold_uses_recent_warn_codes_when_current_cycle_has_none() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    decision = decide_degrade(
+        anomalies=[],
+        now=now,
+        current_override=None,
+        cooldown_until=None,
+        last_reasons=["ORDER_REJECT_SPIKE"],
+        recent_warn_count=3,
+        warn_threshold=3,
+        warn_codes={AnomalyCode.ORDER_REJECT_SPIKE, AnomalyCode.CURSOR_STALL},
+        recent_warn_codes={AnomalyCode.CURSOR_STALL},
+    )
+    assert decision.mode_override == Mode.REDUCE_RISK_ONLY
+    assert decision.reasons == [AnomalyCode.CURSOR_STALL.value]
 
 
 def test_decide_degrade_none_returns_clear_state() -> None:
@@ -86,6 +106,7 @@ def test_decide_degrade_none_returns_clear_state() -> None:
         recent_warn_count=0,
         warn_threshold=3,
         warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
     )
     assert decision.mode_override is None
     assert decision.cooldown_until is None

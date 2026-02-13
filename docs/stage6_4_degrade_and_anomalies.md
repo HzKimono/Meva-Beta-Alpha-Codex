@@ -20,14 +20,14 @@ Default settings:
 - latency spike threshold: 2000ms (optional detector)
 - cursor stall cycles: 5
 - pnl divergence warn/error: 50 TRY / 200 TRY
-- degrade warn window/threshold: 10 cycles / 3 warn events
+- degrade warn streak/threshold: consecutive warn cycles / 3 warn cycles
 - warn codes CSV: `STALE_MARKET_DATA,ORDER_REJECT_SPIKE,PNL_DIVERGENCE`
 
 Degrade policy:
 
 1. If cooldown is active, override cannot be upgraded during cooldown.
 2. Any `ERROR` anomaly forces `OBSERVE_ONLY` and sets a 30 minute cooldown.
-3. Warn threshold reached for configured warn codes forces `REDUCE_RISK_ONLY` and sets a 15 minute cooldown.
+3. Warn threshold reached for configured warn codes forces `REDUCE_RISK_ONLY` and sets a 15 minute cooldown. The current implementation tracks a consecutive warn-cycle streak (`warn_window_count` resets to 0 when a cycle has no matching WARN anomaly), not a sliding last-N-cycles window.
 4. Otherwise no degrade override is active.
 
 ## Interaction with risk budget
@@ -54,6 +54,8 @@ Structured logs:
 - `anomalies_detected`
 - `degrade_decision`
 - `final_mode`
+
+Pre-exec gating uses last cycle rejects; post-exec persists authoritative current rejects.
 
 ## Operational playbook
 

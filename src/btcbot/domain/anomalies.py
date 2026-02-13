@@ -55,6 +55,7 @@ def decide_degrade(
     recent_warn_count: int,
     warn_threshold: int,
     warn_codes: set[AnomalyCode],
+    recent_warn_codes: set[AnomalyCode],
 ) -> DegradeDecision:
     if cooldown_until is not None and now < cooldown_until:
         return DegradeDecision(
@@ -72,13 +73,9 @@ def decide_degrade(
         )
 
     if recent_warn_count >= warn_threshold:
-        warn_reason_codes = sorted(
-            {
-                event.code.value
-                for event in anomalies
-                if event.severity == "WARN" and event.code in warn_codes
-            }
-        )
+        warn_reason_codes = sorted(code.value for code in recent_warn_codes)
+        if not warn_reason_codes:
+            warn_reason_codes = list(last_reasons or [])
         return DegradeDecision(
             mode_override=Mode.REDUCE_RISK_ONLY,
             reasons=warn_reason_codes,
