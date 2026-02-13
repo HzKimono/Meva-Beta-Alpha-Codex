@@ -7,10 +7,12 @@ from uuid import uuid4
 
 from btcbot.config import Settings
 from btcbot.domain.anomalies import combine_modes
+from btcbot.domain.models import Balance, normalize_symbol
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import UniverseSelectionService
@@ -34,13 +36,47 @@ class Stage7CycleRunner:
         ledger_service = LedgerService(state_store=state_store, logger=logger)
         exchange = build_exchange_stage4(settings, dry_run=True)
         universe_service = UniverseSelectionService()
+        policy_service = PortfolioPolicyService()
+
+        open_orders = state_store.list_stage4_open_orders()
+        lifecycle_actions: list[LifecycleAction] = []
+        for order in open_orders:
+            if order.status.lower() == "simulated_submitted":
+                lifecycle_actions.append(
+                    LifecycleAction(
+                        action_type=LifecycleActionType.SUBMIT,
+                        symbol=order.symbol,
+                        side=order.side,
+                        price=order.price,
+                        qty=order.qty,
+                        reason="stage7_dry_run_simulation",
+                        client_order_id=order.client_order_id,
+                        exchange_order_id=order.exchange_order_id,
+                    )
+                )
+
         universe_result = universe_service.select_universe(
             exchange=getattr(exchange, "client", exchange),
             settings=settings,
             now_utc=now,
         )
+        symbols_needed = sorted(
+            {normalize_symbol(symbol) for symbol in universe_result.selected_symbols}
+            | {normalize_symbol(action.symbol) for action in lifecycle_actions}
+        )
+
         try:
-            mark_prices, _ = stage4.resolve_mark_prices(exchange, settings.symbols)
+            mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
+            base = getattr(exchange, "client", exchange)
+            get_balances = getattr(base, "get_balances", None)
+            balances = get_balances() if callable(get_balances) else []
+            if not balances:
+                balances = [
+                    Balance(
+                        asset=str(settings.stage7_universe_quote_ccy).upper(),
+                        free=settings.dry_run_try_balance,
+                    )
+                ]
         finally:
             close = getattr(exchange, "close", None)
             if callable(close):
@@ -54,39 +90,43 @@ class Stage7CycleRunner:
             "final_mode": combine_modes(base_mode, None).value,
         }
         final_mode = Mode(mode_payload["final_mode"])
+        portfolio_plan = policy_service.build_plan(
+            universe=universe_result.selected_symbols,
+            mark_prices_try=mark_prices,
+            balances=balances,
+            settings=settings,
+            now_utc=now,
+            final_mode=final_mode,
+        )
 
         actions: list[dict[str, object]] = []
         simulated_count = 0
         slippage_try = Decimal("0")
 
         if final_mode != Mode.OBSERVE_ONLY:
-            open_orders = state_store.list_stage4_open_orders()
-            lifecycle_actions: list[LifecycleAction] = []
-            for order in open_orders:
-                if order.status.lower() == "simulated_submitted":
-                    lifecycle_actions.append(
-                        LifecycleAction(
-                            action_type=LifecycleActionType.SUBMIT,
-                            symbol=order.symbol,
-                            side=order.side,
-                            price=order.price,
-                            qty=order.qty,
-                            reason="stage7_dry_run_simulation",
-                            client_order_id=order.client_order_id,
-                            exchange_order_id=order.exchange_order_id,
-                        )
-                    )
             filtered_actions: list[LifecycleAction] = []
             skipped_actions: list[dict[str, object]] = []
             for action in lifecycle_actions:
+                normalized_symbol = normalize_symbol(action.symbol)
                 if final_mode == Mode.REDUCE_RISK_ONLY and action.side.upper() != "SELL":
                     skipped_actions.append(
                         {
-                            "symbol": action.symbol,
+                            "symbol": normalized_symbol,
                             "side": action.side,
                             "qty": str(action.qty),
                             "status": "skipped",
-                            "reason": "mode_reduce_risk_only_sell_only",
+                            "reason": "mode_reduce_risk_only",
+                        }
+                    )
+                    continue
+                if normalized_symbol not in mark_prices:
+                    skipped_actions.append(
+                        {
+                            "symbol": normalized_symbol,
+                            "side": action.side,
+                            "qty": str(action.qty),
+                            "status": "skipped",
+                            "reason": "missing_mark_price",
                         }
                     )
                     continue
@@ -117,7 +157,7 @@ class Stage7CycleRunner:
                 for fill in simulated
             ] + skipped_actions
         else:
-            actions = [{"status": "skipped", "reason": "observe_only_mode"}]
+            actions = [{"status": "skipped", "reason": "observe_only"}]
 
         snapshot = ledger_service.snapshot(
             mark_prices=mark_prices,
@@ -144,6 +184,7 @@ class Stage7CycleRunner:
             },
             mode_payload=mode_payload,
             order_decisions=actions,
+            portfolio_plan=portfolio_plan.to_dict(),
             ledger_metrics={
                 "gross_pnl_try": snapshot.gross_pnl_try,
                 "realized_pnl_try": snapshot.realized_pnl_try,
