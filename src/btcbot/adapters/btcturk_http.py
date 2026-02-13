@@ -451,6 +451,14 @@ class BtcturkHttpClient(ExchangeClient):
         best_ask = _parse_best_price(data.get("asks"), side="ask", symbol=symbol)
         return best_bid, best_ask
 
+    def get_ticker_stats(self) -> list[dict[str, object]]:
+        payload = self._get("/api/v2/ticker")
+        return self._extract_list_data(payload, path="/api/v2/ticker")
+
+    def get_candles(self, symbol: str, limit: int) -> list[dict[str, object]]:
+        del symbol, limit
+        return []
+
     def _to_pair_info(self, item: dict[str, object]) -> PairInfo:
         try:
             min_total = item.get("minTotalAmount")
@@ -923,6 +931,28 @@ class DryRunExchangeClient(ExchangeClient):
         self._exchange_info = exchange_info or []
         self._rng = Random(42)
         self._fills: list[TradeFill] = []
+
+    def get_ticker_stats(self) -> list[dict[str, object]]:
+        stats: list[dict[str, object]] = []
+        for symbol, (bid, ask) in self._orderbooks.items():
+            mid = (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
+            stats.append(
+                {
+                    "pairSymbol": normalize_symbol(symbol),
+                    "volume": "1000",
+                    "last": str(mid),
+                    "high": str(mid * Decimal("1.01")),
+                    "low": str(mid * Decimal("0.99")),
+                }
+            )
+        return stats
+
+    def get_candles(self, symbol: str, limit: int) -> list[dict[str, object]]:
+        bid, ask = self.get_orderbook(symbol)
+        mid = (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
+        if limit <= 0:
+            return []
+        return [{"close": str(mid)} for _ in range(limit)]
 
     def get_balances(self) -> list[Balance]:
         return self._balances

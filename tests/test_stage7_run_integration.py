@@ -24,6 +24,43 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
         "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
     )
 
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return [_Pair("BTC_TRY"), _Pair("ETH_TRY")]
+
+        def get_ticker_stats(self):
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "100",
+                    "high": "101",
+                    "low": "99",
+                },
+                {"pairSymbol": "ETH_TRY", "volume": "900", "last": "50", "high": "51", "low": "49"},
+            ]
+
+        def get_orderbook(self, symbol):
+            if symbol == "BTCTRY":
+                return Decimal("99"), Decimal("100")
+            return Decimal("49"), Decimal("50")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
+    )
+
     settings = Settings(
         DRY_RUN=True,
         STAGE7_ENABLED=True,
@@ -43,6 +80,10 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
 
     assert cycle is not None
     assert metrics is not None
+    selected_universe = json.loads(str(cycle["selected_universe_json"]))
+    assert selected_universe
+    universe_scores = json.loads(str(cycle["universe_scores_json"]))
+    assert universe_scores
     mode_payload = json.loads(str(cycle["mode_json"]))
     order = {"NORMAL": 0, "REDUCE_RISK_ONLY": 1, "OBSERVE_ONLY": 2}
     assert order[mode_payload["final_mode"]] >= order[mode_payload["base_mode"]]
@@ -143,3 +184,46 @@ def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
     assert order[mode_payload["final_mode"]] >= order[mode_payload["base_mode"]]
     assert any(d.get("status") == "submitted" and d.get("side") == "SELL" for d in decisions)
     assert any(d.get("status") == "skipped" for d in decisions)
+
+
+def test_stage7_universe_selection_does_not_change_ledger_metrics_shape(
+    monkeypatch, tmp_path
+) -> None:
+    db_path = tmp_path / "stage7_ledger_shape.db"
+
+    def _fake_stage4(self, settings):
+        del self, settings
+        return 0
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+    )
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
+    finally:
+        conn.close()
+
+    assert metrics is not None
+    for key in [
+        "gross_pnl_try",
+        "realized_pnl_try",
+        "unrealized_pnl_try",
+        "net_pnl_try",
+        "fees_try",
+        "slippage_try",
+        "turnover_try",
+        "equity_try",
+        "max_drawdown",
+    ]:
+        assert key in metrics.keys()

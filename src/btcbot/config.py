@@ -66,6 +66,28 @@ class Settings(BaseSettings):
     stage7_slippage_bps: Decimal = Field(default=Decimal("25"), alias="STAGE7_SLIPPAGE_BPS")
     stage7_fees_bps: Decimal = Field(default=Decimal("20"), alias="STAGE7_FEES_BPS")
     stage7_mark_price_source: str = Field(default="mid", alias="STAGE7_MARK_PRICE_SOURCE")
+    stage7_universe_size: int = Field(default=20, alias="STAGE7_UNIVERSE_SIZE")
+    stage7_universe_quote_ccy: str = Field(default="TRY", alias="STAGE7_UNIVERSE_QUOTE_CCY")
+    stage7_universe_whitelist: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        alias="STAGE7_UNIVERSE_WHITELIST",
+    )
+    stage7_universe_blacklist: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        alias="STAGE7_UNIVERSE_BLACKLIST",
+    )
+    stage7_min_quote_volume_try: Decimal = Field(
+        default=Decimal("0"),
+        alias="STAGE7_MIN_QUOTE_VOLUME_TRY",
+    )
+    stage7_max_spread_bps: Decimal = Field(
+        default=Decimal("1000000"),
+        alias="STAGE7_MAX_SPREAD_BPS",
+    )
+    stage7_vol_lookback: int = Field(default=20, alias="STAGE7_VOL_LOOKBACK")
+    stage7_score_weights: dict[str, float] | None = Field(
+        default=None, alias="STAGE7_SCORE_WEIGHTS"
+    )
 
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
@@ -136,6 +158,13 @@ class Settings(BaseSettings):
         return cls._parse_symbol_list(
             value,
             invalid_json_message="UNIVERSE symbols JSON value must be a list",
+        )
+
+    @field_validator("stage7_universe_whitelist", "stage7_universe_blacklist", mode="before")
+    def parse_stage7_universe_symbols(cls, value: str | list[str]) -> list[str]:
+        return cls._parse_symbol_list(
+            value,
+            invalid_json_message="STAGE7_UNIVERSE symbols JSON value must be a list",
         )
 
     @classmethod
@@ -288,6 +317,25 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {"mid", "last"}:
             raise ValueError("STAGE7_MARK_PRICE_SOURCE must be one of: mid,last")
+        return normalized
+
+    @field_validator("stage7_universe_size", "stage7_vol_lookback")
+    def validate_stage7_positive_ints(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Stage7 universe integer settings must be >= 1")
+        return value
+
+    @field_validator("stage7_min_quote_volume_try", "stage7_max_spread_bps")
+    def validate_stage7_non_negative_decimals(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("Stage7 universe decimal settings must be >= 0")
+        return value
+
+    @field_validator("stage7_universe_quote_ccy")
+    def validate_stage7_quote_ccy(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("STAGE7_UNIVERSE_QUOTE_CCY must be non-empty")
         return normalized
 
     @model_validator(mode="after")

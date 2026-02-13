@@ -61,3 +61,45 @@ Hard safety gates:
 - Gross/net semantics are deterministic and consistent.
 - Drawdown metric is available.
 - Final mode monotonicity is preserved (`final_mode` is never less restrictive than `base_mode`).
+
+## Universe Selection v1 (PR-2)
+
+Stage 7 now computes a deterministic universe at the start of each dry-run cycle.
+
+### Scoring inputs
+- **liquidity_score**: normalized 24h quote volume (`volume` from ticker stats).
+- **spread_score**: normalized inverse of top-of-book spread bps using best bid/ask.
+- **volatility_score**: normalized inverse volatility from recent closes (candles); if unavailable,
+  fallback uses ticker high/low vs last, then daily percent change.
+- **total_score**: weighted sum of the three component scores.
+
+Default weights (normalized if custom values are provided):
+- liquidity: `0.50`
+- spread: `0.30`
+- volatility: `0.20`
+
+### Deterministic rules
+- No randomness.
+- Symbols are canonicalized using `canonical_symbol`.
+- Per-cycle caching is used for orderbooks/candles to avoid duplicate network calls.
+- Missing metric values get a deterministic penalty score of `-1` for that component.
+- Final ordering is stable and deterministic:
+  1. `total_score` descending
+  2. `liquidity_score` descending
+  3. `symbol` ascending
+
+### Settings
+- `STAGE7_UNIVERSE_SIZE` (default: `20`)
+- `STAGE7_UNIVERSE_QUOTE_CCY` (default: `TRY`)
+- `STAGE7_UNIVERSE_WHITELIST` (optional list)
+- `STAGE7_UNIVERSE_BLACKLIST` (optional list)
+- `STAGE7_MIN_QUOTE_VOLUME_TRY` (default: `0`)
+- `STAGE7_MAX_SPREAD_BPS` (default: very high, effectively permissive)
+- `STAGE7_VOL_LOOKBACK` (default: `20`)
+- `STAGE7_SCORE_WEIGHTS` (optional dict with `liquidity`, `spread`, `volatility`)
+
+### Persistence
+- `stage7_cycle_trace.selected_universe_json`: selected ranked symbols for the cycle.
+- `stage7_cycle_trace.universe_scores_json`: top scored candidates and score breakdown.
+
+Universe selection is read-only and does not place orders. Stage 7 remains dry-run only.

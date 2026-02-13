@@ -321,12 +321,21 @@ class StateStore:
                 cycle_id TEXT PRIMARY KEY,
                 ts TEXT NOT NULL,
                 selected_universe_json TEXT NOT NULL,
+                universe_scores_json TEXT NOT NULL DEFAULT '[]',
                 intents_summary_json TEXT NOT NULL,
                 mode_json TEXT NOT NULL,
                 order_decisions_json TEXT NOT NULL
             )
             """
         )
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_cycle_trace)")
+        }
+        if "universe_scores_json" not in columns:
+            conn.execute(
+                "ALTER TABLE stage7_cycle_trace "
+                "ADD COLUMN universe_scores_json TEXT NOT NULL DEFAULT '[]'"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS stage7_ledger_metrics (
@@ -358,6 +367,7 @@ class StateStore:
         cycle_id: str,
         ts: datetime,
         selected_universe: list[str],
+        universe_scores: list[dict[str, object]],
         intents_summary: dict[str, object],
         mode_payload: dict[str, object],
         order_decisions: list[dict[str, object]],
@@ -367,12 +377,14 @@ class StateStore:
             conn.execute(
                 """
                 INSERT INTO stage7_cycle_trace(
-                    cycle_id, ts, selected_universe_json, intents_summary_json,
+                    cycle_id, ts, selected_universe_json,
+                    universe_scores_json, intents_summary_json,
                     mode_json, order_decisions_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cycle_id) DO UPDATE SET
                     ts=excluded.ts,
                     selected_universe_json=excluded.selected_universe_json,
+                    universe_scores_json=excluded.universe_scores_json,
                     intents_summary_json=excluded.intents_summary_json,
                     mode_json=excluded.mode_json,
                     order_decisions_json=excluded.order_decisions_json
@@ -381,6 +393,7 @@ class StateStore:
                     cycle_id,
                     ensure_utc(ts).isoformat(),
                     json.dumps(selected_universe, sort_keys=True),
+                    json.dumps(universe_scores, sort_keys=True),
                     json.dumps(intents_summary, sort_keys=True),
                     json.dumps(mode_payload, sort_keys=True),
                     json.dumps(order_decisions, sort_keys=True),
