@@ -255,7 +255,6 @@ def run_cycle_stage4(settings: Settings, force_dry_run: bool = False) -> int:
         return 1
 
 
-
 def run_cycle_stage7(settings: Settings, force_dry_run: bool = False) -> int:
     dry_run = force_dry_run or settings.dry_run
     if not dry_run:
@@ -273,6 +272,7 @@ def run_cycle_stage7(settings: Settings, force_dry_run: bool = False) -> int:
             extra={"extra": {"error_type": type(exc).__name__, "safe_message": str(exc)}},
         )
         return 1
+
 
 def run_health(settings: Settings) -> int:
     client = BtcturkHttpClient(

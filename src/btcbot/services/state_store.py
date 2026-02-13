@@ -315,8 +315,6 @@ class StateStore:
                 "ADD COLUMN last_reject_count INTEGER NOT NULL DEFAULT 0"
             )
 
-
-
     def _ensure_stage7_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """
@@ -364,7 +362,8 @@ class StateStore:
             conn.execute(
                 """
                 INSERT INTO stage7_cycle_trace(
-                    cycle_id, ts, selected_universe_json, intents_summary_json, mode_json, order_decisions_json
+                    cycle_id, ts, selected_universe_json, intents_summary_json,
+                    mode_json, order_decisions_json
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cycle_id) DO UPDATE SET
                     ts=excluded.ts,
@@ -403,15 +402,15 @@ class StateStore:
                 (
                     cycle_id,
                     ensure_utc(ts).isoformat(),
-                    str(ledger_metrics['gross_pnl_try']),
-                    str(ledger_metrics['realized_pnl_try']),
-                    str(ledger_metrics['unrealized_pnl_try']),
-                    str(ledger_metrics['net_pnl_try']),
-                    str(ledger_metrics['fees_try']),
-                    str(ledger_metrics['slippage_try']),
-                    str(ledger_metrics['turnover_try']),
-                    str(ledger_metrics['equity_try']),
-                    str(ledger_metrics['max_drawdown']),
+                    str(ledger_metrics["gross_pnl_try"]),
+                    str(ledger_metrics["realized_pnl_try"]),
+                    str(ledger_metrics["unrealized_pnl_try"]),
+                    str(ledger_metrics["net_pnl_try"]),
+                    str(ledger_metrics["fees_try"]),
+                    str(ledger_metrics["slippage_try"]),
+                    str(ledger_metrics["turnover_try"]),
+                    str(ledger_metrics["equity_try"]),
+                    str(ledger_metrics["max_drawdown"]),
                 ),
             )
 

@@ -14,7 +14,9 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
         del self, settings
         return 0
 
-    monkeypatch.setattr("btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4)
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
+    )
 
     settings = Settings(
         DRY_RUN=True,

@@ -277,7 +277,6 @@ class Settings(BaseSettings):
             raise ValueError("PNL_DIVERGENCE_TRY_ERROR must be >= PNL_DIVERGENCE_TRY_WARN")
         return value
 
-
     @field_validator("stage7_slippage_bps", "stage7_fees_bps")
     def validate_stage7_non_negative_bps(cls, value: Decimal) -> Decimal:
         if value < 0:

@@ -197,7 +197,9 @@ class LedgerService:
         events = self.state_store.load_ledger_events()
         state = apply_events(LedgerState(), events)
         realized = compute_realized_pnl(state)
-        normalized_marks = {normalize_symbol(symbol): value for symbol, value in mark_prices.items()}
+        normalized_marks = {
+            normalize_symbol(symbol): value for symbol, value in mark_prices.items()
+        }
         unrealized = compute_unrealized_pnl(state, normalized_marks)
 
         fees_try = Decimal("0")

@@ -49,7 +49,9 @@ def test_stage7_single_buy_then_sell_realized_net_of_fees(tmp_path) -> None:
     )
     service.append_simulated_fills(fills_sell)
 
-    snap = service.snapshot(mark_prices={"BTCTRY": Decimal("110")}, cash_try=Decimal("0"), ts=ts_sell)
+    snap = service.snapshot(
+        mark_prices={"BTCTRY": Decimal("110")}, cash_try=Decimal("0"), ts=ts_sell
+    )
     expected = Decimal("10") - Decimal("0.1") - Decimal("0.11")
     assert snap.realized_pnl_try == expected
 
@@ -81,7 +83,9 @@ def test_stage7_fee_currency_conversion_hook(tmp_path) -> None:
     snap = service.snapshot(
         mark_prices={},
         cash_try=Decimal("0"),
-        price_for_fee_conversion=lambda base, quote: Decimal("35") if (base, quote) == ("USDT", "TRY") else Decimal("1"),
+        price_for_fee_conversion=lambda base, quote: Decimal("35")
+        if (base, quote) == ("USDT", "TRY")
+        else Decimal("1"),
     )
     assert snap.fees_try == Decimal("70")
 

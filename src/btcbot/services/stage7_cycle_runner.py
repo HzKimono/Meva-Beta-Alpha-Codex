@@ -79,7 +79,9 @@ class Stage7CycleRunner:
             ingest = ledger_service.append_simulated_fills(simulated)
             simulated_count = ingest.events_inserted
             for fill in simulated:
-                slippage_try += (fill.applied_price - fill.baseline_price).copy_abs() * fill.event.qty
+                slippage_try += (
+                    fill.applied_price - fill.baseline_price
+                ).copy_abs() * fill.event.qty
             actions = [
                 {
                     "symbol": fill.event.symbol,
