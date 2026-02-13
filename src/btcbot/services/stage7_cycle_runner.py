@@ -8,6 +8,7 @@ from uuid import uuid4
 from btcbot.config import Settings
 from btcbot.domain.anomalies import combine_modes
 from btcbot.domain.risk_budget import Mode
+from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.ledger_service import LedgerService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
@@ -32,17 +33,18 @@ class Stage7CycleRunner:
         ledger_service = LedgerService(state_store=state_store, logger=logger)
         exchange = build_exchange_stage4(settings, dry_run=True)
         try:
-            mark_prices, _ = stage4._resolve_mark_prices(exchange, settings.symbols)  # noqa: SLF001
+            mark_prices, _ = stage4.resolve_mark_prices(exchange, settings.symbols)
         finally:
             close = getattr(exchange, "close", None)
             if callable(close):
                 close()
         dry_cash = Decimal(str(settings.dry_run_try_balance))
 
+        base_mode = state_store.get_latest_risk_mode()
         mode_payload = {
-            "base_mode": Mode.NORMAL.value,
+            "base_mode": base_mode.value,
             "override_mode": None,
-            "final_mode": combine_modes(Mode.NORMAL, None).value,
+            "final_mode": combine_modes(base_mode, None).value,
         }
         final_mode = Mode(mode_payload["final_mode"])
 
@@ -52,11 +54,9 @@ class Stage7CycleRunner:
 
         if final_mode != Mode.OBSERVE_ONLY:
             open_orders = state_store.list_stage4_open_orders()
-            lifecycle_actions = []
+            lifecycle_actions: list[LifecycleAction] = []
             for order in open_orders:
                 if order.status.lower() == "simulated_submitted":
-                    from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
-
                     lifecycle_actions.append(
                         LifecycleAction(
                             action_type=LifecycleActionType.SUBMIT,
@@ -69,8 +69,25 @@ class Stage7CycleRunner:
                             exchange_order_id=order.exchange_order_id,
                         )
                     )
+            filtered_actions: list[LifecycleAction] = []
+            skipped_actions: list[dict[str, object]] = []
+            for action in lifecycle_actions:
+                if final_mode == Mode.REDUCE_RISK_ONLY and action.side.upper() != "SELL":
+                    skipped_actions.append(
+                        {
+                            "symbol": action.symbol,
+                            "side": action.side,
+                            "qty": str(action.qty),
+                            "status": "skipped",
+                            "reason": "mode_reduce_risk_only_sell_only",
+                        }
+                    )
+                    continue
+                filtered_actions.append(action)
+
             simulated = ledger_service.simulate_dry_run_fills(
-                actions=lifecycle_actions,
+                cycle_id=cycle_id,
+                actions=filtered_actions,
                 mark_prices=mark_prices,
                 slippage_bps=settings.stage7_slippage_bps,
                 fees_bps=settings.stage7_fees_bps,
@@ -91,7 +108,7 @@ class Stage7CycleRunner:
                     "reason": "dry_run_fill_simulated",
                 }
                 for fill in simulated
-            ]
+            ] + skipped_actions
         else:
             actions = [{"status": "skipped", "reason": "observe_only_mode"}]
 
@@ -124,5 +141,5 @@ class Stage7CycleRunner:
                 "max_drawdown": snapshot.max_drawdown,
             },
         )
-        state_store.set_last_cycle_id(cycle_id)
+        state_store.set_last_stage7_cycle_id(cycle_id)
         return result

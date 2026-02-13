@@ -261,7 +261,9 @@ def run_cycle_stage7(settings: Settings, force_dry_run: bool = False) -> int:
         print("stage7-run requires --dry-run")
         return 2
     if not settings.stage7_enabled:
+        print("stage7-run is disabled; set STAGE7_ENABLED=true to run")
         logger.warning("stage7_disabled_in_settings")
+        return 2
     runner = Stage7CycleRunner()
     effective_settings = settings.model_copy(update={"dry_run": True})
     try:

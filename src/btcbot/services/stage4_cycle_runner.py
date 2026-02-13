@@ -702,6 +702,11 @@ class Stage4CycleRunner:
             return None
         return dec
 
+    def resolve_mark_prices(
+        self, exchange: object, symbols: list[str]
+    ) -> tuple[dict[str, Decimal], set[str]]:
+        return self._resolve_mark_prices(exchange, symbols)
+
     def _resolve_mark_prices(
         self, exchange: object, symbols: list[str]
     ) -> tuple[dict[str, Decimal], set[str]]:

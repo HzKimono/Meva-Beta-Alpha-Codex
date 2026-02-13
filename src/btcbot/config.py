@@ -4,7 +4,7 @@ import json
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from btcbot.domain.anomalies import AnomalyCode
@@ -289,6 +289,12 @@ class Settings(BaseSettings):
         if normalized not in {"mid", "last"}:
             raise ValueError("STAGE7_MARK_PRICE_SOURCE must be one of: mid,last")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_stage7_safety(self) -> Settings:
+        if self.stage7_enabled and (not self.dry_run or self.live_trading):
+            raise ValueError("STAGE7_ENABLED requires DRY_RUN=true and LIVE_TRADING=false")
+        return self
 
     def parsed_degrade_warn_codes(self) -> set[AnomalyCode]:
         parsed_codes: set[AnomalyCode] = set()
