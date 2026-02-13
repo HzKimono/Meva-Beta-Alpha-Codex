@@ -23,13 +23,14 @@ class OrderBuilderService:
         settings: Settings,
         final_mode: Mode,
         now_utc: datetime,
+        rules_unavailable: dict[str, str] | None = None,
     ) -> list[OrderIntent]:
-        del now_utc
-        if final_mode == Mode.OBSERVE_ONLY:
-            return []
-
         intents: list[OrderIntent] = []
+        if final_mode == Mode.OBSERVE_ONLY:
+            return intents
+
         offset_bps = Decimal(str(settings.stage7_order_offset_bps))
+        unavailable = rules_unavailable or {}
 
         ordered_actions = sorted(
             plan.actions,
@@ -38,13 +39,26 @@ class OrderBuilderService:
         for action in ordered_actions:
             if final_mode == Mode.REDUCE_RISK_ONLY and action.side == "BUY":
                 continue
+            symbol = normalize_symbol(action.symbol)
+            if symbol in unavailable:
+                intents.append(
+                    self._skipped(
+                        cycle_id=cycle_id,
+                        symbol=symbol,
+                        side=action.side,
+                        reason=action.reason,
+                        skip_reason=f"rules_unavailable:{unavailable[symbol]}",
+                        now_utc=now_utc,
+                    )
+                )
+                continue
             intent = self._build_action_intent(
                 cycle_id=cycle_id,
                 action=action,
                 mark_prices_try=mark_prices_try,
                 rules=rules,
                 offset_bps=offset_bps,
-                final_mode=final_mode,
+                now_utc=now_utc,
             )
             intents.append(intent)
 
@@ -58,7 +72,7 @@ class OrderBuilderService:
         mark_prices_try: dict[str, Decimal],
         rules: ExchangeRulesService,
         offset_bps: Decimal,
-        final_mode: Mode,
+        now_utc: datetime,
     ) -> OrderIntent:
         symbol = normalize_symbol(action.symbol)
         side = action.side
@@ -70,6 +84,7 @@ class OrderBuilderService:
                 side=side,
                 reason=action.reason,
                 skip_reason="missing_mark_price",
+                now_utc=now_utc,
             )
 
         offset_multiplier = Decimal("1") + (offset_bps / Decimal("10000"))
@@ -85,6 +100,7 @@ class OrderBuilderService:
                 side=side,
                 reason=action.reason,
                 skip_reason="price_rounds_to_zero",
+                now_utc=now_utc,
             )
 
         target_notional = Decimal(str(action.target_notional_try))
@@ -97,6 +113,7 @@ class OrderBuilderService:
                 side=side,
                 reason=action.reason,
                 skip_reason="qty_rounds_to_zero",
+                now_utc=now_utc,
             )
 
         valid, reason = rules.validate_notional(symbol, price_try, qty)
@@ -108,6 +125,7 @@ class OrderBuilderService:
                 side=side,
                 reason=action.reason,
                 skip_reason=reason,
+                now_utc=now_utc,
             )
 
         client_order_id = self._client_order_id(
@@ -128,7 +146,11 @@ class OrderBuilderService:
             notional_try=notional_try,
             client_order_id=client_order_id,
             reason=action.reason,
-            constraints_applied={"offset_bps": str(offset_bps), "quantized": "true"},
+            constraints_applied={
+                "offset_bps": str(offset_bps),
+                "quantized": "true",
+                "created_at": now_utc.isoformat(),
+            },
             skipped=False,
             skip_reason=None,
         )
@@ -141,6 +163,7 @@ class OrderBuilderService:
         side: str,
         reason: str,
         skip_reason: str,
+        now_utc: datetime,
     ) -> OrderIntent:
         return OrderIntent(
             cycle_id=cycle_id,
@@ -159,7 +182,7 @@ class OrderBuilderService:
                 reason=reason,
             ),
             reason=reason,
-            constraints_applied={"skipped": "true"},
+            constraints_applied={"skipped": "true", "created_at": now_utc.isoformat()},
             skipped=True,
             skip_reason=skip_reason,
         )

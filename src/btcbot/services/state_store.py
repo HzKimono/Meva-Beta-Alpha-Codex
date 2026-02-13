@@ -411,6 +411,33 @@ class StateStore:
         order_intents_trace: list[dict[str, object]] | None = None,
     ) -> None:
         with self.transaction() as conn:
+            derived_trace = (
+                [
+                    {
+                        "client_order_id": intent.client_order_id,
+                        "symbol": intent.symbol,
+                        "side": intent.side,
+                        "skipped": intent.skipped,
+                        "skip_reason": intent.skip_reason,
+                    }
+                    for intent in order_intents
+                ]
+                if order_intents is not None
+                else []
+            )
+            if order_intents is not None and order_intents_trace is not None:
+                domain_ids = {item["client_order_id"] for item in derived_trace}
+                trace_ids = {
+                    str(item.get("client_order_id"))
+                    for item in order_intents_trace
+                    if item.get("client_order_id")
+                }
+                if domain_ids != trace_ids:
+                    msg = "order_intents and order_intents_trace client_order_id mismatch"
+                    raise ValueError(msg)
+            trace_payload = (
+                order_intents_trace if order_intents_trace is not None else derived_trace
+            )
             conn.execute(
                 """
                 INSERT INTO stage7_cycle_trace(
@@ -437,7 +464,7 @@ class StateStore:
                     json.dumps(mode_payload, sort_keys=True),
                     json.dumps(order_decisions, sort_keys=True),
                     json.dumps(portfolio_plan, sort_keys=True),
-                    json.dumps(order_intents_trace or [], sort_keys=True),
+                    json.dumps(trace_payload, sort_keys=True),
                 ),
             )
             if order_intents:

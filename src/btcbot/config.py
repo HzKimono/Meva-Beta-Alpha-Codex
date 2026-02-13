@@ -98,6 +98,14 @@ class Settings(BaseSettings):
     stage7_rules_fallback_min_notional_try: Decimal = Field(
         default=Decimal("10"), alias="STAGE7_RULES_FALLBACK_MIN_NOTIONAL_TRY"
     )
+    stage7_rules_require_metadata: bool = Field(
+        default=True,
+        alias="STAGE7_RULES_REQUIRE_METADATA",
+    )
+    stage7_rules_invalid_metadata_policy: str = Field(
+        default="skip_symbol",
+        alias="STAGE7_RULES_INVALID_METADATA_POLICY",
+    )
 
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
@@ -353,6 +361,16 @@ class Settings(BaseSettings):
         normalized = value.strip().upper()
         if not normalized:
             raise ValueError("STAGE7_UNIVERSE_QUOTE_CCY must be non-empty")
+        return normalized
+
+    @field_validator("stage7_rules_invalid_metadata_policy")
+    def validate_stage7_rules_invalid_metadata_policy(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"skip_symbol", "observe_only_cycle"}:
+            raise ValueError(
+                "STAGE7_RULES_INVALID_METADATA_POLICY must be one of: "
+                "skip_symbol,observe_only_cycle"
+            )
         return normalized
 
     @model_validator(mode="after")

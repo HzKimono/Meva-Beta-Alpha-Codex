@@ -175,6 +175,14 @@ PR-4 converts `PortfolioPlan.actions` into deterministic, exchange-rule-complian
 - `STAGE7_RULES_FALLBACK_LOT_SIZE`
 - `STAGE7_RULES_FALLBACK_MIN_NOTIONAL_TRY`
 
+Metadata hardening controls:
+- `STAGE7_RULES_REQUIRE_METADATA` (default `true`): when enabled, missing/invalid metadata does not use fallback.
+- `STAGE7_RULES_INVALID_METADATA_POLICY` (`skip_symbol` or `observe_only_cycle`):
+  - `skip_symbol`: affected symbols generate skipped intents with `rules_unavailable:<status>`.
+  - `observe_only_cycle`: any affected symbol forces Stage7 cycle final mode to `OBSERVE_ONLY`.
+
+Cycle trace summary now includes `rules_stats` with fallback/missing/invalid counts and symbol lists.
+
 ### Persistence
 New table: `stage7_order_intents`
 - `client_order_id` PK

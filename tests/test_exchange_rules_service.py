@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 
@@ -24,6 +25,19 @@ class FakeExchangeClient:
                 stepSize=Decimal("0.0001"),
             )
         ]
+
+
+class _InvalidPair:
+    pair_symbol = "BTC_TRY"
+    name = "BTCTRY"
+    tick_size = Decimal("0")
+    step_size = Decimal("0.0001")
+    min_total_amount = Decimal("100")
+
+
+class InvalidMetadataExchangeClient:
+    def get_exchange_info(self):
+        return [_InvalidPair()]
 
 
 def test_get_rules_accepts_compact_symbol() -> None:
@@ -67,11 +81,41 @@ def test_rules_cache_hit_across_aliases() -> None:
     assert exchange.exchange_info_calls == 1
 
 
-def test_get_rules_missing_symbol_uses_fallback() -> None:
-    exchange = FakeExchangeClient()
-    service = ExchangeRulesService(exchange)
+def test_rules_require_metadata_true_disables_fallback() -> None:
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STAGE7_RULES_REQUIRE_METADATA=True,
+    )
+    service = ExchangeRulesService(FakeExchangeClient(), settings=settings)
 
-    rules = service.get_rules("ETH_TRY")
+    rules, status = service.get_symbol_rules_status("ETH_TRY")
 
-    assert rules.tick_size == Decimal("0.01")
-    assert rules.lot_size == Decimal("0.00000001")
+    assert rules is None
+    assert status == "missing"
+
+
+def test_invalid_metadata_not_cached_as_zero() -> None:
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STAGE7_RULES_REQUIRE_METADATA=True,
+    )
+    service = ExchangeRulesService(InvalidMetadataExchangeClient(), settings=settings)
+
+    first_rules, first_status = service.get_symbol_rules_status("BTC_TRY")
+    second_rules, second_status = service.get_symbol_rules_status("BTC_TRY")
+
+    assert first_rules is None
+    assert second_rules is None
+    assert first_status == "invalid"
+    assert second_status == "invalid"
+
+
+def test_validate_notional_price_non_positive() -> None:
+    service = ExchangeRulesService(FakeExchangeClient())
+
+    ok, reason = service.validate_notional("BTC_TRY", Decimal("0"), Decimal("1"))
+
+    assert ok is False
+    assert reason == "price_non_positive"

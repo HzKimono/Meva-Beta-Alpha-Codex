@@ -87,12 +87,16 @@ class ExchangeRulesService:
             qty_precision=8,
         )
 
-    def get_rules(self, symbol: str) -> SymbolRules:
+    @staticmethod
+    def _is_valid_rules(rules: SymbolRules) -> bool:
+        return rules.tick_size > 0 and rules.lot_size > 0 and rules.min_notional_try > 0
+
+    def get_symbol_rules_status(self, symbol: str) -> tuple[SymbolRules | None, str]:
         key = _norm_symbol(symbol)
         now = datetime.now(UTC)
         cached = self._cache.get(key)
         if cached and cached.expires_at > now:
-            return cached.rules
+            return cached.rules, "ok"
 
         index: dict[str, object] = {}
         get_info = getattr(self.exchange, "get_exchange_info", None)
@@ -104,14 +108,15 @@ class ExchangeRulesService:
 
         match = index.get(key)
         if match is None:
+            require_metadata = bool(getattr(self.settings, "stage7_rules_require_metadata", True))
+            if require_metadata:
+                return None, "missing"
             fallback = self._fallback_rules()
-            cached_rules = _CachedRules(
+            self._cache[key] = _CachedRules(
                 rules=fallback,
                 expires_at=now + timedelta(seconds=self.cache_ttl_sec),
             )
-            self._cache[key] = cached_rules
-            logger.debug("exchange_rules_fallback_used symbol=%s normalized=%s", symbol, key)
-            return fallback
+            return fallback, "fallback"
 
         converted = SymbolRules(
             tick_size=Decimal(str(_attr(match, "tick_size", "tickSize") or Decimal("0"))),
@@ -132,6 +137,17 @@ class ExchangeRulesService:
             price_precision=int(_attr(match, "denominator_scale", "denominatorScale") or 8),
             qty_precision=int(_attr(match, "numerator_scale", "numeratorScale") or 8),
         )
+        if not self._is_valid_rules(converted):
+            require_metadata = bool(getattr(self.settings, "stage7_rules_require_metadata", True))
+            if require_metadata:
+                return None, "invalid"
+            fallback = self._fallback_rules()
+            self._cache[key] = _CachedRules(
+                rules=fallback,
+                expires_at=now + timedelta(seconds=self.cache_ttl_sec),
+            )
+            return fallback, "fallback"
+
         cached_rules = _CachedRules(
             rules=converted,
             expires_at=now + timedelta(seconds=self.cache_ttl_sec),
@@ -139,7 +155,17 @@ class ExchangeRulesService:
         for alias in _pair_symbol_candidates(match):
             self._cache[_norm_symbol(alias)] = cached_rules
         self._cache[key] = cached_rules
-        return converted
+        return converted, "ok"
+
+    def get_symbol_rules_or_none(self, symbol: str) -> SymbolRules | None:
+        rules, _ = self.get_symbol_rules_status(symbol)
+        return rules
+
+    def get_rules(self, symbol: str) -> SymbolRules:
+        rules, status = self.get_symbol_rules_status(symbol)
+        if rules is None:
+            raise ValueError(f"No usable exchange rules for symbol={symbol} status={status}")
+        return rules
 
     def quantize_price(self, symbol: str, price: Decimal) -> Decimal:
         rules = self.get_rules(symbol)
@@ -163,6 +189,8 @@ class ExchangeRulesService:
 
     def validate_notional(self, symbol: str, price: Decimal, qty: Decimal) -> tuple[bool, str]:
         rules = self.get_rules(symbol)
+        if price <= 0:
+            return False, "price_non_positive"
         if qty <= 0:
             return False, "qty_non_positive"
         if rules.min_qty is not None and qty < rules.min_qty:
