@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,13 +19,32 @@ from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.ledger_service import LedgerService
-from btcbot.services.metrics_service import build_cycle_metrics, persist_cycle_metrics
+from btcbot.services.metrics_service import CycleMetrics, build_cycle_metrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
+
+
+def persist_cycle_metrics(state_store: StateStore, cycle_metrics: CycleMetrics) -> None:
+    state_store.save_cycle_metrics(
+        cycle_id=cycle_metrics.cycle_id,
+        ts_start=cycle_metrics.ts_start.isoformat(),
+        ts_end=cycle_metrics.ts_end.isoformat(),
+        mode=cycle_metrics.mode,
+        fills_count=cycle_metrics.fills_count,
+        orders_submitted=cycle_metrics.orders_submitted,
+        orders_canceled=cycle_metrics.orders_canceled,
+        rejects_count=cycle_metrics.rejects_count,
+        fill_rate=cycle_metrics.fills_per_submitted_order,
+        avg_time_to_fill=cycle_metrics.avg_time_to_fill,
+        slippage_bps_avg=cycle_metrics.slippage_bps_avg,
+        fees_json=json.dumps(cycle_metrics.fees, sort_keys=True),
+        pnl_json=json.dumps(cycle_metrics.pnl, sort_keys=True),
+        meta_json=json.dumps(cycle_metrics.meta, sort_keys=True),
+    )
 
 
 class Stage4ConfigurationError(RuntimeError):
@@ -249,23 +269,6 @@ class Stage4CycleRunner:
 
             execution_report = execution_service.execute_with_report(accepted_actions)
             self._assert_execution_invariant(execution_report)
-            with state_store.transaction():
-                cycle_metrics = build_cycle_metrics(
-                    cycle_id=cycle_id,
-                    cycle_started_at=cycle_started_at,
-                    cycle_ended_at=datetime.now(UTC),
-                    mode=("NORMAL" if live_mode else "OBSERVE_ONLY"),
-                    fills=fills,
-                    ledger_append_result=ledger_ingest,
-                    pnl_report=pnl_report,
-                    orders_submitted=execution_report.submitted,
-                    orders_canceled=execution_report.canceled,
-                    rejects_count=execution_report.rejected,
-                    mark_prices=mark_prices,
-                    pnl_snapshot=snapshot,
-                )
-                persist_cycle_metrics(state_store, cycle_metrics)
-
             cycle_metrics = build_cycle_metrics(
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
