@@ -85,8 +85,12 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     universe_scores = json.loads(str(cycle["universe_scores_json"]))
     assert universe_scores
     mode_payload = json.loads(str(cycle["mode_json"]))
+    portfolio_plan = json.loads(str(cycle["portfolio_plan_json"]))
     order = {"NORMAL": 0, "REDUCE_RISK_ONLY": 1, "OBSERVE_ONLY": 2}
     assert order[mode_payload["final_mode"]] >= order[mode_payload["base_mode"]]
+    assert portfolio_plan
+    assert "allocations" in portfolio_plan
+    assert "actions" in portfolio_plan
 
 
 def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
@@ -96,7 +100,29 @@ def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
         del self, settings
         return 0
 
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
     class _Exchange:
+        def get_exchange_info(self):
+            return [_Pair("BTC_TRY")]
+
+        def get_ticker_stats(self):
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "101",
+                    "high": "102",
+                    "low": "100",
+                }
+            ]
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "101"} for _ in range(lookback)]
+
         def get_orderbook(self, symbol):
             del symbol
             return Decimal("100"), Decimal("102")
@@ -179,11 +205,14 @@ def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
     assert cycle is not None
     mode_payload = json.loads(str(cycle["mode_json"]))
     decisions = json.loads(str(cycle["order_decisions_json"]))
+    portfolio_plan = json.loads(str(cycle["portfolio_plan_json"]))
     order = {"NORMAL": 0, "REDUCE_RISK_ONLY": 1, "OBSERVE_ONLY": 2}
     assert mode_payload["base_mode"] == "REDUCE_RISK_ONLY"
     assert order[mode_payload["final_mode"]] >= order[mode_payload["base_mode"]]
     assert any(d.get("status") == "submitted" and d.get("side") == "SELL" for d in decisions)
     assert any(d.get("status") == "skipped" for d in decisions)
+    assert portfolio_plan
+    assert all(action.get("side") == "SELL" for action in portfolio_plan.get("actions", []))
 
 
 def test_stage7_universe_selection_does_not_change_ledger_metrics_shape(
