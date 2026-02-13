@@ -190,3 +190,47 @@ def test_decimal_mixed_settings_types_are_normalized() -> None:
 
     assert plan.cash_target_try == Decimal("300")
     assert plan.allocations
+
+
+def test_sell_priority_applies_during_turnover_allocation_even_if_buy_is_larger() -> None:
+    service = PortfolioPolicyService()
+    settings = _settings(
+        TRY_CASH_TARGET="0",
+        TRY_CASH_MAX="0",
+        NOTIONAL_CAP_TRY_PER_CYCLE="300",
+        MAX_ORDERS_PER_CYCLE=1,
+        MIN_ORDER_NOTIONAL_TRY=10,
+    )
+
+    plan = service.build_plan(
+        universe=["BTC_TRY", "ETH_TRY"],
+        mark_prices_try={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("100")},
+        balances=[Balance(asset="BTC", free=6), Balance(asset="TRY", free=200)],
+        settings=settings,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert len(plan.actions) == 1
+    assert plan.actions[0].side == "SELL"
+
+
+def test_sell_priority_applies_during_max_orders_selection_even_if_buy_is_larger() -> None:
+    service = PortfolioPolicyService()
+    settings = _settings(
+        TRY_CASH_TARGET="0",
+        TRY_CASH_MAX="0",
+        NOTIONAL_CAP_TRY_PER_CYCLE="1000",
+        MAX_ORDERS_PER_CYCLE=1,
+        MIN_ORDER_NOTIONAL_TRY=10,
+    )
+
+    plan = service.build_plan(
+        universe=["BTC_TRY", "ETH_TRY"],
+        mark_prices_try={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("100")},
+        balances=[Balance(asset="BTC", free=6), Balance(asset="TRY", free=200)],
+        settings=settings,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert len(plan.actions) == 1
+    assert plan.actions[0].side == "SELL"

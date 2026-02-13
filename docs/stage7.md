@@ -131,7 +131,7 @@ Stage 7 now computes a deterministic, explainable **portfolio plan** each cycle 
 The plan contains:
 - `target_weights` equivalent via per-symbol `weight` in `allocations`.
 - `cash_target_try`.
-- `actions` with deterministic SELL-first then BUY ordering, desired TRY notional, estimated qty, and reason.
+- `actions` with deterministic SELL-first then BUY ordering, desired TRY notional, estimated qty, and reason. SELL-first is enforced during turnover allocation and max-order selection, not only in final display order.
 - Trace skip reasons are explicit and deterministic (e.g. `min_notional`, `turnover_cap`, `max_orders`, `mode_reduce_risk_only`, `observe_only`, `missing_mark_price`).
 
 Mode gating:

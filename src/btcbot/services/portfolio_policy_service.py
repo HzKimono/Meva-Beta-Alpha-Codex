@@ -290,7 +290,11 @@ class PortfolioPolicyService:
 
         sorted_actions = sorted(
             filtered,
-            key=lambda action: (Decimal("0") - action.requested_notional_try, action.symbol),
+            key=lambda action: (
+                0 if action.side == "SELL" else 1,
+                Decimal("0") - action.requested_notional_try,
+                action.symbol,
+            ),
         )
 
         constrained: list[RebalanceAction] = []
@@ -326,6 +330,7 @@ class PortfolioPolicyService:
         constrained = sorted(
             constrained,
             key=lambda action: (
+                0 if action.side == "SELL" else 1,
                 Decimal("0") - action.target_notional_try.copy_abs(),
                 action.symbol,
             ),
