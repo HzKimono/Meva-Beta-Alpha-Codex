@@ -91,6 +91,7 @@ def test_cycle_metrics_persist_called_once(monkeypatch, tmp_path) -> None:
     assert runner.run_one_cycle(settings) == 0
     assert call_counter["count"] == 1
 
+
 def test_cycle_transaction_atomicity_and_recovery(monkeypatch, tmp_path) -> None:
     exchange = ExchangeForAtomicity()
     runner = Stage4CycleRunner()
