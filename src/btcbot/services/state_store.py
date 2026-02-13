@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from btcbot.domain.accounting import Position, TradeFill
 from btcbot.domain.intent import Intent
+from btcbot.domain.ledger import LedgerEvent, LedgerEventType, ensure_utc
 from btcbot.domain.models import Order, OrderStatus, normalize_symbol
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
@@ -35,6 +36,13 @@ class StoredIntentTs:
     symbol: str
     side: str
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class AppendResult:
+    attempted: int
+    inserted: int
+    ignored: int
 
 
 class StateStore:
@@ -166,6 +174,46 @@ class StateStore:
                 """
             )
             self._ensure_stage4_schema(conn)
+            self._ensure_ledger_schema(conn)
+
+    def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ledger_events (
+                event_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                type TEXT NOT NULL,
+                side TEXT,
+                qty TEXT NOT NULL,
+                price TEXT,
+                fee TEXT,
+                fee_currency TEXT,
+                exchange_trade_id TEXT,
+                exchange_order_id TEXT,
+                client_order_id TEXT,
+                meta_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_events_exchange_trade_id_unique
+            ON ledger_events(exchange_trade_id)
+            WHERE exchange_trade_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_events_fallback_fill_unique
+            ON ledger_events(client_order_id, symbol, side, price, qty, ts)
+            WHERE type = 'FILL'
+              AND exchange_trade_id IS NULL
+              AND client_order_id IS NOT NULL
+              AND side IS NOT NULL
+              AND price IS NOT NULL
+            """
+        )
 
     def _ensure_stage4_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -1110,6 +1158,94 @@ class StateStore:
                     json.dumps(envelope, sort_keys=True) if envelope is not None else None,
                 ),
             )
+
+
+    def append_ledger_events(self, events: list[LedgerEvent]) -> AppendResult:
+        inserted = 0
+        with self._connect() as conn:
+            for event in events:
+                event_ts = ensure_utc(event.ts).isoformat()
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ledger_events(
+                        event_id, ts, symbol, type, side, qty, price, fee, fee_currency,
+                        exchange_trade_id, exchange_order_id, client_order_id, meta_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        event_ts,
+                        normalize_symbol(event.symbol),
+                        event.type.value,
+                        event.side,
+                        str(event.qty),
+                        str(event.price) if event.price is not None else None,
+                        str(event.fee) if event.fee is not None else None,
+                        event.fee_currency,
+                        event.exchange_trade_id,
+                        event.exchange_order_id,
+                        event.client_order_id,
+                        json.dumps(event.meta, sort_keys=True),
+                    ),
+                )
+                inserted += int(bool(cur.rowcount))
+        attempted = len(events)
+        return AppendResult(attempted=attempted, inserted=inserted, ignored=attempted - inserted)
+
+    def load_ledger_events(
+        self,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+        symbol: str | None = None,
+    ) -> list[LedgerEvent]:
+        query = "SELECT * FROM ledger_events WHERE 1=1"
+        params: list[str] = []
+        if time_min is not None:
+            query += " AND ts >= ?"
+            params.append(ensure_utc(time_min).isoformat())
+        if time_max is not None:
+            query += " AND ts <= ?"
+            params.append(ensure_utc(time_max).isoformat())
+        if symbol is not None:
+            query += " AND symbol = ?"
+            params.append(normalize_symbol(symbol))
+        query += " ORDER BY ts, event_id"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        events: list[LedgerEvent] = []
+        for row in rows:
+            events.append(
+                LedgerEvent(
+                    event_id=str(row["event_id"]),
+                    ts=datetime.fromisoformat(str(row["ts"])),
+                    symbol=str(row["symbol"]),
+                    type=LedgerEventType(str(row["type"])),
+                    side=(str(row["side"]) if row["side"] is not None else None),
+                    qty=Decimal(str(row["qty"])),
+                    price=(Decimal(str(row["price"])) if row["price"] is not None else None),
+                    fee=(Decimal(str(row["fee"])) if row["fee"] is not None else None),
+                    fee_currency=(
+                        str(row["fee_currency"]) if row["fee_currency"] is not None else None
+                    ),
+                    exchange_trade_id=(
+                        str(row["exchange_trade_id"])
+                        if row["exchange_trade_id"] is not None
+                        else None
+                    ),
+                    exchange_order_id=(
+                        str(row["exchange_order_id"])
+                        if row["exchange_order_id"] is not None
+                        else None
+                    ),
+                    client_order_id=(
+                        str(row["client_order_id"]) if row["client_order_id"] is not None else None
+                    ),
+                    meta=json.loads(str(row["meta_json"])),
+                )
+            )
+        return events
 
     def get_cursor(self, key: str) -> str | None:
         with self._connect() as conn:
