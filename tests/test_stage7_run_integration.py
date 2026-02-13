@@ -41,6 +41,9 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     class _Pair:
         def __init__(self, pair_symbol: str) -> None:
             self.pair_symbol = pair_symbol
+            self.tick_size = Decimal("0.1")
+            self.step_size = Decimal("0.0001")
+            self.min_total_amount = Decimal("10")
 
     class _Exchange:
         def get_exchange_info(self):
@@ -223,6 +226,7 @@ def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
         STAGE7_ENABLED=True,
         STATE_DB_PATH=str(db_path),
         SYMBOLS="BTC_TRY",
+        STAGE7_RULES_REQUIRE_METADATA=False,
     )
 
     assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
@@ -320,6 +324,7 @@ def test_stage7_run_skips_open_order_with_missing_mark_price(monkeypatch, tmp_pa
         STAGE7_ENABLED=True,
         STATE_DB_PATH=str(db_path),
         SYMBOLS="BTC_TRY",
+        STAGE7_RULES_REQUIRE_METADATA=False,
     )
 
     assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
@@ -389,9 +394,13 @@ def test_stage7_policy_skip_symbol(monkeypatch, tmp_path) -> None:
         del self, settings
         return 0
 
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
     class _Exchange:
         def get_exchange_info(self):
-            return []
+            return [_Pair("BTC_TRY")]
 
         def get_ticker_stats(self):
             return [
@@ -405,8 +414,11 @@ def test_stage7_policy_skip_symbol(monkeypatch, tmp_path) -> None:
             ]
 
         def get_orderbook(self, symbol):
-            del symbol
-            return Decimal("99"), Decimal("100")
+            if symbol == "BTCTRY":
+                return Decimal("99"), Decimal("100")
+            if symbol == "XRPTRY":
+                return Decimal("19"), Decimal("20")
+            raise RuntimeError("unknown symbol")
 
         def get_candles(self, symbol, lookback):
             del symbol
@@ -425,6 +437,21 @@ def test_stage7_policy_skip_symbol(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
         _selected_btc_universe,
+    )
+
+    monkeypatch.setattr(
+        "btcbot.services.state_store.StateStore.list_stage4_open_orders",
+        lambda self: [
+            SimpleNamespace(
+                status="simulated_submitted",
+                symbol="XRP_TRY",
+                side="SELL",
+                price=Decimal("20"),
+                qty=Decimal("1"),
+                client_order_id="xrp1",
+                exchange_order_id="xrp-ex-1",
+            )
+        ],
     )
 
     settings = Settings(
@@ -452,6 +479,20 @@ def test_stage7_policy_skip_symbol(monkeypatch, tmp_path) -> None:
     summary = json.loads(str(cycle["intents_summary_json"]))
     assert summary["rules_stats"]["rules_missing_count"] >= 1
 
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        cycle_full = conn.execute("SELECT order_decisions_json FROM stage7_cycle_trace").fetchone()
+    finally:
+        conn.close()
+    decisions = json.loads(str(cycle_full["order_decisions_json"]))
+    assert any(
+        decision.get("symbol") == "XRPTRY"
+        and decision.get("status") == "skipped"
+        and str(decision.get("reason", "")).startswith("rules_unavailable:")
+        for decision in decisions
+    )
+
 
 def test_stage7_policy_observe_only_cycle(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "stage7_observe_cycle.db"
@@ -460,9 +501,13 @@ def test_stage7_policy_observe_only_cycle(monkeypatch, tmp_path) -> None:
         del self, settings
         return 0
 
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
     class _Exchange:
         def get_exchange_info(self):
-            return []
+            return [_Pair("BTC_TRY")]
 
         def get_ticker_stats(self):
             return [
@@ -476,8 +521,11 @@ def test_stage7_policy_observe_only_cycle(monkeypatch, tmp_path) -> None:
             ]
 
         def get_orderbook(self, symbol):
-            del symbol
-            return Decimal("99"), Decimal("100")
+            if symbol == "BTCTRY":
+                return Decimal("99"), Decimal("100")
+            if symbol == "XRPTRY":
+                return Decimal("19"), Decimal("20")
+            raise RuntimeError("unknown symbol")
 
         def get_candles(self, symbol, lookback):
             del symbol
@@ -496,6 +544,20 @@ def test_stage7_policy_observe_only_cycle(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
         _selected_btc_universe,
+    )
+    monkeypatch.setattr(
+        "btcbot.services.state_store.StateStore.list_stage4_open_orders",
+        lambda self: [
+            SimpleNamespace(
+                status="simulated_submitted",
+                symbol="XRP_TRY",
+                side="SELL",
+                price=Decimal("20"),
+                qty=Decimal("1"),
+                client_order_id="xrp2",
+                exchange_order_id="xrp-ex-2",
+            )
+        ],
     )
 
     settings = Settings(

@@ -86,28 +86,28 @@ class Stage7CycleRunner:
                     )
                 ]
 
-            rules_symbols_fallback: list[str] = []
-            rules_symbols_invalid: list[str] = []
-            rules_symbols_missing: list[str] = []
+            rules_symbols_fallback: set[str] = set()
+            rules_symbols_invalid: set[str] = set()
+            rules_symbols_missing: set[str] = set()
             rules_unavailable: dict[str, str] = {}
-            for symbol in sorted({normalize_symbol(s) for s in universe_result.selected_symbols}):
+            for symbol in symbols_needed:
                 _, status = rules_service.get_symbol_rules_status(symbol)
                 if status == "fallback":
-                    rules_symbols_fallback.append(symbol)
+                    rules_symbols_fallback.add(symbol)
                 elif status == "invalid":
-                    rules_symbols_invalid.append(symbol)
+                    rules_symbols_invalid.add(symbol)
                     rules_unavailable[symbol] = status
                 elif status == "missing":
-                    rules_symbols_missing.append(symbol)
+                    rules_symbols_missing.add(symbol)
                     rules_unavailable[symbol] = status
 
             rules_stats = {
                 "rules_fallback_used_count": len(rules_symbols_fallback),
                 "rules_invalid_count": len(rules_symbols_invalid),
                 "rules_missing_count": len(rules_symbols_missing),
-                "rules_symbols_fallback": rules_symbols_fallback,
-                "rules_symbols_invalid": rules_symbols_invalid,
-                "rules_symbols_missing": rules_symbols_missing,
+                "rules_symbols_fallback": sorted(rules_symbols_fallback),
+                "rules_symbols_invalid": sorted(rules_symbols_invalid),
+                "rules_symbols_missing": sorted(rules_symbols_missing),
             }
 
             base_mode = state_store.get_latest_risk_mode()
@@ -161,6 +161,19 @@ class Stage7CycleRunner:
                                 "qty": str(action.qty),
                                 "status": "skipped",
                                 "reason": "mode_reduce_risk_only",
+                            }
+                        )
+                        continue
+                    if normalized_symbol in rules_unavailable:
+                        skipped_actions.append(
+                            {
+                                "symbol": normalized_symbol,
+                                "side": action.side,
+                                "qty": str(action.qty),
+                                "status": "skipped",
+                                "reason": (
+                                    f"rules_unavailable:{rules_unavailable[normalized_symbol]}"
+                                ),
                             }
                         )
                         continue
@@ -226,7 +239,7 @@ class Stage7CycleRunner:
                     for item in universe_result.scored[: max(0, settings.stage7_universe_size)]
                 ],
                 intents_summary={
-                    "lifecycle_actions_total": len(actions),
+                    "order_decisions_total": len(actions),
                     "orders_simulated": simulated_count,
                     "order_intents_total": len(order_intents),
                     "order_intents_planned": planned_count,
