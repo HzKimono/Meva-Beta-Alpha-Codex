@@ -58,6 +58,7 @@ class StateStore:
         with self._connect() as conn:
             self._ensure_risk_budget_schema(conn)
             self._ensure_anomaly_schema(conn)
+            self._ensure_stage7_schema(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -213,6 +214,7 @@ class StateStore:
             self._ensure_cycle_metrics_schema(conn)
             self._ensure_risk_budget_schema(conn)
             self._ensure_anomaly_schema(conn)
+            self._ensure_stage7_schema(conn)
 
     def _ensure_risk_budget_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -311,6 +313,106 @@ class StateStore:
             conn.execute(
                 "ALTER TABLE degrade_state_current "
                 "ADD COLUMN last_reject_count INTEGER NOT NULL DEFAULT 0"
+            )
+
+
+
+    def _ensure_stage7_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_cycle_trace (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                selected_universe_json TEXT NOT NULL,
+                intents_summary_json TEXT NOT NULL,
+                mode_json TEXT NOT NULL,
+                order_decisions_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_ledger_metrics (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                gross_pnl_try TEXT NOT NULL,
+                realized_pnl_try TEXT NOT NULL,
+                unrealized_pnl_try TEXT NOT NULL,
+                net_pnl_try TEXT NOT NULL,
+                fees_try TEXT NOT NULL,
+                slippage_try TEXT NOT NULL,
+                turnover_try TEXT NOT NULL,
+                equity_try TEXT NOT NULL,
+                max_drawdown TEXT NOT NULL,
+                FOREIGN KEY(cycle_id) REFERENCES stage7_cycle_trace(cycle_id)
+            )
+            """
+        )
+
+    def save_stage7_cycle(
+        self,
+        *,
+        cycle_id: str,
+        ts: datetime,
+        selected_universe: list[str],
+        intents_summary: dict[str, object],
+        mode_payload: dict[str, object],
+        order_decisions: list[dict[str, object]],
+        ledger_metrics: dict[str, Decimal],
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage7_cycle_trace(
+                    cycle_id, ts, selected_universe_json, intents_summary_json, mode_json, order_decisions_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts=excluded.ts,
+                    selected_universe_json=excluded.selected_universe_json,
+                    intents_summary_json=excluded.intents_summary_json,
+                    mode_json=excluded.mode_json,
+                    order_decisions_json=excluded.order_decisions_json
+                """,
+                (
+                    cycle_id,
+                    ensure_utc(ts).isoformat(),
+                    json.dumps(selected_universe, sort_keys=True),
+                    json.dumps(intents_summary, sort_keys=True),
+                    json.dumps(mode_payload, sort_keys=True),
+                    json.dumps(order_decisions, sort_keys=True),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO stage7_ledger_metrics(
+                    cycle_id, ts, gross_pnl_try, realized_pnl_try, unrealized_pnl_try,
+                    net_pnl_try, fees_try, slippage_try, turnover_try, equity_try, max_drawdown
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts=excluded.ts,
+                    gross_pnl_try=excluded.gross_pnl_try,
+                    realized_pnl_try=excluded.realized_pnl_try,
+                    unrealized_pnl_try=excluded.unrealized_pnl_try,
+                    net_pnl_try=excluded.net_pnl_try,
+                    fees_try=excluded.fees_try,
+                    slippage_try=excluded.slippage_try,
+                    turnover_try=excluded.turnover_try,
+                    equity_try=excluded.equity_try,
+                    max_drawdown=excluded.max_drawdown
+                """,
+                (
+                    cycle_id,
+                    ensure_utc(ts).isoformat(),
+                    str(ledger_metrics['gross_pnl_try']),
+                    str(ledger_metrics['realized_pnl_try']),
+                    str(ledger_metrics['unrealized_pnl_try']),
+                    str(ledger_metrics['net_pnl_try']),
+                    str(ledger_metrics['fees_try']),
+                    str(ledger_metrics['slippage_try']),
+                    str(ledger_metrics['turnover_try']),
+                    str(ledger_metrics['equity_try']),
+                    str(ledger_metrics['max_drawdown']),
+                ),
             )
 
     def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:

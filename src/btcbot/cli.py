@@ -26,6 +26,7 @@ from btcbot.services.stage4_cycle_runner import (
     Stage4CycleRunner,
     Stage4ExchangeError,
 )
+from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.state_store import StateStore
 from btcbot.services.strategy_service import StrategyService
 from btcbot.services.sweep_service import SweepService
@@ -51,6 +52,9 @@ def main() -> int:
     stage4_run_parser = subparsers.add_parser("stage4-run", help="Run one Stage 4 cycle")
     stage4_run_parser.add_argument("--dry-run", action="store_true", help="Do not place orders")
 
+    stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
+    stage7_run_parser.add_argument("--dry-run", action="store_true", help="Required for stage7")
+
     subparsers.add_parser("health", help="Check exchange connectivity")
 
     args = parser.parse_args()
@@ -62,6 +66,9 @@ def main() -> int:
 
     if args.command == "stage4-run":
         return run_cycle_stage4(settings, force_dry_run=args.dry_run)
+
+    if args.command == "stage7-run":
+        return run_cycle_stage7(settings, force_dry_run=args.dry_run)
 
     if args.command == "health":
         return run_health(settings)
@@ -247,6 +254,25 @@ def run_cycle_stage4(settings: Settings, force_dry_run: bool = False) -> int:
         )
         return 1
 
+
+
+def run_cycle_stage7(settings: Settings, force_dry_run: bool = False) -> int:
+    dry_run = force_dry_run or settings.dry_run
+    if not dry_run:
+        print("stage7-run requires --dry-run")
+        return 2
+    if not settings.stage7_enabled:
+        logger.warning("stage7_disabled_in_settings")
+    runner = Stage7CycleRunner()
+    effective_settings = settings.model_copy(update={"dry_run": True})
+    try:
+        return runner.run_one_cycle(effective_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Stage 7 cycle failed",
+            extra={"extra": {"error_type": type(exc).__name__, "safe_message": str(exc)}},
+        )
+        return 1
 
 def run_health(settings: Settings) -> int:
     client = BtcturkHttpClient(

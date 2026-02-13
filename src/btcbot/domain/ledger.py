@@ -53,6 +53,25 @@ class LedgerState:
     fees_by_currency: dict[str, Decimal] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class LedgerSnapshot:
+    gross_pnl_try: Decimal
+    realized_pnl_try: Decimal
+    unrealized_pnl_try: Decimal
+    net_pnl_try: Decimal
+    fees_try: Decimal
+    slippage_try: Decimal
+    turnover_try: Decimal
+    equity_try: Decimal
+    max_drawdown: Decimal
+
+
+@dataclass(frozen=True)
+class EquityPoint:
+    ts: datetime
+    equity_try: Decimal
+
+
 def _sort_events(events: list[LedgerEvent]) -> list[LedgerEvent]:
     return sorted(events, key=lambda event: (ensure_utc(event.ts), event.event_id))
 
@@ -145,6 +164,21 @@ def compute_unrealized_pnl(state: LedgerState, mark_prices: dict[str, Decimal]) 
 
 def equity_curve(points: list[tuple[datetime, Decimal]]) -> list[tuple[datetime, Decimal]]:
     return sorted(points, key=lambda point: point[0])
+
+
+def compute_max_drawdown(points: list[EquityPoint]) -> Decimal:
+    peak: Decimal | None = None
+    max_dd = Decimal("0")
+    for point in sorted(points, key=lambda row: ensure_utc(row.ts)):
+        if peak is None or point.equity_try > peak:
+            peak = point.equity_try
+            continue
+        if peak <= 0:
+            continue
+        drawdown = (peak - point.equity_try) / peak
+        if drawdown > max_dd:
+            max_dd = drawdown
+    return max_dd
 
 
 def ensure_utc(ts: datetime) -> datetime:
