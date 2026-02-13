@@ -226,6 +226,36 @@ class StateStore:
             )
             """
         )
+
+    def _ensure_anomaly_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS anomaly_events (
+                id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                cycle_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                details_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_ts ON anomaly_events(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_code ON anomaly_events(code)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_events_cycle_id ON anomaly_events(cycle_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS degrade_state_current (
+                state_id INTEGER PRIMARY KEY CHECK(state_id = 1),
+                cooldown_until TEXT,
+                current_override_mode TEXT,
+                last_reasons_json TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_mode ON risk_decisions(mode)")
         conn.execute(
