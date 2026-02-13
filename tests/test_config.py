@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from btcbot.config import Settings
+from btcbot.domain.anomalies import AnomalyCode
 
 
 def test_parse_symbols_json_list() -> None:
@@ -104,6 +105,38 @@ def test_parse_symbols_csv_handles_whitespace_and_case() -> None:
 def test_parse_degrade_warn_codes_csv() -> None:
     settings = Settings(DEGRADE_WARN_CODES_CSV="STALE_MARKET_DATA, ORDER_REJECT_SPIKE")
     assert settings.parsed_degrade_warn_codes() == {
-        "STALE_MARKET_DATA",
-        "ORDER_REJECT_SPIKE",
+        AnomalyCode.STALE_MARKET_DATA,
+        AnomalyCode.ORDER_REJECT_SPIKE,
     }
+
+
+def test_parse_degrade_warn_codes_invalid_raises() -> None:
+    settings = Settings(DEGRADE_WARN_CODES_CSV="NOT_REAL")
+    with pytest.raises(ValueError):
+        settings.parsed_degrade_warn_codes()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("STALE_MARKET_DATA_SECONDS", 0),
+        ("REJECT_SPIKE_THRESHOLD", 0),
+        ("CURSOR_STALL_CYCLES", 0),
+        ("DEGRADE_WARN_WINDOW_CYCLES", 0),
+        ("DEGRADE_WARN_THRESHOLD", 0),
+        ("CLOCK_SKEW_SECONDS_THRESHOLD", 0),
+        ("LATENCY_SPIKE_MS", 0),
+    ],
+)
+def test_invalid_anomaly_threshold_settings_raise(field: str, value: int) -> None:
+    with pytest.raises(ValueError):
+        Settings(**{field: value})
+
+
+def test_invalid_pnl_divergence_thresholds_raise() -> None:
+    with pytest.raises(ValueError):
+        Settings(PNL_DIVERGENCE_TRY_WARN=0)
+    with pytest.raises(ValueError):
+        Settings(PNL_DIVERGENCE_TRY_ERROR=0)
+    with pytest.raises(ValueError):
+        Settings(PNL_DIVERGENCE_TRY_WARN=100, PNL_DIVERGENCE_TRY_ERROR=50)

@@ -51,36 +51,37 @@ def decide_degrade(
     now: datetime,
     current_override: Mode | None,
     cooldown_until: datetime | None,
-    warn_window_cycles: int,
+    last_reasons: list[str] | None,
+    recent_warn_count: int,
     warn_threshold: int,
     warn_codes: set[AnomalyCode],
 ) -> DegradeDecision:
-    del warn_window_cycles
-
     if cooldown_until is not None and now < cooldown_until:
         return DegradeDecision(
             mode_override=current_override,
-            reasons=[],
+            reasons=list(last_reasons or []),
             cooldown_until=cooldown_until,
         )
 
     sorted_codes = sorted({event.code.value for event in anomalies})
-    has_error = any(event.severity == "ERROR" for event in anomalies)
-    if has_error:
+    if any(event.severity == "ERROR" for event in anomalies):
         return DegradeDecision(
             mode_override=Mode.OBSERVE_ONLY,
             reasons=sorted_codes,
             cooldown_until=now + timedelta(minutes=30),
         )
 
-    warn_events = [
-        event for event in anomalies if event.severity == "WARN" and event.code in warn_codes
-    ]
-    warn_code_values = sorted({event.code.value for event in warn_events})
-    if len(warn_events) >= warn_threshold:
+    if recent_warn_count >= warn_threshold:
+        warn_reason_codes = sorted(
+            {
+                event.code.value
+                for event in anomalies
+                if event.severity == "WARN" and event.code in warn_codes
+            }
+        )
         return DegradeDecision(
             mode_override=Mode.REDUCE_RISK_ONLY,
-            reasons=warn_code_values,
+            reasons=warn_reason_codes,
             cooldown_until=now + timedelta(minutes=15),
         )
 
