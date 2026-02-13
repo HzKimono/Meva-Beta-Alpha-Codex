@@ -7,6 +7,7 @@ from typing import Annotated
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from btcbot.domain.anomalies import AnomalyCode
 from btcbot.domain.symbols import canonical_symbol
 from btcbot.domain.universe_models import UniverseKnobs
 
@@ -74,6 +75,22 @@ class Settings(BaseSettings):
     )
     risk_min_cash_try: Decimal | None = Field(default=None, alias="RISK_MIN_CASH_TRY")
     risk_max_fee_try_per_day: Decimal | None = Field(default=None, alias="RISK_MAX_FEE_TRY_PER_DAY")
+
+    stale_market_data_seconds: int = Field(default=30, alias="STALE_MARKET_DATA_SECONDS")
+    reject_spike_threshold: int = Field(default=3, alias="REJECT_SPIKE_THRESHOLD")
+    latency_spike_ms: int | None = Field(default=2000, alias="LATENCY_SPIKE_MS")
+    cursor_stall_cycles: int = Field(default=5, alias="CURSOR_STALL_CYCLES")
+    pnl_divergence_try_warn: Decimal = Field(default=Decimal("50"), alias="PNL_DIVERGENCE_TRY_WARN")
+    pnl_divergence_try_error: Decimal = Field(
+        default=Decimal("200"), alias="PNL_DIVERGENCE_TRY_ERROR"
+    )
+    degrade_warn_window_cycles: int = Field(default=10, alias="DEGRADE_WARN_WINDOW_CYCLES")
+    degrade_warn_threshold: int = Field(default=3, alias="DEGRADE_WARN_THRESHOLD")
+    degrade_warn_codes_csv: str = Field(
+        default="STALE_MARKET_DATA,ORDER_REJECT_SPIKE,PNL_DIVERGENCE",
+        alias="DEGRADE_WARN_CODES_CSV",
+    )
+    clock_skew_seconds_threshold: int = Field(default=30, alias="CLOCK_SKEW_SECONDS_THRESHOLD")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -215,6 +232,57 @@ class Settings(BaseSettings):
         if value is not None and value <= 0:
             raise ValueError("RISK_MAX_FEE_TRY_PER_DAY must be > 0 when configured")
         return value
+
+    @field_validator(
+        "stale_market_data_seconds",
+        "clock_skew_seconds_threshold",
+    )
+    def validate_positive_seconds_thresholds(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Anomaly second thresholds must be > 0")
+        return value
+
+    @field_validator(
+        "reject_spike_threshold",
+        "cursor_stall_cycles",
+        "degrade_warn_window_cycles",
+        "degrade_warn_threshold",
+    )
+    def validate_min_one_anomaly_counts(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Anomaly count thresholds must be >= 1")
+        return value
+
+    @field_validator("latency_spike_ms")
+    def validate_latency_spike_ms(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("LATENCY_SPIKE_MS must be >= 1 when configured")
+        return value
+
+    @field_validator("pnl_divergence_try_warn", "pnl_divergence_try_error")
+    def validate_positive_pnl_divergence_thresholds(cls, value: Decimal) -> Decimal:
+        if value <= 0:
+            raise ValueError("PnL divergence thresholds must be > 0")
+        return value
+
+    @field_validator("pnl_divergence_try_error")
+    def validate_pnl_divergence_error_not_less_than_warn(cls, value: Decimal, info) -> Decimal:
+        warn_value = info.data.get("pnl_divergence_try_warn")
+        if isinstance(warn_value, Decimal) and value < warn_value:
+            raise ValueError("PNL_DIVERGENCE_TRY_ERROR must be >= PNL_DIVERGENCE_TRY_WARN")
+        return value
+
+    def parsed_degrade_warn_codes(self) -> set[AnomalyCode]:
+        parsed_codes: set[AnomalyCode] = set()
+        for raw in self.degrade_warn_codes_csv.split(","):
+            token = raw.strip().upper()
+            if not token:
+                continue
+            try:
+                parsed_codes.add(AnomalyCode(token))
+            except ValueError as exc:
+                raise ValueError(f"Unknown degrade warn code: {token}") from exc
+        return parsed_codes
 
     def universe_knobs(self) -> UniverseKnobs:
         return UniverseKnobs(
