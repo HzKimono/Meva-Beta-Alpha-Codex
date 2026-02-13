@@ -1,34 +1,64 @@
-# Stage 6.2: Execution Quality + Atomicity
+# Stage 6.2: Atomic Cycle State + Execution Metrics (Polished)
 
-## Transactional cycle boundary
+## 1) Transaction model and cursor semantics
 
-Stage 6.2 introduces a `StateStore.transaction()` context that starts a SQLite `BEGIN IMMEDIATE` transaction and commits/rolls back as one unit.
+Cycle processing uses **at-least-once fill fetching**:
+- fill fetch uses a timestamp cursor with configured lookback,
+- the same fill can be seen in later cycles.
 
-Within a cycle, the following now execute atomically:
-- ledger event append
-- accounting fill application
-- fill cursor advancement (`fills_cursor:*`)
-- cycle metrics persistence (`cycle_metrics`)
+Idempotency and atomic state writes are enforced as follows:
+- `applied_fills(fill_id PRIMARY KEY)` ensures accounting effects are applied once,
+- ledger dedupe (`INSERT OR IGNORE`) prevents duplicate fill/fee events,
+- cursor advancement (`fills_cursor:*`) occurs only after successful write-state processing.
 
-If any step fails, the transaction is rolled back and cursor values are unchanged. This guarantees replay-safe retries.
+### Write transaction #1 (authoritative state)
+The first write transaction contains only:
+- ledger append,
+- accounting apply,
+- cursor advance.
 
-## Cursor safety and idempotency
+If any step fails, the transaction rolls back and cursor/state remain unchanged.
 
-`AccountingService.fetch_new_fills()` no longer advances cursors. It returns fetched fills plus `cursor_after` candidate.
+## 2) Ledger dedupe strategy
 
-Cursor advancement happens only inside the transactional block in the cycle runner, after ledger/accounting updates succeed.
+Ledger events are generated with stable IDs:
+- fill event: `fill:{trade_id}` using `exchange_trade_id={trade_id}`
+- fee event: `fee:{trade_id}` using `exchange_trade_id=fee:{trade_id}`
 
-Idempotent fill application is enforced through `applied_fills(fill_id PRIMARY KEY)`. Reprocessing the same fill is ignored in accounting state mutation.
+This keeps fill and fee namespaces separate while still enabling strict dedupe.
 
-## Execution quality metrics schema
+Cycle telemetry includes `ledger_events_attempted`, `ledger_events_inserted`, and `ledger_events_ignored`.
 
-`cycle_metrics` table captures one row per cycle (`cycle_id` PK), including:
-- timestamps: `ts_start`, `ts_end`
-- mode (`NORMAL`, `OBSERVE_ONLY`, etc.)
-- counts: fills/submitted/canceled/rejects
-- quality: `fill_rate`, `avg_time_to_fill`, `slippage_bps_avg`
-- JSON payloads: `fees_json`, `pnl_json`, `meta_json`
+## 3) cycle_metrics persistence model
 
-Indexes exist on `ts_start` and `mode`.
+Stage 6.2 uses **single-write metrics per cycle**:
+- metrics are built after execution (final snapshot),
+- a small write transaction persists one `cycle_metrics` row per `cycle_id`.
 
-Metrics are computed via pure domain logic (`domain/execution_quality.py`) and persisted through `services/metrics_service.py`.
+If metrics persistence fails, it is logged and does not roll back the already-committed authoritative state.
+
+## 4) Metric semantics
+
+DB column `fill_rate` is preserved for compatibility, but now explicitly stores:
+- `fills_per_submitted_order = fills_count / orders_submitted`
+
+Semantics are encoded in `meta_json`:
+- `fill_rate_semantics: "fills_per_submitted_order"`
+
+Numeric JSON conventions:
+- money values remain strings (`fees_json`, `pnl_json`) for exactness,
+- non-money metrics (e.g. slippage bps) are stored as floats.
+
+## 5) Local validation
+
+Run:
+- `ruff format .`
+- `ruff check .`
+- `pytest -q`
+
+Inspect SQLite tables:
+- `ledger_events`
+- `applied_fills`
+- `cursors`
+- `stage4_positions`
+- `cycle_metrics`

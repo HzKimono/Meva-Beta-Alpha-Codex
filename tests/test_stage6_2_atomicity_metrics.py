@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -101,9 +102,21 @@ def test_cycle_transaction_atomicity_and_recovery(monkeypatch, tmp_path) -> None
         metrics_count_after = conn.execute("SELECT COUNT(*) AS c FROM cycle_metrics").fetchone()[
             "c"
         ]
+        metrics_row = conn.execute(
+            "SELECT fill_rate, meta_json FROM cycle_metrics ORDER BY ts_start DESC LIMIT 1"
+        ).fetchone()
     assert ledger_count_after == 2
     assert metrics_count_after == 1
     assert store.get_cursor("fills_cursor:BTCTRY") is not None
+    assert metrics_row is not None
+    assert isinstance(metrics_row["fill_rate"], float)
+
+    meta = json.loads(str(metrics_row["meta_json"]))
+    assert meta["fill_rate_semantics"] == "fills_per_submitted_order"
+    assert isinstance(meta["ledger_events_ignored"], int)
+    per_symbol = meta["per_symbol"]
+    assert isinstance(per_symbol, list)
+    assert isinstance(per_symbol[0]["slippage_bps_avg"], float)
 
 
 def test_accounting_fill_idempotency_unique_applied_fills(tmp_path) -> None:
@@ -125,7 +138,7 @@ def test_accounting_fill_idempotency_unique_applied_fills(tmp_path) -> None:
     assert pos.qty == Decimal("0.1")
 
 
-def test_compute_execution_quality_fill_rate_and_slippage() -> None:
+def test_compute_execution_quality_fills_per_submitted_order_and_slippage() -> None:
     ts = datetime.now(UTC)
     fills = [
         Fill(
@@ -158,5 +171,5 @@ def test_compute_execution_quality_fill_rate_and_slippage() -> None:
         {"BTCTRY": Decimal("100")},
     )
 
-    assert snapshot.fill_rate == Decimal("0.5")
+    assert snapshot.fills_per_submitted_order == Decimal("0.5")
     assert snapshot.slippage_bps_avg == Decimal("100")

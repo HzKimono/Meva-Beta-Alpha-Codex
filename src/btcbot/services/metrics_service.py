@@ -21,7 +21,7 @@ class CycleMetrics:
     orders_submitted: int
     orders_canceled: int
     rejects_count: int
-    fill_rate: float
+    fills_per_submitted_order: float
     avg_time_to_fill: float | None
     slippage_bps_avg: float | None
     fees: dict[str, str]
@@ -62,7 +62,7 @@ def build_cycle_metrics(
         orders_submitted=quality.orders_submitted,
         orders_canceled=quality.orders_canceled,
         rejects_count=quality.rejects_count,
-        fill_rate=float(quality.fill_rate),
+        fills_per_submitted_order=float(quality.fills_per_submitted_order),
         avg_time_to_fill=quality.avg_time_to_fill,
         slippage_bps_avg=(float(quality.slippage_bps_avg) if quality.slippage_bps_avg else None),
         fees={k: str(v) for k, v in pnl_report.fees_total_by_currency.items()},
@@ -73,14 +73,21 @@ def build_cycle_metrics(
             "realized_today_try": str(pnl_snapshot.realized_today_try),
         },
         meta={
+            "fill_rate_semantics": "fills_per_submitted_order",
             "ledger_events_attempted": ledger_append_result.events_attempted,
             "ledger_events_inserted": ledger_append_result.events_inserted,
+            "ledger_events_ignored": ledger_append_result.events_ignored,
             "per_symbol": [
                 {
                     "symbol": item.symbol,
                     "fills_count": item.fills_count,
                     "slippage_bps_avg": (
-                        str(item.slippage_bps_avg) if item.slippage_bps_avg is not None else None
+                        float(item.slippage_bps_avg) if item.slippage_bps_avg is not None else None
+                    ),
+                    "fills_per_submitted_order": (
+                        float(item.fills_per_submitted_order)
+                        if item.fills_per_submitted_order is not None
+                        else None
                     ),
                 }
                 for item in quality.per_symbol
@@ -99,7 +106,7 @@ def persist_cycle_metrics(state_store: StateStore, cycle_metrics: CycleMetrics) 
         orders_submitted=cycle_metrics.orders_submitted,
         orders_canceled=cycle_metrics.orders_canceled,
         rejects_count=cycle_metrics.rejects_count,
-        fill_rate=cycle_metrics.fill_rate,
+        fill_rate=cycle_metrics.fills_per_submitted_order,
         avg_time_to_fill=cycle_metrics.avg_time_to_fill,
         slippage_bps_avg=cycle_metrics.slippage_bps_avg,
         fees_json=json.dumps(cycle_metrics.fees, sort_keys=True),

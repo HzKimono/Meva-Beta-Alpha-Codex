@@ -12,6 +12,7 @@ class PerSymbolExecutionQuality:
     symbol: str
     fills_count: int
     slippage_bps_avg: Decimal | None
+    fills_per_submitted_order: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,9 @@ class ExecutionQualitySnapshot:
     orders_submitted: int
     orders_canceled: int
     rejects_count: int
-    fill_rate: Decimal
+    # Number of fills observed per submitted order in the cycle window.
+    # This is not an order-level fill ratio and may exceed 1.0 for partial fills.
+    fills_per_submitted_order: Decimal
     avg_time_to_fill: float | None
     slippage_bps_avg: Decimal | None
     per_symbol: list[PerSymbolExecutionQuality]
@@ -36,14 +39,15 @@ def compute_execution_quality(
     rejects_count = int(cycle_data.get("rejects_count", 0))
 
     fills_count = len(fills)
-    fill_rate = Decimal("0")
+    fills_per_submitted_order = Decimal("0")
     if orders_submitted > 0:
-        fill_rate = Decimal(fills_count) / Decimal(orders_submitted)
+        fills_per_submitted_order = Decimal(fills_count) / Decimal(orders_submitted)
 
     slippages: list[Decimal] = []
     per_symbol_map: dict[str, list[Decimal]] = {}
     for fill in fills:
-        mark = market_marks.get(normalize_symbol(fill.symbol))
+        symbol = normalize_symbol(fill.symbol)
+        mark = market_marks.get(symbol)
         if mark is None or mark <= 0:
             continue
         if fill.side.lower() == "buy":
@@ -51,7 +55,7 @@ def compute_execution_quality(
         else:
             bps = ((mark - fill.price) / mark) * Decimal("10000")
         slippages.append(bps)
-        per_symbol_map.setdefault(normalize_symbol(fill.symbol), []).append(bps)
+        per_symbol_map.setdefault(symbol, []).append(bps)
 
     slippage_bps_avg = None
     if slippages:
@@ -62,6 +66,9 @@ def compute_execution_quality(
             symbol=symbol,
             fills_count=len(values),
             slippage_bps_avg=(sum(values, Decimal("0")) / Decimal(len(values))),
+            fills_per_submitted_order=(Decimal(len(values)) / Decimal(orders_submitted))
+            if orders_submitted > 0
+            else None,
         )
         for symbol, values in sorted(per_symbol_map.items())
     ]
@@ -71,7 +78,7 @@ def compute_execution_quality(
         orders_submitted=orders_submitted,
         orders_canceled=orders_canceled,
         rejects_count=rejects_count,
-        fill_rate=fill_rate,
+        fills_per_submitted_order=fills_per_submitted_order,
         avg_time_to_fill=None,
         slippage_bps_avg=slippage_bps_avg,
         per_symbol=per_symbol,

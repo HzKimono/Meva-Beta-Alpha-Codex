@@ -22,6 +22,7 @@ from btcbot.services.state_store import StateStore
 class LedgerIngestResult:
     events_attempted: int
     events_inserted: int
+    events_ignored: int
 
 
 @dataclass(frozen=True)
@@ -91,14 +92,10 @@ class LedgerService:
                 )
 
         append = self.state_store.append_ledger_events(events)
-        if append.ignored:
-            self.logger.info(
-                "ledger_events_deduped",
-                extra={"extra": {"attempted": append.attempted, "ignored": append.ignored}},
-            )
         return LedgerIngestResult(
             events_attempted=append.attempted,
             events_inserted=append.inserted,
+            events_ignored=append.ignored,
         )
 
     def report(
