@@ -144,3 +144,42 @@ Mode gating:
 
 ### Scope note
 PR-3 only produces and persists a plan. It does **not** place live orders; execution belongs to PR-4+.
+
+## PR-4 Order Intents (Dry-run only)
+
+PR-4 converts `PortfolioPlan.actions` into deterministic, exchange-rule-compliant `OrderIntent` records.
+
+### What is produced
+- `OrderIntent` domain model with: cycle/symbol/side/type/price/qty/notional, deterministic `client_order_id`, reason, and skip metadata.
+- LIMIT-only intents in this phase.
+- Deterministic `client_order_id` format: `s7:{cycle_id}:{symbol}:{side}:{short_hash}` where hash input is `(cycle_id, symbol, side, price_try, qty, reason)`.
+
+### Pricing and quantity rules
+- Baseline price = Stage7 mark price.
+- Offset: `STAGE7_ORDER_OFFSET_BPS`.
+  - SELL: `mark * (1 + bps/10000)`
+  - BUY: `mark * (1 - bps/10000)`
+- Price quantized by exchange tick size.
+- Qty = `target_notional_try / price`, then quantized by lot size.
+- Pre-trade validation rejects:
+  - `qty_rounds_to_zero`
+  - `min_notional` (post-quantization)
+
+### Mode gating
+- `OBSERVE_ONLY`: no intents emitted.
+- `REDUCE_RISK_ONLY`: BUY intents are dropped; SELL intents remain.
+
+### Exchange metadata + fallbacks
+`ExchangeRulesService` prefers adapter exchange metadata and falls back to deterministic Stage7 settings when metadata is missing:
+- `STAGE7_RULES_FALLBACK_TICK_SIZE`
+- `STAGE7_RULES_FALLBACK_LOT_SIZE`
+- `STAGE7_RULES_FALLBACK_MIN_NOTIONAL_TRY`
+
+### Persistence
+New table: `stage7_order_intents`
+- `client_order_id` PK
+- cycle, ts, symbol, side, order type, price, qty, notional
+- status (`PLANNED` or `SKIPPED`)
+- full JSON payload (`intent_json`)
+
+`stage7-run` now persists intents together with cycle trace/metrics atomically. No live order submission is performed in PR-4.

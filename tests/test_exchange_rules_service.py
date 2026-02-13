@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
-
 from btcbot.domain.models import PairInfo
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 
@@ -36,7 +34,7 @@ def test_get_rules_accepts_compact_symbol() -> None:
 
     assert rules.min_notional_try == Decimal("100")
     assert rules.tick_size == Decimal("0.1")
-    assert rules.step_size == Decimal("0.0001")
+    assert rules.lot_size == Decimal("0.0001")
 
 
 def test_get_rules_accepts_underscore_symbol() -> None:
@@ -69,9 +67,11 @@ def test_rules_cache_hit_across_aliases() -> None:
     assert exchange.exchange_info_calls == 1
 
 
-def test_get_rules_error_contains_requested_and_normalized_symbol() -> None:
+def test_get_rules_missing_symbol_uses_fallback() -> None:
     exchange = FakeExchangeClient()
     service = ExchangeRulesService(exchange)
 
-    with pytest.raises(ValueError, match="symbol=ETH_TRY normalized=ETHTRY"):
-        service.get_rules("ETH_TRY")
+    rules = service.get_rules("ETH_TRY")
+
+    assert rules.tick_size == Decimal("0.01")
+    assert rules.lot_size == Decimal("0.00000001")

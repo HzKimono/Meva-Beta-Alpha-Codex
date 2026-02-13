@@ -88,6 +88,16 @@ class Settings(BaseSettings):
     stage7_score_weights: dict[str, float] | None = Field(
         default=None, alias="STAGE7_SCORE_WEIGHTS"
     )
+    stage7_order_offset_bps: Decimal = Field(default=Decimal("5"), alias="STAGE7_ORDER_OFFSET_BPS")
+    stage7_rules_fallback_tick_size: Decimal = Field(
+        default=Decimal("0.01"), alias="STAGE7_RULES_FALLBACK_TICK_SIZE"
+    )
+    stage7_rules_fallback_lot_size: Decimal = Field(
+        default=Decimal("0.00000001"), alias="STAGE7_RULES_FALLBACK_LOT_SIZE"
+    )
+    stage7_rules_fallback_min_notional_try: Decimal = Field(
+        default=Decimal("10"), alias="STAGE7_RULES_FALLBACK_MIN_NOTIONAL_TRY"
+    )
 
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
@@ -325,7 +335,14 @@ class Settings(BaseSettings):
             raise ValueError("Stage7 universe integer settings must be >= 1")
         return value
 
-    @field_validator("stage7_min_quote_volume_try", "stage7_max_spread_bps")
+    @field_validator(
+        "stage7_min_quote_volume_try",
+        "stage7_max_spread_bps",
+        "stage7_order_offset_bps",
+        "stage7_rules_fallback_tick_size",
+        "stage7_rules_fallback_lot_size",
+        "stage7_rules_fallback_min_notional_try",
+    )
     def validate_stage7_non_negative_decimals(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("Stage7 universe decimal settings must be >= 0")

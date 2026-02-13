@@ -53,6 +53,9 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
             del symbol
             return [{"close": "100"} for _ in range(lookback)]
 
+        def submit_order(self, *args, **kwargs):
+            raise AssertionError("live submit should never be called in stage7 dry-run")
+
         def close(self):
             return None
 
@@ -75,6 +78,7 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     try:
         cycle = conn.execute("SELECT * FROM stage7_cycle_trace").fetchone()
         metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
+        intents = conn.execute("SELECT * FROM stage7_order_intents").fetchall()
     finally:
         conn.close()
 
@@ -91,6 +95,9 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     assert portfolio_plan
     assert "allocations" in portfolio_plan
     assert "actions" in portfolio_plan
+    trace_summary = json.loads(str(cycle["intents_summary_json"]))
+    assert trace_summary["order_intents_total"] >= 1
+    assert intents
 
 
 def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:

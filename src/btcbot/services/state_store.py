@@ -13,6 +13,7 @@ from btcbot.domain.accounting import Position, TradeFill
 from btcbot.domain.intent import Intent
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType, ensure_utc
 from btcbot.domain.models import Order, OrderStatus, normalize_symbol
+from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
@@ -325,7 +326,8 @@ class StateStore:
                 intents_summary_json TEXT NOT NULL,
                 mode_json TEXT NOT NULL,
                 order_decisions_json TEXT NOT NULL,
-                portfolio_plan_json TEXT NOT NULL DEFAULT '{}'
+                portfolio_plan_json TEXT NOT NULL DEFAULT '{}',
+                order_intents_json TEXT NOT NULL DEFAULT '[]'
             )
             """
         )
@@ -341,6 +343,11 @@ class StateStore:
             conn.execute(
                 "ALTER TABLE stage7_cycle_trace "
                 "ADD COLUMN portfolio_plan_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "order_intents_json" not in columns:
+            conn.execute(
+                "ALTER TABLE stage7_cycle_trace "
+                "ADD COLUMN order_intents_json TEXT NOT NULL DEFAULT '[]'"
             )
         conn.execute(
             """
@@ -366,6 +373,27 @@ class StateStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_stage7_ledger_metrics_ts ON stage7_ledger_metrics(ts)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_order_intents (
+                client_order_id TEXT PRIMARY KEY,
+                cycle_id TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                price_try TEXT NOT NULL,
+                qty TEXT NOT NULL,
+                notional_try TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PLANNED',
+                intent_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_order_intents_cycle_id "
+            "ON stage7_order_intents(cycle_id)"
+        )
 
     def save_stage7_cycle(
         self,
@@ -379,6 +407,8 @@ class StateStore:
         order_decisions: list[dict[str, object]],
         portfolio_plan: dict[str, object],
         ledger_metrics: dict[str, Decimal],
+        order_intents: list[OrderIntent] | None = None,
+        order_intents_trace: list[dict[str, object]] | None = None,
     ) -> None:
         with self.transaction() as conn:
             conn.execute(
@@ -386,8 +416,8 @@ class StateStore:
                 INSERT INTO stage7_cycle_trace(
                     cycle_id, ts, selected_universe_json,
                     universe_scores_json, intents_summary_json,
-                    mode_json, order_decisions_json, portfolio_plan_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    mode_json, order_decisions_json, portfolio_plan_json, order_intents_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cycle_id) DO UPDATE SET
                     ts=excluded.ts,
                     selected_universe_json=excluded.selected_universe_json,
@@ -395,7 +425,8 @@ class StateStore:
                     intents_summary_json=excluded.intents_summary_json,
                     mode_json=excluded.mode_json,
                     order_decisions_json=excluded.order_decisions_json,
-                    portfolio_plan_json=excluded.portfolio_plan_json
+                    portfolio_plan_json=excluded.portfolio_plan_json,
+                    order_intents_json=excluded.order_intents_json
                 """,
                 (
                     cycle_id,
@@ -406,8 +437,16 @@ class StateStore:
                     json.dumps(mode_payload, sort_keys=True),
                     json.dumps(order_decisions, sort_keys=True),
                     json.dumps(portfolio_plan, sort_keys=True),
+                    json.dumps(order_intents_trace or [], sort_keys=True),
                 ),
             )
+            if order_intents:
+                self._save_stage7_order_intents(
+                    conn=conn,
+                    cycle_id=cycle_id,
+                    ts=ts,
+                    intents=order_intents,
+                )
             conn.execute(
                 """
                 INSERT INTO stage7_ledger_metrics(
@@ -440,6 +479,53 @@ class StateStore:
                     str(ledger_metrics["max_drawdown"]),
                 ),
             )
+
+    def _save_stage7_order_intents(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        cycle_id: str,
+        ts: datetime,
+        intents: list[OrderIntent],
+    ) -> None:
+        for intent in intents:
+            conn.execute(
+                """
+                INSERT INTO stage7_order_intents(
+                    client_order_id, cycle_id, ts, symbol, side,
+                    order_type, price_try, qty, notional_try, status, intent_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_order_id) DO UPDATE SET
+                    cycle_id=excluded.cycle_id,
+                    ts=excluded.ts,
+                    symbol=excluded.symbol,
+                    side=excluded.side,
+                    order_type=excluded.order_type,
+                    price_try=excluded.price_try,
+                    qty=excluded.qty,
+                    notional_try=excluded.notional_try,
+                    status=excluded.status,
+                    intent_json=excluded.intent_json
+                """,
+                (
+                    intent.client_order_id,
+                    cycle_id,
+                    ensure_utc(ts).isoformat(),
+                    intent.symbol,
+                    intent.side,
+                    intent.order_type,
+                    str(intent.price_try),
+                    str(intent.qty),
+                    str(intent.notional_try),
+                    "SKIPPED" if intent.skipped else "PLANNED",
+                    json.dumps(intent.to_dict(), sort_keys=True),
+                ),
+            )
+
+    def save_stage7_order_intents(self, cycle_id: str, intents: list[OrderIntent]) -> None:
+        now = datetime.now(UTC)
+        with self.transaction() as conn:
+            self._save_stage7_order_intents(conn=conn, cycle_id=cycle_id, ts=now, intents=intents)
 
     def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
