@@ -13,6 +13,20 @@ from btcbot.domain.risk_budget import Mode
 from btcbot.services.state_store import StateStore
 
 
+def _selected_btc_universe(*args, **kwargs):
+    del args, kwargs
+    return SimpleNamespace(
+        selected_symbols=["BTCTRY"],
+        scored=[
+            SimpleNamespace(
+                symbol="BTCTRY",
+                total_score=Decimal("1"),
+                breakdown={"liquidity": "1"},
+            )
+        ],
+    )
+
+
 def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "stage7.db"
 
@@ -53,6 +67,9 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
             del symbol
             return [{"close": "100"} for _ in range(lookback)]
 
+        def submit_order(self, *args, **kwargs):
+            raise AssertionError("live submit should never be called in stage7 dry-run")
+
         def close(self):
             return None
 
@@ -75,6 +92,7 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     try:
         cycle = conn.execute("SELECT * FROM stage7_cycle_trace").fetchone()
         metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
+        intents = conn.execute("SELECT * FROM stage7_order_intents").fetchall()
     finally:
         conn.close()
 
@@ -91,6 +109,12 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     assert portfolio_plan
     assert "allocations" in portfolio_plan
     assert "actions" in portfolio_plan
+    trace_summary = json.loads(str(cycle["intents_summary_json"]))
+    assert trace_summary["order_intents_total"] >= 1
+    assert "order_intents_planned" in trace_summary
+    assert "order_intents_skipped" in trace_summary
+    assert "rules_stats" in trace_summary
+    assert intents
 
 
 def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
@@ -136,6 +160,14 @@ def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
         lambda settings, dry_run: _Exchange(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
     )
     monkeypatch.setattr(
         "btcbot.services.state_store.StateStore.get_latest_risk_mode",
@@ -261,6 +293,14 @@ def test_stage7_run_skips_open_order_with_missing_mark_price(monkeypatch, tmp_pa
         lambda settings, dry_run: _Exchange(),
     )
     monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+    monkeypatch.setattr(
         "btcbot.services.state_store.StateStore.list_stage4_open_orders",
         lambda self: [
             SimpleNamespace(
@@ -340,3 +380,218 @@ def test_stage7_universe_selection_does_not_change_ledger_metrics_shape(
         "max_drawdown",
     ]:
         assert key in metrics.keys()
+
+
+def test_stage7_policy_skip_symbol(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_skip_symbol.db"
+
+    def _fake_stage4(self, settings):
+        del self, settings
+        return 0
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return []
+
+        def get_ticker_stats(self):
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "100",
+                    "high": "101",
+                    "low": "99",
+                }
+            ]
+
+        def get_orderbook(self, symbol):
+            del symbol
+            return Decimal("99"), Decimal("100")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: _Exchange(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE7_RULES_REQUIRE_METADATA=True,
+        STAGE7_RULES_INVALID_METADATA_POLICY="skip_symbol",
+    )
+
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        intents = conn.execute("SELECT intent_json FROM stage7_order_intents").fetchall()
+        cycle = conn.execute("SELECT intents_summary_json FROM stage7_cycle_trace").fetchone()
+    finally:
+        conn.close()
+
+    assert intents
+    parsed = [json.loads(str(row["intent_json"])) for row in intents]
+    assert any(str(i.get("skip_reason", "")).startswith("rules_unavailable:") for i in parsed)
+    summary = json.loads(str(cycle["intents_summary_json"]))
+    assert summary["rules_stats"]["rules_missing_count"] >= 1
+
+
+def test_stage7_policy_observe_only_cycle(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_observe_cycle.db"
+
+    def _fake_stage4(self, settings):
+        del self, settings
+        return 0
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return []
+
+        def get_ticker_stats(self):
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "100",
+                    "high": "101",
+                    "low": "99",
+                }
+            ]
+
+        def get_orderbook(self, symbol):
+            del symbol
+            return Decimal("99"), Decimal("100")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: _Exchange(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE7_RULES_REQUIRE_METADATA=True,
+        STAGE7_RULES_INVALID_METADATA_POLICY="observe_only_cycle",
+    )
+
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        cycle = conn.execute(
+            "SELECT mode_json, intents_summary_json FROM stage7_cycle_trace"
+        ).fetchone()
+        intents_count = conn.execute("SELECT COUNT(*) FROM stage7_order_intents").fetchone()[0]
+    finally:
+        conn.close()
+
+    mode_payload = json.loads(str(cycle["mode_json"]))
+    assert mode_payload["final_mode"] == "OBSERVE_ONLY"
+    assert intents_count == 0
+    summary = json.loads(str(cycle["intents_summary_json"]))
+    assert summary["rules_stats"]["rules_missing_count"] >= 1
+
+
+def test_intents_summary_counts_correct(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_counts.db"
+
+    def _fake_stage4(self, settings):
+        del self, settings
+        return 0
+
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return [_Pair("BTC_TRY")]
+
+        def get_ticker_stats(self):
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "100",
+                    "high": "101",
+                    "low": "99",
+                }
+            ]
+
+        def get_orderbook(self, symbol):
+            del symbol
+            return Decimal("99"), Decimal("100")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: _Exchange(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+    )
+
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        cycle = conn.execute("SELECT intents_summary_json FROM stage7_cycle_trace").fetchone()
+    finally:
+        conn.close()
+
+    summary = json.loads(str(cycle["intents_summary_json"]))
+    assert summary["order_intents_total"] == (
+        summary["order_intents_planned"] + summary["order_intents_skipped"]
+    )
