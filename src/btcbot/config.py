@@ -75,6 +75,21 @@ class Settings(BaseSettings):
     risk_min_cash_try: Decimal | None = Field(default=None, alias="RISK_MIN_CASH_TRY")
     risk_max_fee_try_per_day: Decimal | None = Field(default=None, alias="RISK_MAX_FEE_TRY_PER_DAY")
 
+    stale_market_data_seconds: int = Field(default=30, alias="STALE_MARKET_DATA_SECONDS")
+    reject_spike_threshold: int = Field(default=3, alias="REJECT_SPIKE_THRESHOLD")
+    latency_spike_ms: int | None = Field(default=2000, alias="LATENCY_SPIKE_MS")
+    cursor_stall_cycles: int = Field(default=5, alias="CURSOR_STALL_CYCLES")
+    pnl_divergence_try_warn: Decimal = Field(default=Decimal("50"), alias="PNL_DIVERGENCE_TRY_WARN")
+    pnl_divergence_try_error: Decimal = Field(
+        default=Decimal("200"), alias="PNL_DIVERGENCE_TRY_ERROR"
+    )
+    degrade_warn_window_cycles: int = Field(default=10, alias="DEGRADE_WARN_WINDOW_CYCLES")
+    degrade_warn_threshold: int = Field(default=3, alias="DEGRADE_WARN_THRESHOLD")
+    degrade_warn_codes_csv: str = Field(
+        default="STALE_MARKET_DATA,ORDER_REJECT_SPIKE,PNL_DIVERGENCE",
+        alias="DEGRADE_WARN_CODES_CSV",
+    )
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     universe_quote_currency: str = Field(default="TRY", alias="UNIVERSE_QUOTE_CURRENCY")
@@ -215,6 +230,16 @@ class Settings(BaseSettings):
         if value is not None and value <= 0:
             raise ValueError("RISK_MAX_FEE_TRY_PER_DAY must be > 0 when configured")
         return value
+
+    @field_validator("degrade_warn_threshold", "degrade_warn_window_cycles")
+    def validate_positive_degrade_values(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Degrade warn controls must be > 0")
+        return value
+
+    def parsed_degrade_warn_codes(self) -> set[str]:
+        items = [item.strip().upper() for item in self.degrade_warn_codes_csv.split(",")]
+        return {item for item in items if item}
 
     def universe_knobs(self) -> UniverseKnobs:
         return UniverseKnobs(

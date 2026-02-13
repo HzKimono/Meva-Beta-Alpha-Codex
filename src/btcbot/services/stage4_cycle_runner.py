@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from uuid import uuid4
 from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
+from btcbot.domain.anomalies import AnomalyCode, combine_modes, decide_degrade
 from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.domain.risk_budget import Mode, RiskLimits
 from btcbot.domain.stage4 import (
@@ -21,6 +23,7 @@ from btcbot.domain.stage4 import (
 from btcbot.domain.strategy_core import PositionSummary
 from btcbot.services import metrics_service
 from btcbot.services.accounting_service_stage4 import AccountingService
+from btcbot.services.anomaly_detector_service import AnomalyDetectorConfig, AnomalyDetectorService
 from btcbot.services.decision_pipeline_service import DecisionPipelineService
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
@@ -100,6 +103,16 @@ class Stage4CycleRunner:
                 rules_service=rules_service,
             )
             decision_pipeline = DecisionPipelineService(settings=settings)
+            anomaly_detector = AnomalyDetectorService(
+                config=AnomalyDetectorConfig(
+                    stale_market_data_seconds=settings.stale_market_data_seconds,
+                    reject_spike_threshold=settings.reject_spike_threshold,
+                    latency_spike_ms=settings.latency_spike_ms,
+                    cursor_stall_cycles=settings.cursor_stall_cycles,
+                    pnl_divergence_try_warn=settings.pnl_divergence_try_warn,
+                    pnl_divergence_try_error=settings.pnl_divergence_try_error,
+                )
+            )
 
             mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, settings.symbols)
             try_cash = self._resolve_try_cash(
@@ -298,11 +311,134 @@ class Stage4CycleRunner:
                     },
                 )
 
-            gated_actions = self._gate_actions_by_mode(accepted_actions, risk_decision.mode)
-            if risk_decision.mode == Mode.OBSERVE_ONLY:
+            cursor_stall_by_symbol = {
+                symbol: (1 if cursor_before.get(symbol) == cursor_after.get(symbol) else 0)
+                for symbol in cursor_before
+            }
+            anomalies = anomaly_detector.detect(
+                market_data_age_seconds={symbol: 0 for symbol in mark_prices},
+                reject_count=0,
+                cycle_duration_ms=int(
+                    (datetime.now(UTC) - cycle_started_at).total_seconds() * 1000
+                ),
+                cursor_stall_by_symbol=cursor_stall_by_symbol,
+                pnl_snapshot=snapshot,
+                pnl_report=pnl_report,
+            )
+            anomaly_codes = [event.code.value for event in anomalies]
+            anomaly_severities = [event.severity for event in anomalies]
+            logger.info(
+                "anomalies_detected",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "codes": anomaly_codes,
+                        "severities": anomaly_severities,
+                    }
+                },
+            )
+
+            degrade_state = state_store.get_degrade_state_current()
+            cooldown_until_raw = degrade_state.get("cooldown_until")
+            cooldown_until = (
+                datetime.fromisoformat(cooldown_until_raw) if cooldown_until_raw else None
+            )
+            current_override_raw = degrade_state.get("current_override_mode")
+            current_override = (
+                Mode(current_override_raw)
+                if current_override_raw in {m.value for m in Mode}
+                else None
+            )
+            last_reasons_json = degrade_state.get("last_reasons_json")
+
+            warn_codes = self._parse_warn_codes(settings)
+            degrade_decision = decide_degrade(
+                anomalies=anomalies,
+                now=datetime.now(UTC),
+                current_override=current_override,
+                cooldown_until=cooldown_until,
+                warn_window_cycles=settings.degrade_warn_window_cycles,
+                warn_threshold=settings.degrade_warn_threshold,
+                warn_codes=warn_codes,
+            )
+            if (
+                degrade_decision.reasons == []
+                and cooldown_until is not None
+                and datetime.now(UTC) < cooldown_until
+                and last_reasons_json
+            ):
+                degrade_decision = type(degrade_decision)(
+                    mode_override=degrade_decision.mode_override,
+                    reasons=list(json.loads(last_reasons_json)),
+                    cooldown_until=degrade_decision.cooldown_until,
+                )
+
+            logger.info(
+                "degrade_decision",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "override": (
+                            degrade_decision.mode_override.value
+                            if degrade_decision.mode_override
+                            else None
+                        ),
+                        "cooldown_until": (
+                            degrade_decision.cooldown_until.isoformat()
+                            if degrade_decision.cooldown_until
+                            else None
+                        ),
+                        "reasons": degrade_decision.reasons,
+                    }
+                },
+            )
+
+            try:
+                state_store.persist_degrade(
+                    cycle_id=cycle_id,
+                    events=anomalies,
+                    cooldown_until=(
+                        degrade_decision.cooldown_until.isoformat()
+                        if degrade_decision.cooldown_until
+                        else None
+                    ),
+                    current_override_mode=(
+                        degrade_decision.mode_override.value
+                        if degrade_decision.mode_override
+                        else None
+                    ),
+                    last_reasons_json=json.dumps(degrade_decision.reasons, sort_keys=True),
+                )
+            except Exception:  # noqa: BLE001
+                try:
+                    state_store.save_anomaly_events(cycle_id, anomalies)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "anomaly_events_persist_failed", extra={"extra": {"cycle_id": cycle_id}}
+                    )
+
+            final_mode = combine_modes(risk_decision.mode, degrade_decision.mode_override)
+            logger.info(
+                "final_mode",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "base_mode": risk_decision.mode.value,
+                        "override": (
+                            degrade_decision.mode_override.value
+                            if degrade_decision.mode_override
+                            else None
+                        ),
+                        "final_mode": final_mode.value,
+                    }
+                },
+            )
+
+            gated_actions = self._gate_actions_by_mode(accepted_actions, final_mode)
+            if final_mode == Mode.OBSERVE_ONLY:
                 logger.info(
                     "mode_gate_observe_only",
-                    extra={"extra": {"cycle_id": cycle_id, "reasons": risk_decision.reasons}},
+                    extra={"extra": {"cycle_id": cycle_id, "reasons": degrade_decision.reasons}},
                 )
 
             execution_report = execution_service.execute_with_report(gated_actions)
@@ -311,7 +447,7 @@ class Stage4CycleRunner:
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
                 cycle_ended_at=datetime.now(UTC),
-                mode=risk_decision.mode.value,
+                mode=final_mode.value,
                 fills=fills,
                 ledger_append_result=ledger_ingest,
                 pnl_report=pnl_report,
@@ -665,3 +801,12 @@ class Stage4CycleRunner:
     @staticmethod
     def _inc_reason(reasons: dict[str, int], key: str) -> None:
         reasons[key] = reasons.get(key, 0) + 1
+
+    def _parse_warn_codes(self, settings: Settings) -> set[AnomalyCode]:
+        result: set[AnomalyCode] = set()
+        for code in settings.parsed_degrade_warn_codes():
+            try:
+                result.add(AnomalyCode(code))
+            except ValueError:
+                logger.warning("invalid_degrade_warn_code", extra={"extra": {"code": code}})
+        return result
