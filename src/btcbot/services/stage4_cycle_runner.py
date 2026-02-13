@@ -20,6 +20,7 @@ from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskPolicy
@@ -269,7 +270,7 @@ class Stage4CycleRunner:
 
             execution_report = execution_service.execute_with_report(accepted_actions)
             self._assert_execution_invariant(execution_report)
-            cycle_metrics = metrics_service.build_cycle_metrics(
+            cycle_metrics: CycleMetrics = metrics_service.build_cycle_metrics(
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
                 cycle_ended_at=datetime.now(UTC),
