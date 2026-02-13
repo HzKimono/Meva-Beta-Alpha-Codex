@@ -132,8 +132,6 @@ def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
                 )
             currency = event.fee_currency.upper()
             fees[currency] = fees.get(currency, Decimal("0")) + event.fee
-            if currency == "TRY":
-                realized -= event.fee
 
         if event.type == LedgerEventType.ADJUSTMENT and event.fee is not None:
             realized += event.fee

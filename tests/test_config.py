@@ -140,3 +140,13 @@ def test_invalid_pnl_divergence_thresholds_raise() -> None:
         Settings(PNL_DIVERGENCE_TRY_ERROR=0)
     with pytest.raises(ValueError):
         Settings(PNL_DIVERGENCE_TRY_WARN=100, PNL_DIVERGENCE_TRY_ERROR=50)
+
+
+def test_stage7_enabled_requires_dry_run_and_no_live() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(STAGE7_ENABLED=True, DRY_RUN=False, LIVE_TRADING=False)
+
+    with pytest.raises(ValidationError):
+        Settings(STAGE7_ENABLED=True, DRY_RUN=True, LIVE_TRADING=True)

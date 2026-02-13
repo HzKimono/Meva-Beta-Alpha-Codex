@@ -63,7 +63,8 @@ def test_fifo_realized_unrealized_and_fee_handling() -> None:
         ),
     ]
     state = apply_events(LedgerState(), events)
-    assert compute_realized_pnl(state) == Decimal("23")
+    assert compute_realized_pnl(state) == Decimal("25")
+    assert state.fees_by_currency["TRY"] == Decimal("2")
     assert compute_unrealized_pnl(state, {"BTCTRY": Decimal("130")}) == Decimal("10")
 
 

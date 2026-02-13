@@ -246,7 +246,6 @@ class StateStore:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_mode ON risk_decisions(mode)")
-        conn.commit()
         if not self._table_exists(conn, "risk_state_current"):
             msg = "risk_state_current not created"
             raise RuntimeError(msg)
@@ -345,6 +344,12 @@ class StateStore:
                 FOREIGN KEY(cycle_id) REFERENCES stage7_cycle_trace(cycle_id)
             )
             """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_cycle_trace_ts ON stage7_cycle_trace(ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_ledger_metrics_ts ON stage7_ledger_metrics(ts)"
         )
 
     def save_stage7_cycle(
@@ -945,6 +950,30 @@ class StateStore:
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM meta WHERE key='last_cycle_id'").fetchone()
         return row["value"] if row else None
+
+    def set_last_stage7_cycle_id(self, cycle_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES ('last_stage7_cycle_id', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+                """,
+                (cycle_id,),
+            )
+
+    def get_latest_risk_mode(self) -> Mode:
+        from btcbot.domain.risk_budget import Mode
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT mode FROM risk_decisions ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return Mode.NORMAL
+        try:
+            return Mode(str(row["mode"]))
+        except ValueError:
+            return Mode.NORMAL
 
     # Stage 4 helpers
     def client_order_id_exists(self, client_order_id: str) -> bool:

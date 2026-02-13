@@ -4,7 +4,6 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
 
 from btcbot.domain.ledger import (
     EquityPoint,
@@ -113,6 +112,7 @@ class LedgerService:
     def simulate_dry_run_fills(
         self,
         *,
+        cycle_id: str,
         actions: list[LifecycleAction],
         mark_prices: dict[str, Decimal],
         slippage_bps: Decimal,
@@ -120,7 +120,7 @@ class LedgerService:
         ts: datetime,
     ) -> list[SimulatedFill]:
         simulated: list[SimulatedFill] = []
-        for action in actions:
+        for idx, action in enumerate(actions):
             if action.action_type != LifecycleActionType.SUBMIT:
                 continue
             symbol = normalize_symbol(action.symbol)
@@ -132,7 +132,8 @@ class LedgerService:
             applied = baseline * slip_mult
             notional = applied * action.qty
             fee_try = notional * (fees_bps / Decimal("10000"))
-            fill_id = f"s7:{uuid4().hex}"
+            id_component = action.client_order_id or action.exchange_order_id or str(idx)
+            fill_id = f"s7:{cycle_id}:{id_component}"
             fill_event = LedgerEvent(
                 event_id=f"fill:{fill_id}",
                 ts=ts.astimezone(UTC),
@@ -215,8 +216,8 @@ class LedgerService:
             if event.type == LedgerEventType.FILL and event.price is not None:
                 turnover += abs(event.price * event.qty)
 
-        gross = realized + fees_try
-        net = realized + unrealized
+        gross = realized + unrealized
+        net = gross - fees_try - slippage_try
 
         with self.state_store._connect() as conn:
             rows = conn.execute(
