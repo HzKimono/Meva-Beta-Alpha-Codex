@@ -51,7 +51,8 @@ class SymbolRules:
 @dataclass
 class _CachedRules:
     rules: SymbolRules
-    expires_at: datetime
+    status: str
+    cached_at: datetime
 
 
 class ExchangeRulesService:
@@ -95,8 +96,8 @@ class ExchangeRulesService:
         key = _norm_symbol(symbol)
         now = datetime.now(UTC)
         cached = self._cache.get(key)
-        if cached and cached.expires_at > now:
-            return cached.rules, "ok"
+        if cached and (now - cached.cached_at) < timedelta(seconds=self.cache_ttl_sec):
+            return cached.rules, cached.status
 
         index: dict[str, object] = {}
         get_info = getattr(self.exchange, "get_exchange_info", None)
@@ -114,7 +115,8 @@ class ExchangeRulesService:
             fallback = self._fallback_rules()
             self._cache[key] = _CachedRules(
                 rules=fallback,
-                expires_at=now + timedelta(seconds=self.cache_ttl_sec),
+                status="fallback",
+                cached_at=now,
             )
             return fallback, "fallback"
 
@@ -144,13 +146,15 @@ class ExchangeRulesService:
             fallback = self._fallback_rules()
             self._cache[key] = _CachedRules(
                 rules=fallback,
-                expires_at=now + timedelta(seconds=self.cache_ttl_sec),
+                status="fallback",
+                cached_at=now,
             )
             return fallback, "fallback"
 
         cached_rules = _CachedRules(
             rules=converted,
-            expires_at=now + timedelta(seconds=self.cache_ttl_sec),
+            status="ok",
+            cached_at=now,
         )
         for alias in _pair_symbol_candidates(match):
             self._cache[_norm_symbol(alias)] = cached_rules

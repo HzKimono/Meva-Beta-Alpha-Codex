@@ -112,6 +112,25 @@ def test_invalid_metadata_not_cached_as_zero() -> None:
     assert second_status == "invalid"
 
 
+def test_fallback_cache_preserves_status_when_metadata_not_required() -> None:
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STAGE7_RULES_REQUIRE_METADATA=False,
+    )
+    exchange = FakeExchangeClient()
+    service = ExchangeRulesService(exchange, settings=settings)
+
+    first_rules, first_status = service.get_symbol_rules_status("ETH_TRY")
+    second_rules, second_status = service.get_symbol_rules_status("ETH_TRY")
+
+    assert first_rules is not None
+    assert second_rules is not None
+    assert first_status == "fallback"
+    assert second_status == "fallback"
+    assert exchange.exchange_info_calls == 1
+
+
 def test_validate_notional_price_non_positive() -> None:
     service = ExchangeRulesService(FakeExchangeClient())
 
