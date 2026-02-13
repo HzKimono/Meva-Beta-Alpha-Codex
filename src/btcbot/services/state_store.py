@@ -55,6 +55,9 @@ class StateStore:
         self.db_path = db_path
         self._transaction_conn: sqlite3.Connection | None = None
         self._init_db()
+        with self._connect() as conn:
+            self._ensure_risk_budget_schema(conn)
+            self._ensure_anomaly_schema(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -226,38 +229,6 @@ class StateStore:
             )
             """
         )
-
-    def _ensure_anomaly_schema(self, conn: sqlite3.Connection) -> None:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS anomaly_events (
-                id TEXT PRIMARY KEY,
-                ts TEXT NOT NULL,
-                cycle_id TEXT NOT NULL,
-                code TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                details_json TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_ts ON anomaly_events(ts)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_code ON anomaly_events(code)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_anomaly_events_cycle_id ON anomaly_events(cycle_id)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS degrade_state_current (
-                state_id INTEGER PRIMARY KEY CHECK(state_id = 1),
-                cooldown_until TEXT,
-                current_override_mode TEXT,
-                last_reasons_json TEXT,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(ts)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_mode ON risk_decisions(mode)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS risk_state_current (
@@ -267,10 +238,23 @@ class StateStore:
                 peak_equity_date TEXT,
                 fees_try_today TEXT,
                 fees_day TEXT,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_mode ON risk_decisions(mode)")
+        conn.commit()
+        if not self._table_exists(conn, "risk_state_current"):
+            msg = "risk_state_current not created"
+            raise RuntimeError(msg)
+
+    def _table_exists(self, conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     def _ensure_anomaly_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(

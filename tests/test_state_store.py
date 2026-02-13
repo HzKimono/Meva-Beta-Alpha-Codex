@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -9,6 +10,25 @@ import pytest
 from btcbot.domain.models import Order, OrderSide, OrderStatus
 from btcbot.services import state_store as state_store_module
 from btcbot.services.state_store import StateStore
+
+
+def test_risk_state_current_table_is_created_on_fresh_db(tmp_path) -> None:
+    db_path = tmp_path / "fresh.sqlite"
+    db = StateStore(str(db_path))
+
+    with sqlite3.connect(str(db_path)) as con:
+        row = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='risk_state_current'"
+        ).fetchone()
+
+    assert row is not None
+    assert db.get_risk_state_current() == {
+        "current_mode": None,
+        "peak_equity_try": None,
+        "peak_equity_date": None,
+        "fees_try_today": None,
+        "fees_day": None,
+    }
 
 
 def test_record_action_returns_action_id_and_dedupes(tmp_path) -> None:
