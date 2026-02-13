@@ -249,6 +249,51 @@ class Stage4CycleRunner:
 
             execution_report = execution_service.execute_with_report(accepted_actions)
             self._assert_execution_invariant(execution_report)
+            with state_store.transaction():
+                cycle_metrics = build_cycle_metrics(
+                    cycle_id=cycle_id,
+                    cycle_started_at=cycle_started_at,
+                    cycle_ended_at=datetime.now(UTC),
+                    mode=("NORMAL" if live_mode else "OBSERVE_ONLY"),
+                    fills=fills,
+                    ledger_append_result=ledger_ingest,
+                    pnl_report=pnl_report,
+                    orders_submitted=execution_report.submitted,
+                    orders_canceled=execution_report.canceled,
+                    rejects_count=execution_report.rejected,
+                    mark_prices=mark_prices,
+                    pnl_snapshot=snapshot,
+                )
+                persist_cycle_metrics(state_store, cycle_metrics)
+
+            cycle_metrics = build_cycle_metrics(
+                cycle_id=cycle_id,
+                cycle_started_at=cycle_started_at,
+                cycle_ended_at=datetime.now(UTC),
+                mode=("NORMAL" if live_mode else "OBSERVE_ONLY"),
+                fills=fills,
+                ledger_append_result=ledger_ingest,
+                pnl_report=pnl_report,
+                orders_submitted=execution_report.submitted,
+                orders_canceled=execution_report.canceled,
+                rejects_count=execution_report.rejected,
+                mark_prices=mark_prices,
+                pnl_snapshot=snapshot,
+            )
+            try:
+                with state_store.transaction():
+                    persist_cycle_metrics(state_store, cycle_metrics)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "cycle_metrics_persist_failed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "reason_code": "cycle_metrics_persist_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                    },
+                )
 
             cycle_metrics = build_cycle_metrics(
                 cycle_id=cycle_id,
