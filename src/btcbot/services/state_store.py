@@ -1520,6 +1520,7 @@ class StateStore:
 
     def get_risk_state_current(self) -> dict[str, str | None]:
         with self._connect() as conn:
+            self._ensure_risk_budget_schema(conn)
             row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
         if row is None:
             return {
