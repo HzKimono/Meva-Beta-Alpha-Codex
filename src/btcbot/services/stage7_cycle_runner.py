@@ -7,10 +7,12 @@ from uuid import uuid4
 
 from btcbot.config import Settings
 from btcbot.domain.anomalies import combine_modes
+from btcbot.domain.models import Balance
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import UniverseSelectionService
@@ -34,13 +36,19 @@ class Stage7CycleRunner:
         ledger_service = LedgerService(state_store=state_store, logger=logger)
         exchange = build_exchange_stage4(settings, dry_run=True)
         universe_service = UniverseSelectionService()
+        policy_service = PortfolioPolicyService()
         universe_result = universe_service.select_universe(
             exchange=getattr(exchange, "client", exchange),
             settings=settings,
             now_utc=now,
         )
         try:
-            mark_prices, _ = stage4.resolve_mark_prices(exchange, settings.symbols)
+            mark_prices, _ = stage4.resolve_mark_prices(exchange, universe_result.selected_symbols)
+            base = getattr(exchange, "client", exchange)
+            get_balances = getattr(base, "get_balances", None)
+            balances = get_balances() if callable(get_balances) else []
+            if not balances:
+                balances = [Balance(asset="TRY", free=settings.dry_run_try_balance)]
         finally:
             close = getattr(exchange, "close", None)
             if callable(close):
@@ -54,6 +62,14 @@ class Stage7CycleRunner:
             "final_mode": combine_modes(base_mode, None).value,
         }
         final_mode = Mode(mode_payload["final_mode"])
+        portfolio_plan = policy_service.build_plan(
+            universe=universe_result.selected_symbols,
+            mark_prices_try=mark_prices,
+            balances=balances,
+            settings=settings,
+            now_utc=now,
+            final_mode=final_mode,
+        )
 
         actions: list[dict[str, object]] = []
         simulated_count = 0
@@ -144,6 +160,7 @@ class Stage7CycleRunner:
             },
             mode_payload=mode_payload,
             order_decisions=actions,
+            portfolio_plan=portfolio_plan.to_dict(),
             ledger_metrics={
                 "gross_pnl_try": snapshot.gross_pnl_try,
                 "realized_pnl_try": snapshot.realized_pnl_try,
