@@ -1159,7 +1159,6 @@ class StateStore:
                 ),
             )
 
-
     def append_ledger_events(self, events: list[LedgerEvent]) -> AppendResult:
         inserted = 0
         with self._connect() as conn:
