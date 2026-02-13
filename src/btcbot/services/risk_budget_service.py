@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -8,6 +9,8 @@ from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignal
 from btcbot.domain.stage4 import Position
 from btcbot.services.ledger_service import PnlReport
 from btcbot.services.state_store import StateStore
+
+logger = logging.getLogger(__name__)
 
 
 class RiskBudgetService:
@@ -32,7 +35,15 @@ class RiskBudgetService:
     ) -> tuple[RiskDecision, Mode | None, Decimal, Decimal, date]:
         current = self.state_store.get_risk_state_current()
         prev_mode_raw = current.get("current_mode")
-        prev_mode = Mode(prev_mode_raw) if prev_mode_raw else None
+        prev_mode = None
+        if prev_mode_raw:
+            try:
+                prev_mode = Mode(prev_mode_raw)
+            except ValueError:
+                logger.warning(
+                    "risk_state_invalid_prev_mode",
+                    extra={"extra": {"current_mode_raw": prev_mode_raw}},
+                )
 
         today = self.now_provider().date()
         peak_equity = self._resolve_peak_equity(current, pnl_report.equity_estimate)

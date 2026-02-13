@@ -107,6 +107,41 @@ def test_risk_budget_service_fees_is_idempotent(tmp_path) -> None:
     assert fees_first == fees_second
 
 
+def test_compute_decision_invalid_stored_mode_is_safe() -> None:
+    class FakeStore:
+        def get_risk_state_current(self):
+            return {
+                "current_mode": "BROKEN_VALUE",
+                "peak_equity_try": "1000",
+                "peak_equity_date": "2026-01-01",
+                "fees_try_today": "0",
+                "fees_day": "2026-01-01",
+            }
+
+    fixed_now = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
+    service = RiskBudgetService(FakeStore(), now_provider=lambda: fixed_now)  # type: ignore[arg-type]
+    pnl_report = PnlReport(
+        realized_pnl_total=Decimal("0"),
+        unrealized_pnl_total=Decimal("0"),
+        fees_total_by_currency={"TRY": Decimal("1")},
+        per_symbol=[],
+        equity_estimate=Decimal("1000"),
+    )
+
+    decision, prev_mode, *_ = service.compute_decision(
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=False,
+    )
+
+    assert prev_mode is None
+    assert isinstance(decision, RiskDecision)
+    assert decision.mode in (Mode.NORMAL, Mode.REDUCE_RISK_ONLY, Mode.OBSERVE_ONLY)
+
+
 def test_risk_budget_service_persist_is_single_atomic_call() -> None:
     calls: list[dict[str, object]] = []
 
@@ -239,9 +274,15 @@ def test_runner_mode_gating(monkeypatch, tmp_path) -> None:
                 reasons=["TEST"],
                 limits=_limits(),
                 signals=_signals(),
-                decided_at=datetime.now(UTC),
+                decided_at=datetime(2026, 1, 1, tzinfo=UTC),
             )
-            return decision, None, Decimal("1000"), Decimal("0"), datetime.now(UTC).date()
+            return (
+                decision,
+                None,
+                Decimal("1000"),
+                Decimal("0"),
+                datetime(2026, 1, 1, tzinfo=UTC).date(),
+            )
 
         def persist_decision(self, **kwargs) -> None:
             del kwargs
