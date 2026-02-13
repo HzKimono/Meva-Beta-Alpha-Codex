@@ -54,7 +54,7 @@ class LedgerState:
 
 
 def _sort_events(events: list[LedgerEvent]) -> list[LedgerEvent]:
-    return sorted(events, key=lambda event: (event.ts, event.event_id))
+    return sorted(events, key=lambda event: (ensure_utc(event.ts), event.event_id))
 
 
 def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
@@ -97,7 +97,20 @@ def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
                             unit_cost=lot.unit_cost,
                             opened_at=lot.opened_at,
                         )
+                if remaining > 0:
+                    raise ValueError(
+                        f"oversell_invariant_violation symbol={event.symbol} "
+                        f"remaining_qty={remaining} event_id={event.event_id}"
+                    )
+        # FEE event invariants: fees are not fills.
+        # side=None, qty=0, and price=None are required semantics.
         if event.type == LedgerEventType.FEE and event.fee is not None and event.fee_currency:
+            if event.side is not None or event.qty != Decimal("0") or event.price is not None:
+                raise ValueError(
+                    "fee_event_invariant_violation "
+                    f"event_id={event.event_id} side={event.side} "
+                    f"qty={event.qty} price={event.price}"
+                )
             currency = event.fee_currency.upper()
             fees[currency] = fees.get(currency, Decimal("0")) + event.fee
             if currency == "TRY":

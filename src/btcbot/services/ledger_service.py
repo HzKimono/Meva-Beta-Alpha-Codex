@@ -75,15 +75,18 @@ class LedgerService:
                         ts=fill.ts.astimezone(UTC),
                         symbol=symbol,
                         type=LedgerEventType.FEE,
-                        side=fill.side.upper(),
-                        qty=fill.qty,
-                        price=fill.price,
+                        side=None,
+                        qty=Decimal("0"),
+                        price=None,
                         fee=fill.fee,
                         fee_currency=fill.fee_asset.upper(),
-                        exchange_trade_id=None,
+                        exchange_trade_id=f"fee:{fill.fill_id}",
                         exchange_order_id=fill.order_id,
                         client_order_id=None,
-                        meta={"linked_fill_id": fill.fill_id},
+                        meta={
+                            "linked_fill_id": fill.fill_id,
+                            "source": "stage4_accounting_fill_fee",
+                        },
                     )
                 )
 

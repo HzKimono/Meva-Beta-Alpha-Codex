@@ -11,6 +11,8 @@ Ledger events are stored in `ledger_events` with append-only writes. Core fields
 
 ## Idempotency strategy
 1. Primary idempotency: `UNIQUE(exchange_trade_id)` when exchange trade IDs exist.
+   - FILL event key: `exchange_trade_id = trade_id`
+   - FEE event key: `exchange_trade_id = "fee:{trade_id}"`
 2. Fallback idempotency for fills without trade IDs:
    `UNIQUE(client_order_id, symbol, side, price, qty, ts)` (fill-only index).
 3. Inserts use `INSERT OR IGNORE`; duplicates are ignored safely.
@@ -18,6 +20,8 @@ Ledger events are stored in `ledger_events` with append-only writes. Core fields
 Limitation: fallback uniqueness depends on timestamp precision and client order IDs being present.
 
 ## PnL methodology
+- Fee event invariants: `side=None`, `qty=0`, `price=None` (fees are not fills).
+
 - FIFO lot accounting is used.
 - Realized PnL is produced by sell fills matched against oldest open buy lots.
 - Unrealized PnL is mark-to-market over remaining lots.
@@ -25,7 +29,7 @@ Limitation: fallback uniqueness depends on timestamp precision and client order 
 
 ## Known limitations
 - Non-TRY fee conversion is not performed in this stage.
-- Oversell protection is conservative via lot depletion; no shorting model.
+- No shorting is supported; oversell is an invariant violation and raises.
 - Equity estimate depends on provided mark prices.
 
 ## Run locally

@@ -55,9 +55,9 @@ def test_fifo_realized_unrealized_and_fee_handling() -> None:
             ts,
             "BTCTRY",
             LedgerEventType.FEE,
-            "SELL",
-            "1.5",
-            "120",
+            None,
+            "0",
+            None,
             fee="2",
             fee_currency="TRY",
         ),
@@ -69,9 +69,9 @@ def test_fifo_realized_unrealized_and_fee_handling() -> None:
 
 def test_deterministic_sort_by_ts_event_id() -> None:
     ts = datetime(2024, 1, 1, tzinfo=UTC)
-    a = _event("b", ts, "BTCTRY", LedgerEventType.FILL, "BUY", "1", "100", exchange_trade_id="x1")
+    a = _event("a", ts, "BTCTRY", LedgerEventType.FILL, "BUY", "1", "100", exchange_trade_id="x1")
     b = _event(
-        "a", ts, "BTCTRY", LedgerEventType.FILL, "SELL", "0.5", "110", exchange_trade_id="x2"
+        "b", ts, "BTCTRY", LedgerEventType.FILL, "SELL", "0.5", "110", exchange_trade_id="x2"
     )
     state1 = apply_events(LedgerState(), [a, b])
     state2 = apply_events(LedgerState(), [b, a])
@@ -79,3 +79,31 @@ def test_deterministic_sort_by_ts_event_id() -> None:
     assert compute_unrealized_pnl(state1, {"BTCTRY": Decimal("120")}) == compute_unrealized_pnl(
         state2, {"BTCTRY": Decimal("120")}
     )
+
+
+def test_oversell_raises_invariant_violation() -> None:
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    events = [
+        _event("1", ts, "BTCTRY", LedgerEventType.FILL, "BUY", "0.5", "100"),
+        _event("2", ts, "BTCTRY", LedgerEventType.FILL, "SELL", "1.0", "110"),
+    ]
+
+    try:
+        apply_events(LedgerState(), events)
+    except ValueError as exc:
+        message = str(exc)
+        assert "oversell_invariant_violation" in message
+        assert "BTCTRY" in message
+    else:
+        raise AssertionError("expected oversell invariant violation")
+
+
+def test_sorting_normalizes_naive_utc_ts() -> None:
+    aware_later = datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC)
+    naive_earlier = datetime(2024, 1, 1, 0, 0, 0)
+    events = [
+        _event("a", naive_earlier, "BTCTRY", LedgerEventType.FILL, "BUY", "1", "100"),
+        _event("b", aware_later, "BTCTRY", LedgerEventType.FILL, "SELL", "0.5", "110"),
+    ]
+    state = apply_events(LedgerState(), events)
+    assert compute_realized_pnl(state) == Decimal("5")

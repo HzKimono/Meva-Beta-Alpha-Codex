@@ -46,6 +46,12 @@ def test_ingest_twice_is_idempotent(tmp_path) -> None:
 
     assert first.events_inserted == 4
     assert second.events_inserted == 0
-    assert len(store.load_ledger_events()) == 4
+    rows = store.load_ledger_events()
+    assert len(rows) == 4
+    fee_events = [event for event in rows if event.type.value == "FEE"]
+    assert sorted(event.exchange_trade_id for event in fee_events) == ["fee:t-1", "fee:t-2"]
+    assert all(event.side is None for event in fee_events)
+    assert all(event.qty == Decimal("0") for event in fee_events)
+    assert all(event.price is None for event in fee_events)
     assert first_report.realized_pnl_total == second_report.realized_pnl_total
     assert first_report.unrealized_pnl_total == second_report.unrealized_pnl_total

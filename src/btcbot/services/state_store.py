@@ -196,6 +196,9 @@ class StateStore:
             )
             """
         )
+        # Dedupe scheme for exchange_trade_id:
+        # - FILL events use raw exchange trade IDs (e.g., "t-123").
+        # - FEE events use namespaced IDs (e.g., "fee:t-123") to avoid collisions.
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_events_exchange_trade_id_unique
