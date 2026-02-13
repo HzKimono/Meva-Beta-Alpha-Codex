@@ -18,6 +18,7 @@ from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
 
 if TYPE_CHECKING:
+    from btcbot.domain.anomalies import AnomalyEvent
     from btcbot.domain.risk_budget import Mode, RiskDecision
 
 
@@ -208,6 +209,7 @@ class StateStore:
             self._ensure_ledger_schema(conn)
             self._ensure_cycle_metrics_schema(conn)
             self._ensure_risk_budget_schema(conn)
+            self._ensure_anomaly_schema(conn)
 
     def _ensure_risk_budget_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -239,6 +241,63 @@ class StateStore:
             )
             """
         )
+
+    def _ensure_anomaly_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS anomaly_events (
+                id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                cycle_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                details_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_ts ON anomaly_events(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_code ON anomaly_events(code)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_events_cycle_id ON anomaly_events(cycle_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS degrade_state_current (
+                state_id INTEGER PRIMARY KEY CHECK(state_id = 1),
+                cooldown_until TEXT,
+                current_override_mode TEXT,
+                last_reasons_json TEXT,
+                warn_window_count INTEGER NOT NULL DEFAULT 0,
+                last_warn_codes_json TEXT NOT NULL DEFAULT '[]',
+                cursor_stall_cycles_json TEXT NOT NULL DEFAULT '{}',
+                last_reject_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(degrade_state_current)")
+        }
+        if "warn_window_count" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN warn_window_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_warn_codes_json" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN last_warn_codes_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "cursor_stall_cycles_json" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN cursor_stall_cycles_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "last_reject_count" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN last_reject_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -1431,6 +1490,7 @@ class StateStore:
 
     def get_risk_state_current(self) -> dict[str, str | None]:
         with self._connect() as conn:
+            self._ensure_risk_budget_schema(conn)
             row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
         if row is None:
             return {
@@ -1603,3 +1663,156 @@ class StateStore:
 
         payload = asdict(value)
         return json.dumps(payload, sort_keys=True, default=_json_default)
+
+    def save_anomaly_events(self, cycle_id: str, events: list[AnomalyEvent]) -> None:
+        if not events:
+            return
+        with self._connect() as conn:
+            self._save_anomaly_events_with_conn(conn=conn, cycle_id=cycle_id, events=events)
+
+    def get_degrade_state_current(self) -> dict[str, str]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM degrade_state_current WHERE state_id = 1").fetchone()
+        if row is None:
+            return {}
+        result: dict[str, str] = {}
+        for key in (
+            "cooldown_until",
+            "current_override_mode",
+            "last_reasons_json",
+            "warn_window_count",
+            "last_warn_codes_json",
+            "cursor_stall_cycles_json",
+            "last_reject_count",
+            "updated_at",
+        ):
+            value = row[key]
+            if value is not None:
+                result[key] = str(value)
+        return result
+
+    def upsert_degrade_state_current(
+        self,
+        *,
+        cooldown_until: str | None,
+        current_override_mode: str | None,
+        last_reasons_json: str,
+        warn_window_count: int,
+        last_warn_codes_json: str,
+        cursor_stall_cycles_json: str,
+        last_reject_count: int,
+    ) -> None:
+        with self._connect() as conn:
+            self._upsert_degrade_state_current_with_conn(
+                conn=conn,
+                cooldown_until=cooldown_until,
+                current_override_mode=current_override_mode,
+                last_reasons_json=last_reasons_json,
+                warn_window_count=warn_window_count,
+                last_warn_codes_json=last_warn_codes_json,
+                cursor_stall_cycles_json=cursor_stall_cycles_json,
+                last_reject_count=last_reject_count,
+            )
+
+    def persist_degrade(
+        self,
+        *,
+        cycle_id: str,
+        events: list[AnomalyEvent],
+        cooldown_until: str | None,
+        current_override_mode: str | None,
+        last_reasons_json: str,
+        warn_window_count: int,
+        last_warn_codes_json: str,
+        cursor_stall_cycles_json: str,
+        last_reject_count: int,
+    ) -> None:
+        with self.transaction() as conn:
+            self._save_anomaly_events_with_conn(conn=conn, cycle_id=cycle_id, events=events)
+            self._upsert_degrade_state_current_with_conn(
+                conn=conn,
+                cooldown_until=cooldown_until,
+                current_override_mode=current_override_mode,
+                last_reasons_json=last_reasons_json,
+                warn_window_count=warn_window_count,
+                last_warn_codes_json=last_warn_codes_json,
+                cursor_stall_cycles_json=cursor_stall_cycles_json,
+                last_reject_count=last_reject_count,
+            )
+
+    def _save_anomaly_events_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        cycle_id: str,
+        events: list[AnomalyEvent],
+    ) -> None:
+        for event in events:
+            event_id = f"{cycle_id}:{event.code.value}:{event.severity}"
+            conn.execute(
+                """
+                INSERT INTO anomaly_events(id, ts, cycle_id, code, severity, details_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    ts=excluded.ts,
+                    cycle_id=excluded.cycle_id,
+                    code=excluded.code,
+                    severity=excluded.severity,
+                    details_json=excluded.details_json
+                """,
+                (
+                    event_id,
+                    event.ts.isoformat(),
+                    cycle_id,
+                    event.code.value,
+                    event.severity,
+                    json.dumps(event.details, sort_keys=True),
+                ),
+            )
+
+    def _upsert_degrade_state_current_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        cooldown_until: str | None,
+        current_override_mode: str | None,
+        last_reasons_json: str,
+        warn_window_count: int,
+        last_warn_codes_json: str,
+        cursor_stall_cycles_json: str,
+        last_reject_count: int,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO degrade_state_current(
+                state_id,
+                cooldown_until,
+                current_override_mode,
+                last_reasons_json,
+                warn_window_count,
+                last_warn_codes_json,
+                cursor_stall_cycles_json,
+                last_reject_count,
+                updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(state_id) DO UPDATE SET
+                cooldown_until=excluded.cooldown_until,
+                current_override_mode=excluded.current_override_mode,
+                last_reasons_json=excluded.last_reasons_json,
+                warn_window_count=excluded.warn_window_count,
+                last_warn_codes_json=excluded.last_warn_codes_json,
+                cursor_stall_cycles_json=excluded.cursor_stall_cycles_json,
+                last_reject_count=excluded.last_reject_count,
+                updated_at=excluded.updated_at
+            """,
+            (
+                cooldown_until,
+                current_override_mode,
+                last_reasons_json,
+                warn_window_count,
+                last_warn_codes_json,
+                cursor_stall_cycles_json,
+                last_reject_count,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
