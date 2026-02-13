@@ -268,9 +268,9 @@ def test_accounting_equity_realized_today_fee_and_oversell(store: StateStore) ->
         ts=now_utc(),
     )
     exchange.fills = [buy_fill]
-    fills = svc.fetch_new_fills("BTC_TRY")
+    fetch = svc.fetch_new_fills("BTC_TRY")
     snapshot = svc.apply_fills(
-        fills, mark_prices={"BTC_TRY": Decimal("110")}, try_cash=Decimal("500")
+        fetch.fills, mark_prices={"BTC_TRY": Decimal("110")}, try_cash=Decimal("500")
     )
     assert snapshot.total_equity_try == Decimal("601")
 
@@ -288,7 +288,7 @@ def test_accounting_equity_realized_today_fee_and_oversell(store: StateStore) ->
     exchange.fills = [sell_bad_fee]
     fills2 = svc.fetch_new_fills("BTC_TRY")
     snapshot2 = svc.apply_fills(
-        fills2, mark_prices={"BTC_TRY": Decimal("120")}, try_cash=Decimal("620")
+        fills2.fills, mark_prices={"BTC_TRY": Decimal("120")}, try_cash=Decimal("620")
     )
     assert snapshot2.realized_today_try > Decimal("0")
 
@@ -306,7 +306,9 @@ def test_accounting_equity_realized_today_fee_and_oversell(store: StateStore) ->
     exchange.fills = [oversell]
     fills3 = svc.fetch_new_fills("BTC_TRY")
     with pytest.raises(AccountingIntegrityError):
-        svc.apply_fills(fills3, mark_prices={"BTC_TRY": Decimal("120")}, try_cash=Decimal("620"))
+        svc.apply_fills(
+            fills3.fills, mark_prices={"BTC_TRY": Decimal("120")}, try_cash=Decimal("620")
+        )
 
 
 def test_reconcile_enrichment_and_missing_client_id() -> None:
