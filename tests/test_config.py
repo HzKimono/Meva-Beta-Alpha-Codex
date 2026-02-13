@@ -99,3 +99,11 @@ def test_parse_symbols_csv_handles_whitespace_and_case() -> None:
     settings = Settings(SYMBOLS=" btc_try , Eth_Try,  sol_try ")
 
     assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
+
+
+def test_parse_degrade_warn_codes_csv() -> None:
+    settings = Settings(DEGRADE_WARN_CODES_CSV="STALE_MARKET_DATA, ORDER_REJECT_SPIKE")
+    assert settings.parsed_degrade_warn_codes() == {
+        "STALE_MARKET_DATA",
+        "ORDER_REJECT_SPIKE",
+    }
