@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     fills_poll_lookback_minutes: int = Field(default=30, alias="FILLS_POLL_LOOKBACK_MINUTES")
     stage4_bootstrap_intents: bool = Field(default=True, alias="STAGE4_BOOTSTRAP_INTENTS")
 
+    stage7_enabled: bool = Field(default=False, alias="STAGE7_ENABLED")
+    stage7_slippage_bps: Decimal = Field(default=Decimal("25"), alias="STAGE7_SLIPPAGE_BPS")
+    stage7_fees_bps: Decimal = Field(default=Decimal("20"), alias="STAGE7_FEES_BPS")
+    stage7_mark_price_source: str = Field(default="mid", alias="STAGE7_MARK_PRICE_SOURCE")
+
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
     )
@@ -271,6 +276,19 @@ class Settings(BaseSettings):
         if isinstance(warn_value, Decimal) and value < warn_value:
             raise ValueError("PNL_DIVERGENCE_TRY_ERROR must be >= PNL_DIVERGENCE_TRY_WARN")
         return value
+
+    @field_validator("stage7_slippage_bps", "stage7_fees_bps")
+    def validate_stage7_non_negative_bps(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("Stage7 bps values must be >= 0")
+        return value
+
+    @field_validator("stage7_mark_price_source")
+    def validate_stage7_mark_source(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"mid", "last"}:
+            raise ValueError("STAGE7_MARK_PRICE_SOURCE must be one of: mid,last")
+        return normalized
 
     def parsed_degrade_warn_codes(self) -> set[AnomalyCode]:
         parsed_codes: set[AnomalyCode] = set()

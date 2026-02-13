@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 from btcbot.domain.ledger import (
+    EquityPoint,
     LedgerEvent,
     LedgerEventType,
+    LedgerSnapshot,
     LedgerState,
     apply_events,
+    compute_max_drawdown,
     compute_realized_pnl,
     compute_unrealized_pnl,
 )
 from btcbot.domain.models import normalize_symbol
-from btcbot.domain.stage4 import Fill
+from btcbot.domain.stage4 import Fill, LifecycleAction, LifecycleActionType
 from btcbot.services.state_store import StateStore
 
 
@@ -40,6 +44,14 @@ class PnlReport:
     fees_total_by_currency: dict[str, Decimal]
     per_symbol: list[SymbolPnlBreakdown]
     equity_estimate: Decimal
+
+
+@dataclass(frozen=True)
+class SimulatedFill:
+    event: LedgerEvent
+    fee_event: LedgerEvent
+    applied_price: Decimal
+    baseline_price: Decimal
 
 
 class LedgerService:
@@ -96,6 +108,140 @@ class LedgerService:
             events_attempted=append.attempted,
             events_inserted=append.inserted,
             events_ignored=append.ignored,
+        )
+
+    def simulate_dry_run_fills(
+        self,
+        *,
+        actions: list[LifecycleAction],
+        mark_prices: dict[str, Decimal],
+        slippage_bps: Decimal,
+        fees_bps: Decimal,
+        ts: datetime,
+    ) -> list[SimulatedFill]:
+        simulated: list[SimulatedFill] = []
+        for action in actions:
+            if action.action_type != LifecycleActionType.SUBMIT:
+                continue
+            symbol = normalize_symbol(action.symbol)
+            baseline = mark_prices.get(symbol)
+            if baseline is None or baseline <= 0:
+                continue
+            sign = Decimal("1") if action.side.upper() == "BUY" else Decimal("-1")
+            slip_mult = Decimal("1") + sign * (slippage_bps / Decimal("10000"))
+            applied = baseline * slip_mult
+            notional = applied * action.qty
+            fee_try = notional * (fees_bps / Decimal("10000"))
+            fill_id = f"s7:{uuid4().hex}"
+            fill_event = LedgerEvent(
+                event_id=f"fill:{fill_id}",
+                ts=ts.astimezone(UTC),
+                symbol=symbol,
+                type=LedgerEventType.FILL,
+                side=action.side.upper(),
+                qty=action.qty,
+                price=applied,
+                fee=None,
+                fee_currency=None,
+                exchange_trade_id=fill_id,
+                exchange_order_id=action.exchange_order_id,
+                client_order_id=action.client_order_id,
+                meta={"source": "stage7_dry_run", "baseline_price": str(baseline)},
+            )
+            fee_event = LedgerEvent(
+                event_id=f"fee:{fill_id}",
+                ts=ts.astimezone(UTC),
+                symbol=symbol,
+                type=LedgerEventType.FEE,
+                side=None,
+                qty=Decimal("0"),
+                price=None,
+                fee=fee_try,
+                fee_currency="TRY",
+                exchange_trade_id=f"fee:{fill_id}",
+                exchange_order_id=action.exchange_order_id,
+                client_order_id=action.client_order_id,
+                meta={"source": "stage7_dry_run", "linked_fill_id": fill_id},
+            )
+            simulated.append(
+                SimulatedFill(
+                    event=fill_event,
+                    fee_event=fee_event,
+                    applied_price=applied,
+                    baseline_price=baseline,
+                )
+            )
+        return simulated
+
+    def append_simulated_fills(self, fills: list[SimulatedFill]) -> LedgerIngestResult:
+        events: list[LedgerEvent] = []
+        for fill in fills:
+            events.append(fill.event)
+            events.append(fill.fee_event)
+        append = self.state_store.append_ledger_events(events)
+        return LedgerIngestResult(
+            events_attempted=append.attempted,
+            events_inserted=append.inserted,
+            events_ignored=append.ignored,
+        )
+
+    def snapshot(
+        self,
+        *,
+        mark_prices: dict[str, Decimal],
+        cash_try: Decimal,
+        price_for_fee_conversion: callable | None = None,
+        slippage_try: Decimal = Decimal("0"),
+        ts: datetime | None = None,
+    ) -> LedgerSnapshot:
+        events = self.state_store.load_ledger_events()
+        state = apply_events(LedgerState(), events)
+        realized = compute_realized_pnl(state)
+        normalized_marks = {
+            normalize_symbol(symbol): value for symbol, value in mark_prices.items()
+        }
+        unrealized = compute_unrealized_pnl(state, normalized_marks)
+
+        fees_try = Decimal("0")
+        for ccy, amount in state.fees_by_currency.items():
+            if ccy.upper() == "TRY":
+                fees_try += amount
+            elif price_for_fee_conversion is not None:
+                converted = price_for_fee_conversion(ccy.upper(), "TRY")
+                fees_try += amount * Decimal(str(converted))
+
+        turnover = Decimal("0")
+        for event in events:
+            if event.type == LedgerEventType.FILL and event.price is not None:
+                turnover += abs(event.price * event.qty)
+
+        gross = realized + fees_try
+        net = realized + unrealized
+
+        with self.state_store._connect() as conn:
+            rows = conn.execute(
+                "SELECT ts,total_equity_try FROM pnl_snapshots ORDER BY ts"
+            ).fetchall()
+        points = [
+            EquityPoint(
+                ts=datetime.fromisoformat(str(row["ts"])),
+                equity_try=Decimal(str(row["total_equity_try"])),
+            )
+            for row in rows
+        ]
+        if ts is not None:
+            points.append(EquityPoint(ts=ts, equity_try=cash_try + net))
+
+        return LedgerSnapshot(
+            gross_pnl_try=gross,
+            realized_pnl_try=realized,
+            unrealized_pnl_try=unrealized,
+            net_pnl_try=net,
+            fees_try=fees_try,
+            slippage_try=slippage_try,
+            turnover_try=turnover,
+            equity_try=cash_try + net,
+            max_drawdown=compute_max_drawdown(points) if points else Decimal("0"),
         )
 
     def report(
