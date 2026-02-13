@@ -176,7 +176,7 @@ def test_runner_order_of_stage4_pipeline(monkeypatch, tmp_path) -> None:
         def fetch_new_fills(self, symbol: str):
             del symbol
             order.append("accounting.fetch")
-            return []
+            return type("FF", (), {"fills": [], "cursor_after": None})()
 
         def apply_fills(self, fills, *, mark_prices, try_cash):
             del fills, mark_prices, try_cash
