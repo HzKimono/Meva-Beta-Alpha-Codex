@@ -64,7 +64,9 @@ def build_cycle_metrics(
         rejects_count=quality.rejects_count,
         fills_per_submitted_order=float(quality.fills_per_submitted_order),
         avg_time_to_fill=quality.avg_time_to_fill,
-        slippage_bps_avg=(float(quality.slippage_bps_avg) if quality.slippage_bps_avg else None),
+        slippage_bps_avg=(
+            float(quality.slippage_bps_avg) if quality.slippage_bps_avg is not None else None
+        ),
         fees={k: str(v) for k, v in pnl_report.fees_total_by_currency.items()},
         pnl={
             "realized_pnl_total": str(pnl_report.realized_pnl_total),

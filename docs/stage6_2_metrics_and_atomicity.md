@@ -13,11 +13,11 @@ Idempotency and atomic state writes are enforced as follows:
 
 ### Write transaction #1 (authoritative state)
 The first write transaction contains only:
-- ledger append,
-- accounting apply,
-- cursor advance.
+- ledger append (FILL/FEE events),
+- accounting apply (including `applied_fills` idempotency writes),
+- cursor advance (`fills_cursor:*`).
 
-If any step fails, the transaction rolls back and cursor/state remain unchanged.
+If any step fails, the transaction rolls back and cursor/state remain unchanged. This is the single commit boundary for authoritative trading state.
 
 ## 2) Ledger dedupe strategy
 
@@ -31,11 +31,13 @@ Cycle telemetry includes `ledger_events_attempted`, `ledger_events_inserted`, an
 
 ## 3) cycle_metrics persistence model
 
-Stage 6.2 uses **single-write metrics per cycle**:
-- metrics are built after execution (final snapshot),
-- a small write transaction persists one `cycle_metrics` row per `cycle_id`.
+Stage 6.2 uses a **two-phase write model**:
+1) authoritative transaction (required)
+2) best-effort metrics transaction (optional)
 
-If metrics persistence fails, it is logged and does not roll back the already-committed authoritative state.
+Metrics are built after execution (final snapshot), and then one `cycle_metrics` row is upserted per `cycle_id` in its own small transaction.
+
+If metrics persistence fails, `cycle_metrics_persist_failed` is logged and the already-committed authoritative state is not rolled back.
 
 ## 4) Metric semantics
 
