@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from btcbot.domain.accounting import Position, TradeFill
 from btcbot.domain.intent import Intent
@@ -15,6 +16,9 @@ from btcbot.domain.models import Order, OrderStatus, normalize_symbol
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
+
+if TYPE_CHECKING:
+    from btcbot.domain.risk_budget import Mode, RiskDecision
 
 
 @dataclass
@@ -203,6 +207,38 @@ class StateStore:
             self._ensure_stage4_schema(conn)
             self._ensure_ledger_schema(conn)
             self._ensure_cycle_metrics_schema(conn)
+            self._ensure_risk_budget_schema(conn)
+
+    def _ensure_risk_budget_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS risk_decisions (
+                decision_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                signals_json TEXT NOT NULL,
+                limits_json TEXT NOT NULL,
+                decision_json TEXT NOT NULL,
+                prev_mode TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_mode ON risk_decisions(mode)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS risk_state_current (
+                state_id INTEGER PRIMARY KEY CHECK(state_id = 1),
+                current_mode TEXT,
+                peak_equity_try TEXT,
+                peak_equity_date TEXT,
+                fees_try_today TEXT,
+                fees_day TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -1392,3 +1428,178 @@ class StateStore:
                     meta_json,
                 ),
             )
+
+    def get_risk_state_current(self) -> dict[str, str | None]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
+        if row is None:
+            return {
+                "current_mode": None,
+                "peak_equity_try": None,
+                "peak_equity_date": None,
+                "fees_try_today": None,
+                "fees_day": None,
+            }
+        return {
+            "current_mode": str(row["current_mode"]) if row["current_mode"] is not None else None,
+            "peak_equity_try": (
+                str(row["peak_equity_try"]) if row["peak_equity_try"] is not None else None
+            ),
+            "peak_equity_date": (
+                str(row["peak_equity_date"]) if row["peak_equity_date"] is not None else None
+            ),
+            "fees_try_today": (
+                str(row["fees_try_today"]) if row["fees_try_today"] is not None else None
+            ),
+            "fees_day": str(row["fees_day"]) if row["fees_day"] is not None else None,
+        }
+
+    def upsert_risk_state_current(
+        self,
+        *,
+        mode: str,
+        peak_equity_try: Decimal,
+        peak_equity_date: str,
+        fees_try_today: Decimal,
+        fees_day: str,
+    ) -> None:
+        with self._connect() as conn:
+            self._upsert_risk_state_current_with_conn(
+                conn=conn,
+                mode=mode,
+                peak_equity_try=peak_equity_try,
+                peak_equity_date=peak_equity_date,
+                fees_try_today=fees_try_today,
+                fees_day=fees_day,
+            )
+
+    def save_risk_decision(
+        self,
+        *,
+        cycle_id: str,
+        decision: RiskDecision,
+        prev_mode: str | None,
+    ) -> None:
+        with self._connect() as conn:
+            self._save_risk_decision_with_conn(
+                conn=conn,
+                cycle_id=cycle_id,
+                decision=decision,
+                prev_mode=prev_mode,
+            )
+
+    def persist_risk(
+        self,
+        *,
+        cycle_id: str,
+        decision: RiskDecision,
+        prev_mode: str | None,
+        mode: Mode,
+        peak_equity_try: Decimal,
+        peak_day: str,
+        fees_today_try: Decimal,
+        fees_day: str,
+    ) -> None:
+        with self.transaction() as conn:
+            self._save_risk_decision_with_conn(
+                conn=conn,
+                cycle_id=cycle_id,
+                decision=decision,
+                prev_mode=prev_mode,
+            )
+            self._upsert_risk_state_current_with_conn(
+                conn=conn,
+                mode=mode.value,
+                peak_equity_try=peak_equity_try,
+                peak_equity_date=peak_day,
+                fees_try_today=fees_today_try,
+                fees_day=fees_day,
+            )
+
+    def _save_risk_decision_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        cycle_id: str,
+        decision: RiskDecision,
+        prev_mode: str | None,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO risk_decisions(
+                decision_id, ts, mode, reasons_json, signals_json, limits_json, decision_json,
+                prev_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(decision_id) DO UPDATE SET
+                ts=excluded.ts,
+                mode=excluded.mode,
+                reasons_json=excluded.reasons_json,
+                signals_json=excluded.signals_json,
+                limits_json=excluded.limits_json,
+                decision_json=excluded.decision_json,
+                prev_mode=excluded.prev_mode
+            """,
+            (
+                cycle_id,
+                decision.decided_at.isoformat(),
+                decision.mode.value,
+                json.dumps(decision.reasons, sort_keys=True),
+                self._serialize_risk_payload(decision.signals),
+                self._serialize_risk_payload(decision.limits),
+                self._serialize_risk_payload(decision),
+                prev_mode,
+            ),
+        )
+
+    def _upsert_risk_state_current_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        mode: str,
+        peak_equity_try: Decimal,
+        peak_equity_date: str,
+        fees_try_today: Decimal,
+        fees_day: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO risk_state_current(
+                state_id, current_mode, peak_equity_try, peak_equity_date,
+                fees_try_today, fees_day, updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(state_id) DO UPDATE SET
+                current_mode=excluded.current_mode,
+                peak_equity_try=excluded.peak_equity_try,
+                peak_equity_date=excluded.peak_equity_date,
+                fees_try_today=excluded.fees_try_today,
+                fees_day=excluded.fees_day,
+                updated_at=excluded.updated_at
+            """,
+            (
+                mode,
+                str(peak_equity_try),
+                peak_equity_date,
+                str(fees_try_today),
+                fees_day,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+
+    def _serialize_risk_payload(self, value: object) -> str:
+        from dataclasses import asdict
+
+        from btcbot.domain.risk_budget import Mode
+
+        def _json_default(obj: object) -> str:
+            if isinstance(obj, Decimal):
+                return str(obj)
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if isinstance(obj, Mode):
+                return obj.value
+            raise TypeError(
+                f"Unsupported type for risk payload serialization: {type(obj).__name__}"
+            )
+
+        payload = asdict(value)
+        return json.dumps(payload, sort_keys=True, default=_json_default)
