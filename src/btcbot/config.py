@@ -61,6 +61,20 @@ class Settings(BaseSettings):
     fills_poll_lookback_minutes: int = Field(default=30, alias="FILLS_POLL_LOOKBACK_MINUTES")
     stage4_bootstrap_intents: bool = Field(default=True, alias="STAGE4_BOOTSTRAP_INTENTS")
 
+    risk_max_daily_drawdown_try: Decimal = Field(
+        default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
+    )
+    risk_max_drawdown_try: Decimal = Field(default=Decimal("3000"), alias="RISK_MAX_DRAWDOWN_TRY")
+    risk_max_gross_exposure_try: Decimal = Field(
+        default=Decimal("10000"), alias="RISK_MAX_GROSS_EXPOSURE_TRY"
+    )
+    risk_max_position_pct: Decimal = Field(default=Decimal("0.30"), alias="RISK_MAX_POSITION_PCT")
+    risk_max_order_notional_try: Decimal = Field(
+        default=Decimal("3000"), alias="RISK_MAX_ORDER_NOTIONAL_TRY"
+    )
+    risk_min_cash_try: Decimal | None = Field(default=None, alias="RISK_MIN_CASH_TRY")
+    risk_max_fee_try_per_day: Decimal | None = Field(default=None, alias="RISK_MAX_FEE_TRY_PER_DAY")
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     universe_quote_currency: str = Field(default="TRY", alias="UNIVERSE_QUOTE_CURRENCY")
