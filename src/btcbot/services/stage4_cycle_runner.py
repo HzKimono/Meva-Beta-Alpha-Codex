@@ -10,7 +10,8 @@ from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo, normalize_symbol
-from btcbot.domain.stage4 import Order, Position, Quantizer
+from btcbot.domain.risk_budget import Mode, RiskLimits
+from btcbot.domain.stage4 import LifecycleAction, Order, Position, Quantizer
 from btcbot.domain.strategy_core import PositionSummary
 from btcbot.services import metrics_service
 from btcbot.services.accounting_service_stage4 import AccountingService
@@ -22,6 +23,7 @@ from btcbot.services.ledger_service import LedgerService
 from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
+from btcbot.services.risk_budget_service import RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.state_store import StateStore
 
@@ -84,6 +86,7 @@ class Stage4CycleRunner:
                 slippage_bps_buffer=settings.slippage_bps_buffer,
                 min_profit_bps=Decimal(str(settings.min_profit_bps)),
             )
+            risk_budget_service = RiskBudgetService(state_store=state_store)
             execution_service = ExecutionService(
                 exchange=exchange,
                 state_store=state_store,
@@ -248,13 +251,62 @@ class Stage4CycleRunner:
                 positions_by_symbol=positions_by_symbol,
             )
 
-            execution_report = execution_service.execute_with_report(accepted_actions)
+            risk_limits = RiskLimits(
+                max_daily_drawdown_try=settings.risk_max_daily_drawdown_try,
+                max_drawdown_try=settings.risk_max_drawdown_try,
+                max_gross_exposure_try=settings.risk_max_gross_exposure_try,
+                max_position_pct=settings.risk_max_position_pct,
+                max_order_notional_try=settings.risk_max_order_notional_try,
+                min_cash_try=settings.risk_min_cash_try,
+                max_fee_try_per_day=settings.risk_max_fee_try_per_day,
+            )
+            risk_decision, prev_mode, peak_equity, fees_today, risk_day = (
+                risk_budget_service.compute_decision(
+                    limits=risk_limits,
+                    pnl_report=pnl_report,
+                    positions=positions,
+                    mark_prices=mark_prices,
+                    realized_today_try=snapshot.realized_today_try,
+                    fills=fills,
+                    kill_switch_active=settings.kill_switch,
+                )
+            )
+            try:
+                risk_budget_service.persist_decision(
+                    cycle_id=cycle_id,
+                    decision=risk_decision,
+                    prev_mode=prev_mode,
+                    peak_equity=peak_equity,
+                    peak_day=risk_day,
+                    fees_today=fees_today,
+                    fees_day=risk_day,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "risk_decision_persist_failed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "reason_code": "risk_decision_persist_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                    },
+                )
+
+            gated_actions = self._gate_actions_by_mode(accepted_actions, risk_decision.mode)
+            if risk_decision.mode == Mode.OBSERVE_ONLY:
+                logger.info(
+                    "mode_gate_observe_only",
+                    extra={"extra": {"cycle_id": cycle_id, "reasons": risk_decision.reasons}},
+                )
+
+            execution_report = execution_service.execute_with_report(gated_actions)
             self._assert_execution_invariant(execution_report)
             cycle_metrics: CycleMetrics = metrics_service.build_cycle_metrics(
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
                 cycle_ended_at=datetime.now(UTC),
-                mode=("NORMAL" if live_mode else "OBSERVE_ONLY"),
+                mode=risk_decision.mode.value,
                 fills=fills,
                 ledger_append_result=ledger_ingest,
                 pnl_report=pnl_report,
@@ -357,6 +409,21 @@ class Stage4CycleRunner:
                 cycle_id=cycle_id, counts=counts, decisions=decisions, envelope=envelope
             )
             state_store.set_last_cycle_id(cycle_id)
+
+            logger.info(
+                "risk_decision",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "mode": risk_decision.mode.value,
+                        "prev_mode": (prev_mode.value if prev_mode else None),
+                        "reasons": risk_decision.reasons,
+                        "drawdown_try": str(risk_decision.signals.drawdown_try),
+                        "gross_exposure_try": str(risk_decision.signals.gross_exposure_try),
+                        "fees_try_today": str(risk_decision.signals.fees_try_today),
+                    }
+                },
+            )
 
             logger.info(
                 "stage4_ledger_pnl_snapshot",
@@ -484,6 +551,22 @@ class Stage4CycleRunner:
             value = getattr(report, field)
             if not isinstance(value, int) or value < 0:
                 raise Stage4InvariantError(f"execution_report_invalid_{field}")
+
+    def _gate_actions_by_mode(
+        self, actions: list[LifecycleAction], mode: Mode
+    ) -> list[LifecycleAction]:
+        if mode == Mode.OBSERVE_ONLY:
+            return []
+        if mode == Mode.REDUCE_RISK_ONLY:
+            gated = []
+            for action in actions:
+                if action.action_type.name == "CANCEL":
+                    gated.append(action)
+                    continue
+                if action.action_type.name == "SUBMIT" and str(action.side).upper() == "SELL":
+                    gated.append(action)
+            return gated
+        return actions
 
     def _fills_cursor_key(self, symbol: str) -> str:
         return f"fills_cursor:{self.norm(symbol)}"
