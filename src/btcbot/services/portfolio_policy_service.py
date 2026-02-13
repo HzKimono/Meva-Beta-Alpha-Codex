@@ -25,6 +25,28 @@ class _RawAction:
     reason: str
 
 
+def split_symbol(symbol: str, quote_ccy: str) -> tuple[str, str]:
+    """Deterministically split symbol into (base, quote) with graceful fallback."""
+
+    cleaned = str(symbol).strip().upper().replace(" ", "")
+    quote = str(quote_ccy).strip().upper()
+    if not cleaned:
+        return cleaned, ""
+
+    for separator in ("_", "-"):
+        if separator in cleaned:
+            left, right = cleaned.split(separator, 1)
+            if left and right:
+                return left, right
+            return cleaned, ""
+
+    canonical = normalize_symbol(cleaned)
+    if quote and canonical.endswith(quote) and len(canonical) > len(quote):
+        return canonical[: -len(quote)], quote
+
+    return canonical, ""
+
+
 class PortfolioPolicyService:
     _QTY_PRECISION = Decimal("0.00000001")
 
@@ -46,19 +68,27 @@ class PortfolioPolicyService:
         }
         filtered_universe = [symbol for symbol in normalized_universe if symbol in price_map]
 
+        quote_ccy = str(settings.stage7_universe_quote_ccy).upper()
+        max_position_notional_try = Decimal(str(settings.max_position_notional_try))
+        turnover_cap_try = Decimal(str(settings.notional_cap_try_per_cycle))
+        min_order_notional_try = Decimal(str(settings.min_order_notional_try))
+        cash_target_cfg = Decimal(str(settings.try_cash_target))
+        cash_max_cfg = Decimal(str(settings.try_cash_max))
+        cash_target_try = min(cash_target_cfg, cash_max_cfg)
+
         snapshot = self._build_snapshot(
             universe=filtered_universe,
             mark_prices_try=price_map,
             balances=balances,
+            quote_ccy=quote_ccy,
         )
 
-        cash_target_try = min(settings.try_cash_target, settings.try_cash_max)
         investable_equity = max(Decimal("0"), snapshot.equity_try - cash_target_try)
 
         allocations, notes = self._build_allocations(
             universe=filtered_universe,
             investable_equity=investable_equity,
-            max_position_notional_try=settings.max_position_notional_try,
+            max_position_notional_try=max_position_notional_try,
         )
 
         raw_actions = self._build_raw_actions(
@@ -66,17 +96,18 @@ class PortfolioPolicyService:
             positions=snapshot.positions,
         )
 
-        constrained_actions = self._apply_constraints(
+        constrained_actions, dropped_notes = self._apply_constraints(
             raw_actions=raw_actions,
             prices=price_map,
-            min_order_notional_try=Decimal(str(settings.min_order_notional_try)),
-            turnover_cap_try=settings.notional_cap_try_per_cycle,
+            min_order_notional_try=min_order_notional_try,
+            turnover_cap_try=turnover_cap_try,
             max_orders_per_cycle=settings.max_orders_per_cycle,
         )
 
         mode_notes: list[str] = []
         if final_mode == Mode.OBSERVE_ONLY:
-            mode_notes.append("mode=OBSERVE_ONLY: actions skipped")
+            if constrained_actions:
+                mode_notes.append(f"observe_only={len(constrained_actions)}")
             constrained_actions = []
         elif final_mode == Mode.REDUCE_RISK_ONLY:
             before_count = len(constrained_actions)
@@ -85,16 +116,16 @@ class PortfolioPolicyService:
             ]
             dropped = before_count - len(constrained_actions)
             if dropped > 0:
-                mode_notes.append(f"mode=REDUCE_RISK_ONLY: dropped_buy_actions={dropped}")
+                mode_notes.append(f"mode_reduce_risk_only={dropped}")
 
         constraints_summary = {
-            "try_cash_target": str(settings.try_cash_target),
-            "try_cash_max": str(settings.try_cash_max),
+            "try_cash_target": str(cash_target_cfg),
+            "try_cash_max": str(cash_max_cfg),
             "cash_target_applied": str(cash_target_try),
-            "max_position_notional_try": str(settings.max_position_notional_try),
-            "notional_cap_try_per_cycle": str(settings.notional_cap_try_per_cycle),
+            "max_position_notional_try": str(max_position_notional_try),
+            "notional_cap_try_per_cycle": str(turnover_cap_try),
             "max_orders_per_cycle": str(settings.max_orders_per_cycle),
-            "min_order_notional_try": str(settings.min_order_notional_try),
+            "min_order_notional_try": str(min_order_notional_try),
             "final_mode": final_mode.value,
             "snapshot": str(snapshot.to_dict()),
         }
@@ -106,7 +137,7 @@ class PortfolioPolicyService:
             allocations=allocations,
             actions=constrained_actions,
             constraints_summary=constraints_summary,
-            notes=notes + mode_notes,
+            notes=notes + dropped_notes + mode_notes,
         )
 
     def _build_snapshot(
@@ -115,22 +146,22 @@ class PortfolioPolicyService:
         universe: list[str],
         mark_prices_try: dict[str, Decimal],
         balances: list[Balance],
+        quote_ccy: str,
     ) -> PortfolioSnapshot:
         cash_try = Decimal("0")
-        for balance in balances:
-            if str(balance.asset).upper() == "TRY":
-                cash_try = Decimal(str(balance.free))
-                break
-
         balance_by_asset = {
             str(balance.asset).upper(): Decimal(str(balance.free)) for balance in balances
         }
+        cash_try = balance_by_asset.get(quote_ccy, Decimal("0"))
 
         positions: list[PositionSnapshot] = []
         total_notional = Decimal("0")
         for symbol in universe:
-            base = symbol[:-3] if symbol.endswith("TRY") else symbol
-            qty = balance_by_asset.get(base.upper(), Decimal("0"))
+            base_asset, parsed_quote = split_symbol(symbol, quote_ccy)
+            if parsed_quote != quote_ccy:
+                qty = Decimal("0")
+            else:
+                qty = balance_by_asset.get(base_asset, Decimal("0"))
             mark = mark_prices_try[symbol]
             notional = qty * mark
             total_notional += notional
@@ -248,28 +279,39 @@ class PortfolioPolicyService:
         min_order_notional_try: Decimal,
         turnover_cap_try: Decimal,
         max_orders_per_cycle: int,
-    ) -> list[RebalanceAction]:
-        filtered = [
-            action
-            for action in raw_actions
-            if action.requested_notional_try.copy_abs() >= min_order_notional_try
-        ]
+    ) -> tuple[list[RebalanceAction], list[str]]:
+        dropped_min = 0
+        filtered: list[_RawAction] = []
+        for action in raw_actions:
+            if action.requested_notional_try < min_order_notional_try:
+                dropped_min += 1
+                continue
+            filtered.append(action)
+
+        sorted_actions = sorted(
+            filtered,
+            key=lambda action: (Decimal("0") - action.requested_notional_try, action.symbol),
+        )
 
         constrained: list[RebalanceAction] = []
         remaining_turnover = turnover_cap_try
+        dropped_turnover = 0
 
-        for action in filtered:
+        for action in sorted_actions:
             if remaining_turnover <= 0:
-                break
+                dropped_turnover += 1
+                continue
             price = prices.get(action.symbol)
             if price is None or price <= 0:
                 continue
             applied_notional = min(action.requested_notional_try, remaining_turnover)
             if applied_notional < min_order_notional_try:
+                dropped_turnover += 1
                 continue
             remaining_turnover -= applied_notional
             qty = (applied_notional / price).quantize(self._QTY_PRECISION, rounding=ROUND_DOWN)
             if qty <= 0:
+                dropped_turnover += 1
                 continue
             constrained.append(
                 RebalanceAction(
@@ -281,13 +323,24 @@ class PortfolioPolicyService:
                 )
             )
 
-        constrained.sort(
+        constrained = sorted(
+            constrained,
             key=lambda action: (
                 Decimal("0") - action.target_notional_try.copy_abs(),
                 action.symbol,
-            )
+            ),
         )
         kept = constrained[: max(0, max_orders_per_cycle)]
+        dropped_max_orders = max(0, len(constrained) - len(kept))
+
+        notes: list[str] = []
+        if dropped_min > 0:
+            notes.append(f"min_notional={dropped_min}")
+        if dropped_turnover > 0:
+            notes.append(f"turnover_cap={dropped_turnover}")
+        if dropped_max_orders > 0:
+            notes.append(f"max_orders={dropped_max_orders}")
+
         sells = sorted((action for action in kept if action.side == "SELL"), key=lambda a: a.symbol)
         buys = sorted((action for action in kept if action.side == "BUY"), key=lambda a: a.symbol)
-        return sells + buys
+        return sells + buys, notes

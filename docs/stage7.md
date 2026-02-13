@@ -132,6 +132,7 @@ The plan contains:
 - `target_weights` equivalent via per-symbol `weight` in `allocations`.
 - `cash_target_try`.
 - `actions` with deterministic SELL-first then BUY ordering, desired TRY notional, estimated qty, and reason.
+- Trace skip reasons are explicit and deterministic (e.g. `min_notional`, `turnover_cap`, `max_orders`, `mode_reduce_risk_only`, `observe_only`, `missing_mark_price`).
 
 Mode gating:
 - `OBSERVE_ONLY`: build plan, but no actions.
