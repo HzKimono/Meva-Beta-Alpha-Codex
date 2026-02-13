@@ -48,10 +48,15 @@ class AppendResult:
 class StateStore:
     def __init__(self, db_path: str = "btcbot_state.db") -> None:
         self.db_path = db_path
+        self._transaction_conn: sqlite3.Connection | None = None
         self._init_db()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        tx_conn = getattr(self, "_transaction_conn", None)
+        if tx_conn is not None:
+            yield tx_conn
+            return
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
@@ -67,6 +72,28 @@ class StateStore:
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        tx_conn = getattr(self, "_transaction_conn", None)
+        if tx_conn is not None:
+            yield tx_conn
+            return
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("BEGIN IMMEDIATE")
+        self._transaction_conn = conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._transaction_conn = None
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -175,6 +202,7 @@ class StateStore:
             )
             self._ensure_stage4_schema(conn)
             self._ensure_ledger_schema(conn)
+            self._ensure_cycle_metrics_schema(conn)
 
     def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -323,6 +351,40 @@ class StateStore:
         cycle_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(cycle_audit)")}
         if "envelope_json" not in cycle_columns:
             conn.execute("ALTER TABLE cycle_audit ADD COLUMN envelope_json TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS applied_fills (
+                fill_id TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    def _ensure_cycle_metrics_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cycle_metrics (
+                cycle_id TEXT PRIMARY KEY,
+                ts_start TEXT NOT NULL,
+                ts_end TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                fills_count INTEGER NOT NULL,
+                orders_submitted INTEGER NOT NULL,
+                orders_canceled INTEGER NOT NULL,
+                rejects_count INTEGER NOT NULL,
+                fill_rate REAL NOT NULL,
+                avg_time_to_fill REAL,
+                slippage_bps_avg REAL,
+                fees_json TEXT NOT NULL,
+                pnl_json TEXT NOT NULL,
+                meta_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cycle_metrics_ts_start ON cycle_metrics(ts_start)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cycle_metrics_mode ON cycle_metrics(mode)")
 
     def _ensure_actions_metadata_columns(self, conn: sqlite3.Connection) -> None:
         columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(actions)")}
@@ -1042,6 +1104,14 @@ class StateStore:
             )
         return bool(cur.rowcount)
 
+    def mark_fill_applied(self, fill_id: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO applied_fills(fill_id) VALUES (?)",
+                (fill_id,),
+            )
+        return bool(cur.rowcount)
+
     def save_stage4_position(self, position: Stage4Position) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -1262,4 +1332,63 @@ class StateStore:
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
                 """,
                 (key, value),
+            )
+
+    def save_cycle_metrics(
+        self,
+        *,
+        cycle_id: str,
+        ts_start: str,
+        ts_end: str,
+        mode: str,
+        fills_count: int,
+        orders_submitted: int,
+        orders_canceled: int,
+        rejects_count: int,
+        fill_rate: float,
+        avg_time_to_fill: float | None,
+        slippage_bps_avg: float | None,
+        fees_json: str,
+        pnl_json: str,
+        meta_json: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cycle_metrics(
+                    cycle_id, ts_start, ts_end, mode, fills_count, orders_submitted,
+                    orders_canceled, rejects_count, fill_rate, avg_time_to_fill,
+                    slippage_bps_avg, fees_json, pnl_json, meta_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts_start=excluded.ts_start,
+                    ts_end=excluded.ts_end,
+                    mode=excluded.mode,
+                    fills_count=excluded.fills_count,
+                    orders_submitted=excluded.orders_submitted,
+                    orders_canceled=excluded.orders_canceled,
+                    rejects_count=excluded.rejects_count,
+                    fill_rate=excluded.fill_rate,
+                    avg_time_to_fill=excluded.avg_time_to_fill,
+                    slippage_bps_avg=excluded.slippage_bps_avg,
+                    fees_json=excluded.fees_json,
+                    pnl_json=excluded.pnl_json,
+                    meta_json=excluded.meta_json
+                """,
+                (
+                    cycle_id,
+                    ts_start,
+                    ts_end,
+                    mode,
+                    fills_count,
+                    orders_submitted,
+                    orders_canceled,
+                    rejects_count,
+                    fill_rate,
+                    avg_time_to_fill,
+                    slippage_bps_avg,
+                    fees_json,
+                    pnl_json,
+                    meta_json,
+                ),
             )

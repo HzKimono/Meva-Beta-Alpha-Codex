@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -11,6 +12,12 @@ from btcbot.services.state_store import StateStore
 
 class AccountingIntegrityError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class FetchFillsResult:
+    fills: list[Fill]
+    cursor_after: str | None
 
 
 class AccountingService:
@@ -25,7 +32,7 @@ class AccountingService:
         self.state_store = state_store
         self.lookback_minutes = lookback_minutes
 
-    def fetch_new_fills(self, symbol: str) -> list[Fill]:
+    def fetch_new_fills(self, symbol: str) -> FetchFillsResult:
         cursor_key = f"fills_cursor:{normalize_symbol(symbol)}"
         since_ms: int | None = None
         lookback_ms = self.lookback_minutes * 60 * 1000
@@ -38,7 +45,7 @@ class AccountingService:
             since_dt = datetime.now(UTC) - timedelta(minutes=self.lookback_minutes)
             incoming = [fill for fill in incoming if fill.ts >= since_dt]
 
-        new_fills: list[Fill] = []
+        fills: list[Fill] = []
         max_ts_ms = since_ms or 0
         for trade_fill in incoming:
             fill_id = (trade_fill.fill_id or "").strip()
@@ -59,13 +66,12 @@ class AccountingService:
                 fee_asset=trade_fill.fee_currency,
                 ts=trade_fill.ts,
             )
-            if self.state_store.save_stage4_fill(fill):
-                new_fills.append(fill)
+            fills.append(fill)
             max_ts_ms = max(max_ts_ms, int(trade_fill.ts.timestamp() * 1000))
 
-        if max_ts_ms > 0:
-            self.state_store.set_cursor(cursor_key, str(max_ts_ms))
-        return new_fills
+        return FetchFillsResult(
+            fills=fills, cursor_after=(str(max_ts_ms) if max_ts_ms > 0 else None)
+        )
 
     def apply_fills(
         self,
@@ -76,6 +82,9 @@ class AccountingService:
     ) -> PnLSnapshot:
         fee_notes: list[str] = []
         for fill in fills:
+            if not self.state_store.mark_fill_applied(fill.fill_id):
+                continue
+            self.state_store.save_stage4_fill(fill)
             position = self.state_store.get_stage4_position(fill.symbol) or Position(
                 symbol=fill.symbol,
                 qty=Decimal("0"),

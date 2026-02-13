@@ -18,6 +18,7 @@ from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.metrics_service import build_cycle_metrics, persist_cycle_metrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskPolicy
@@ -51,6 +52,7 @@ class Stage4CycleRunner:
         live_mode = settings.is_live_trading_enabled() and not settings.dry_run
         state_store = StateStore(db_path=settings.state_db_path)
         cycle_id = uuid4().hex
+        cycle_started_at = datetime.now(UTC)
 
         envelope = {
             "cycle_id": cycle_id,
@@ -129,12 +131,15 @@ class Stage4CycleRunner:
                 self.norm(symbol): state_store.get_cursor(self._fills_cursor_key(symbol))
                 for symbol in settings.symbols
             }
+            cursor_after_by_symbol: dict[str, str] = {}
             for symbol in settings.symbols:
                 normalized = self.norm(symbol)
                 try:
                     fetched = accounting_service.fetch_new_fills(symbol)
-                    fills.extend(fetched)
-                    fills_fetched += len(fetched)
+                    fills.extend(fetched.fills)
+                    fills_fetched += len(fetched.fills)
+                    if fetched.cursor_after is not None:
+                        cursor_after_by_symbol[normalized] = fetched.cursor_after
                 except Exception as exc:  # noqa: BLE001
                     fills_failures += 1
                     failed_symbols.add(normalized)
@@ -143,16 +148,46 @@ class Stage4CycleRunner:
                         extra={"extra": {"symbol": normalized, "error_type": type(exc).__name__}},
                     )
 
-            ledger_ingest = ledger_service.ingest_exchange_updates(fills)
-            pnl_report = ledger_service.report(mark_prices=mark_prices, cash_try=try_cash)
-            snapshot = accounting_service.apply_fills(
-                fills, mark_prices=mark_prices, try_cash=try_cash
-            )
+            try:
+                with state_store.transaction():
+                    ledger_ingest = ledger_service.ingest_exchange_updates(fills)
+                    snapshot = accounting_service.apply_fills(
+                        fills, mark_prices=mark_prices, try_cash=try_cash
+                    )
+                    for symbol, cursor_after in cursor_after_by_symbol.items():
+                        if symbol in failed_symbols:
+                            continue
+                        state_store.set_cursor(self._fills_cursor_key(symbol), cursor_after)
+            except Exception as exc:
+                logger.exception(
+                    "cycle_failed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "reason_code": "state_transaction_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                    },
+                )
+                raise
             cursor_after = {
                 self.norm(symbol): state_store.get_cursor(self._fills_cursor_key(symbol))
                 for symbol in settings.symbols
             }
+            if ledger_ingest.events_ignored > 0:
+                logger.info(
+                    "ledger_events_deduped",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "ignored": ledger_ingest.events_ignored,
+                            "attempted": ledger_ingest.events_attempted,
+                            "inserted": ledger_ingest.events_inserted,
+                        }
+                    },
+                )
 
+            pnl_report = ledger_service.report(mark_prices=mark_prices, cash_try=try_cash)
             current_open_orders = state_store.list_stage4_open_orders()
             positions = state_store.list_stage4_positions()
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}
@@ -215,6 +250,35 @@ class Stage4CycleRunner:
             execution_report = execution_service.execute_with_report(accepted_actions)
             self._assert_execution_invariant(execution_report)
 
+            cycle_metrics = build_cycle_metrics(
+                cycle_id=cycle_id,
+                cycle_started_at=cycle_started_at,
+                cycle_ended_at=datetime.now(UTC),
+                mode=("NORMAL" if live_mode else "OBSERVE_ONLY"),
+                fills=fills,
+                ledger_append_result=ledger_ingest,
+                pnl_report=pnl_report,
+                orders_submitted=execution_report.submitted,
+                orders_canceled=execution_report.canceled,
+                rejects_count=execution_report.rejected,
+                mark_prices=mark_prices,
+                pnl_snapshot=snapshot,
+            )
+            try:
+                with state_store.transaction():
+                    persist_cycle_metrics(state_store, cycle_metrics)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "cycle_metrics_persist_failed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "reason_code": "cycle_metrics_persist_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                    },
+                )
+
             decisions = lifecycle_plan.audit_reasons + [
                 f"risk:{item.action.client_order_id or 'missing'}:{item.reason}"
                 for item in risk_decisions
@@ -243,6 +307,7 @@ class Stage4CycleRunner:
             counts = {
                 "ledger_events_attempted": ledger_ingest.events_attempted,
                 "ledger_events_inserted": ledger_ingest.events_inserted,
+                "ledger_events_ignored": ledger_ingest.events_ignored,
                 "exchange_open": len(exchange_open_orders),
                 "db_open": len(db_open_orders),
                 "imported": len(reconcile_result.import_external),
@@ -302,6 +367,17 @@ class Stage4CycleRunner:
                             k: str(v) for k, v in pnl_report.fees_total_by_currency.items()
                         },
                         "equity_estimate": str(pnl_report.equity_estimate),
+                    }
+                },
+            )
+            logger.info(
+                "cycle_metrics",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "fills_per_submitted_order": cycle_metrics.fills_per_submitted_order,
+                        "fees": cycle_metrics.fees,
+                        "pnl": cycle_metrics.pnl,
                     }
                 },
             )
