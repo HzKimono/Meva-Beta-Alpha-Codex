@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +26,25 @@ from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
+
+
+def persist_cycle_metrics(state_store: StateStore, cycle_metrics: CycleMetrics) -> None:
+    state_store.save_cycle_metrics(
+        cycle_id=cycle_metrics.cycle_id,
+        ts_start=cycle_metrics.ts_start.isoformat(),
+        ts_end=cycle_metrics.ts_end.isoformat(),
+        mode=cycle_metrics.mode,
+        fills_count=cycle_metrics.fills_count,
+        orders_submitted=cycle_metrics.orders_submitted,
+        orders_canceled=cycle_metrics.orders_canceled,
+        rejects_count=cycle_metrics.rejects_count,
+        fill_rate=cycle_metrics.fills_per_submitted_order,
+        avg_time_to_fill=cycle_metrics.avg_time_to_fill,
+        slippage_bps_avg=cycle_metrics.slippage_bps_avg,
+        fees_json=json.dumps(cycle_metrics.fees, sort_keys=True),
+        pnl_json=json.dumps(cycle_metrics.pnl, sort_keys=True),
+        meta_json=json.dumps(cycle_metrics.meta, sort_keys=True),
+    )
 
 
 class Stage4ConfigurationError(RuntimeError):
