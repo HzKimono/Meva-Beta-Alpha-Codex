@@ -64,6 +64,34 @@ class ExchangeForAtomicity:
         return
 
 
+def test_cycle_metrics_persist_called_once(monkeypatch, tmp_path) -> None:
+    exchange = ExchangeForAtomicity()
+    runner = Stage4CycleRunner()
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "persist_once.sqlite"),
+        SYMBOLS="BTC_TRY",
+    )
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    original_save_cycle_metrics = StateStore.save_cycle_metrics
+    call_counter = {"count": 0}
+
+    def spy_save_cycle_metrics(self, **kwargs):
+        call_counter["count"] += 1
+        return original_save_cycle_metrics(self, **kwargs)
+
+    monkeypatch.setattr(StateStore, "save_cycle_metrics", spy_save_cycle_metrics)
+
+    assert runner.run_one_cycle(settings) == 0
+    assert call_counter["count"] == 1
+
+
 def test_cycle_transaction_atomicity_and_recovery(monkeypatch, tmp_path) -> None:
     exchange = ExchangeForAtomicity()
     runner = Stage4CycleRunner()
