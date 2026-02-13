@@ -10,7 +10,7 @@ from uuid import uuid4
 from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
-from btcbot.domain.anomalies import combine_modes, decide_degrade
+from btcbot.domain.anomalies import AnomalyCode, combine_modes, decide_degrade
 from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.domain.risk_budget import Mode, RiskLimits
 from btcbot.domain.stage4 import (
@@ -114,7 +114,6 @@ class Stage4CycleRunner:
                     pnl_divergence_try_error=settings.pnl_divergence_try_error,
                     clock_skew_seconds_threshold=settings.clock_skew_seconds_threshold,
                 ),
-                now_provider=lambda: cycle_now,
             )
 
             mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, settings.symbols)
@@ -326,6 +325,9 @@ class Stage4CycleRunner:
                 else None
             )
             last_reasons = self._safe_json_list(degrade_state.get("last_reasons_json"), default=[])
+            prev_warn_codes = self._parse_warn_codes(
+                self._safe_json_list(degrade_state.get("last_warn_codes_json"), default=[])
+            )
             prev_warn_window_count = int(degrade_state.get("warn_window_count", "0"))
             prev_stall_cycles = self._safe_json_dict_int(
                 degrade_state.get("cursor_stall_cycles_json"), default={}
@@ -350,10 +352,14 @@ class Stage4CycleRunner:
                 pnl_report=pnl_report,
             )
             warn_codes = settings.parsed_degrade_warn_codes()
-            has_warn = any(
-                event.severity == "WARN" and event.code in warn_codes for event in anomalies
-            )
+            current_warn_codes = {
+                event.code
+                for event in anomalies
+                if event.severity == "WARN" and event.code in warn_codes
+            }
+            has_warn = bool(current_warn_codes)
             warn_window_count = (prev_warn_window_count + 1) if has_warn else 0
+            recent_warn_codes = current_warn_codes or prev_warn_codes
 
             degrade_decision = decide_degrade(
                 anomalies=anomalies,
@@ -364,6 +370,7 @@ class Stage4CycleRunner:
                 recent_warn_count=warn_window_count,
                 warn_threshold=settings.degrade_warn_threshold,
                 warn_codes=warn_codes,
+                recent_warn_codes=recent_warn_codes,
             )
 
             final_mode = combine_modes(risk_decision.mode, degrade_decision.mode_override)
@@ -377,27 +384,35 @@ class Stage4CycleRunner:
             execution_report = execution_service.execute_with_report(gated_actions)
             self._assert_execution_invariant(execution_report)
 
+            updated_cycle_duration_ms = int(
+                (datetime.now(UTC) - cycle_started_at).total_seconds() * 1000
+            )
             updated_anomalies = anomaly_detector.detect(
                 market_data_age_seconds=None,
                 reject_count=execution_report.rejected,
-                cycle_duration_ms=cycle_duration_ms,
+                cycle_duration_ms=updated_cycle_duration_ms,
                 cursor_stall_by_symbol=cursor_stall_by_symbol,
                 pnl_snapshot=snapshot,
                 pnl_report=pnl_report,
             )
-            updated_has_warn = any(
-                event.severity == "WARN" and event.code in warn_codes for event in updated_anomalies
-            )
+            updated_warn_codes = {
+                event.code
+                for event in updated_anomalies
+                if event.severity == "WARN" and event.code in warn_codes
+            }
+            updated_has_warn = bool(updated_warn_codes)
             updated_warn_window_count = (prev_warn_window_count + 1) if updated_has_warn else 0
+            updated_recent_warn_codes = updated_warn_codes or prev_warn_codes
             updated_decision = decide_degrade(
                 anomalies=updated_anomalies,
-                now=cycle_now,
+                now=datetime.now(UTC),
                 current_override=current_override,
                 cooldown_until=cooldown_until,
                 last_reasons=last_reasons,
                 recent_warn_count=updated_warn_window_count,
                 warn_threshold=settings.degrade_warn_threshold,
                 warn_codes=warn_codes,
+                recent_warn_codes=updated_recent_warn_codes,
             )
 
             anomaly_codes = [event.code.value for event in updated_anomalies]
@@ -432,6 +447,7 @@ class Stage4CycleRunner:
                     }
                 },
             )
+            final_mode = combine_modes(risk_decision.mode, updated_decision.mode_override)
             logger.info(
                 "final_mode",
                 extra={
@@ -439,8 +455,8 @@ class Stage4CycleRunner:
                         "cycle_id": cycle_id,
                         "base_mode": risk_decision.mode.value,
                         "override": (
-                            degrade_decision.mode_override.value
-                            if degrade_decision.mode_override
+                            updated_decision.mode_override.value
+                            if updated_decision.mode_override
                             else None
                         ),
                         "final_mode": final_mode.value,
@@ -465,11 +481,7 @@ class Stage4CycleRunner:
                     last_reasons_json=json.dumps(updated_decision.reasons, sort_keys=True),
                     warn_window_count=updated_warn_window_count,
                     last_warn_codes_json=json.dumps(
-                        [
-                            event.code.value
-                            for event in updated_anomalies
-                            if event.severity == "WARN" and event.code in warn_codes
-                        ],
+                        sorted(code.value for code in updated_recent_warn_codes),
                         sort_keys=True,
                     ),
                     cursor_stall_cycles_json=json.dumps(cursor_stall_by_symbol, sort_keys=True),
@@ -840,6 +852,16 @@ class Stage4CycleRunner:
     @staticmethod
     def _inc_reason(reasons: dict[str, int], key: str) -> None:
         reasons[key] = reasons.get(key, 0) + 1
+
+    @staticmethod
+    def _parse_warn_codes(raw_codes: list[str]) -> set[AnomalyCode]:
+        parsed: set[AnomalyCode] = set()
+        for raw in raw_codes:
+            try:
+                parsed.add(AnomalyCode(str(raw)))
+            except ValueError:
+                continue
+        return parsed
 
     @staticmethod
     def _safe_json_list(raw: str | None, *, default: list[str]) -> list[str]:
