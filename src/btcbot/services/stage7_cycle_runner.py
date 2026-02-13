@@ -11,7 +11,9 @@ from btcbot.domain.models import Balance, normalize_symbol
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services.exchange_factory import build_exchange_stage4
+from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.order_builder_service import OrderBuilderService
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
@@ -37,6 +39,7 @@ class Stage7CycleRunner:
         exchange = build_exchange_stage4(settings, dry_run=True)
         universe_service = UniverseSelectionService()
         policy_service = PortfolioPolicyService()
+        order_builder = OrderBuilderService()
 
         open_orders = state_store.list_stage4_open_orders()
         lifecycle_actions: list[LifecycleAction] = []
@@ -97,6 +100,20 @@ class Stage7CycleRunner:
             settings=settings,
             now_utc=now,
             final_mode=final_mode,
+        )
+        rules_service = ExchangeRulesService(
+            getattr(exchange, "client", exchange),
+            cache_ttl_sec=settings.rules_cache_ttl_sec,
+            settings=settings,
+        )
+        order_intents = order_builder.build_intents(
+            cycle_id=cycle_id,
+            plan=portfolio_plan,
+            mark_prices_try=mark_prices,
+            rules=rules_service,
+            settings=settings,
+            final_mode=final_mode,
+            now_utc=now,
         )
 
         actions: list[dict[str, object]] = []
@@ -181,10 +198,23 @@ class Stage7CycleRunner:
             intents_summary={
                 "orders_considered": len(actions),
                 "orders_simulated": simulated_count,
+                "order_intents_total": len(order_intents),
+                "order_intents_skipped": sum(1 for i in order_intents if i.skipped),
             },
             mode_payload=mode_payload,
             order_decisions=actions,
             portfolio_plan=portfolio_plan.to_dict(),
+            order_intents=order_intents,
+            order_intents_trace=[
+                {
+                    "client_order_id": intent.client_order_id,
+                    "symbol": intent.symbol,
+                    "side": intent.side,
+                    "skipped": intent.skipped,
+                    "skip_reason": intent.skip_reason,
+                }
+                for intent in order_intents
+            ],
             ledger_metrics={
                 "gross_pnl_try": snapshot.gross_pnl_try,
                 "realized_pnl_try": snapshot.realized_pnl_try,
