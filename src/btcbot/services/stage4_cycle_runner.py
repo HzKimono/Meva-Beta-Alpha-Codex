@@ -13,13 +13,13 @@ from btcbot.config import Settings
 from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.domain.stage4 import Order, Position, Quantizer
 from btcbot.domain.strategy_core import PositionSummary
+from btcbot.services import metrics_service
 from btcbot.services.accounting_service_stage4 import AccountingService
 from btcbot.services.decision_pipeline_service import DecisionPipelineService
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.ledger_service import LedgerService
-from btcbot.services.metrics_service import CycleMetrics, build_cycle_metrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskPolicy
@@ -269,7 +269,7 @@ class Stage4CycleRunner:
 
             execution_report = execution_service.execute_with_report(accepted_actions)
             self._assert_execution_invariant(execution_report)
-            cycle_metrics = build_cycle_metrics(
+            cycle_metrics = metrics_service.build_cycle_metrics(
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
                 cycle_ended_at=datetime.now(UTC),
@@ -283,9 +283,11 @@ class Stage4CycleRunner:
                 mark_prices=mark_prices,
                 pnl_snapshot=snapshot,
             )
+            metrics_persisted = False
             try:
                 with state_store.transaction():
-                    persist_cycle_metrics(state_store, cycle_metrics)
+                    metrics_service.persist_cycle_metrics(state_store, cycle_metrics)
+                metrics_persisted = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "cycle_metrics_persist_failed",
@@ -389,17 +391,18 @@ class Stage4CycleRunner:
                     }
                 },
             )
-            logger.info(
-                "cycle_metrics",
-                extra={
-                    "extra": {
-                        "cycle_id": cycle_id,
-                        "fills_per_submitted_order": cycle_metrics.fills_per_submitted_order,
-                        "fees": cycle_metrics.fees,
-                        "pnl": cycle_metrics.pnl,
-                    }
-                },
-            )
+            if metrics_persisted:
+                logger.info(
+                    "cycle_metrics",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "fills_per_submitted_order": cycle_metrics.fills_per_submitted_order,
+                            "fees": cycle_metrics.fees,
+                            "pnl": cycle_metrics.pnl,
+                        }
+                    },
+                )
             logger.info(
                 "Stage 4 cycle completed", extra={"extra": {"cycle_id": cycle_id, **counts}}
             )

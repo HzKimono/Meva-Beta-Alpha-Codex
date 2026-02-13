@@ -11,6 +11,7 @@ from btcbot.domain.accounting import TradeFill
 from btcbot.domain.execution_quality import compute_execution_quality
 from btcbot.domain.models import OrderSide, PairInfo
 from btcbot.domain.stage4 import Fill
+from btcbot.services import metrics_service
 from btcbot.services import stage4_cycle_runner as runner_module
 from btcbot.services.accounting_service_stage4 import AccountingService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner, Stage4ExchangeError
@@ -79,14 +80,14 @@ def test_cycle_metrics_persist_called_once(monkeypatch, tmp_path) -> None:
         lambda settings, dry_run: exchange,
     )
 
-    original_save_cycle_metrics = StateStore.save_cycle_metrics
+    original_persist_cycle_metrics = metrics_service.persist_cycle_metrics
     call_counter = {"count": 0}
 
-    def spy_save_cycle_metrics(self, **kwargs):
+    def spy_persist_cycle_metrics(state_store, cycle_metrics):
         call_counter["count"] += 1
-        return original_save_cycle_metrics(self, **kwargs)
+        return original_persist_cycle_metrics(state_store, cycle_metrics)
 
-    monkeypatch.setattr(StateStore, "save_cycle_metrics", spy_save_cycle_metrics)
+    monkeypatch.setattr(metrics_service, "persist_cycle_metrics", spy_persist_cycle_metrics)
 
     assert runner.run_one_cycle(settings) == 0
     assert call_counter["count"] == 1
@@ -201,3 +202,42 @@ def test_compute_execution_quality_fills_per_submitted_order_and_slippage() -> N
 
     assert snapshot.fills_per_submitted_order == Decimal("0.5")
     assert snapshot.slippage_bps_avg == Decimal("100")
+
+
+def test_compute_execution_quality_per_symbol_counts_all_fills_with_partial_slippage() -> None:
+    ts = datetime.now(UTC)
+    fills = [
+        Fill(
+            fill_id="a",
+            order_id="oa",
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("101"),
+            qty=Decimal("2"),
+            fee=Decimal("0"),
+            fee_asset="TRY",
+            ts=ts,
+        ),
+        Fill(
+            fill_id="b",
+            order_id="ob",
+            symbol="BTC_TRY",
+            side="hold",
+            price=Decimal("98"),
+            qty=Decimal("1"),
+            fee=Decimal("0"),
+            fee_asset="TRY",
+            ts=ts,
+        ),
+    ]
+
+    snapshot = compute_execution_quality(
+        {"orders_submitted": 2, "orders_canceled": 0, "rejects_count": 0},
+        fills,
+        {"BTCTRY": Decimal("100")},
+    )
+
+    assert len(snapshot.per_symbol) == 1
+    assert snapshot.per_symbol[0].symbol == "BTCTRY"
+    assert snapshot.per_symbol[0].fills_count == 2
+    assert snapshot.per_symbol[0].slippage_bps_avg == Decimal("100")
