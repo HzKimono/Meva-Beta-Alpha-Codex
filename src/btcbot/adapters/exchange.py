@@ -55,6 +55,13 @@ class ExchangeClient(ABC):
         del pair_symbol, since_ms
         return []
 
+    def get_ticker_stats(self) -> list[dict[str, object]]:
+        return []
+
+    def get_candles(self, symbol: str, limit: int) -> list[dict[str, object]]:
+        del symbol, limit
+        return []
+
     def close(self) -> None:
         """Release resources associated with the exchange client."""
         return None

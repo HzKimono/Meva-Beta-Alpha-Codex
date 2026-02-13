@@ -13,6 +13,7 @@ from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.ledger_service import LedgerService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
+from btcbot.services.universe_selection_service import UniverseSelectionService
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,12 @@ class Stage7CycleRunner:
 
         ledger_service = LedgerService(state_store=state_store, logger=logger)
         exchange = build_exchange_stage4(settings, dry_run=True)
+        universe_service = UniverseSelectionService()
+        universe_result = universe_service.select_universe(
+            exchange=getattr(exchange, "client", exchange),
+            settings=settings,
+            now_utc=now,
+        )
         try:
             mark_prices, _ = stage4.resolve_mark_prices(exchange, settings.symbols)
         finally:
@@ -122,7 +129,15 @@ class Stage7CycleRunner:
         state_store.save_stage7_cycle(
             cycle_id=cycle_id,
             ts=now,
-            selected_universe=[],
+            selected_universe=universe_result.selected_symbols,
+            universe_scores=[
+                {
+                    "symbol": item.symbol,
+                    "total_score": str(item.total_score),
+                    "breakdown": item.breakdown,
+                }
+                for item in universe_result.scored[: max(0, settings.stage7_universe_size)]
+            ],
             intents_summary={
                 "orders_considered": len(actions),
                 "orders_simulated": simulated_count,
