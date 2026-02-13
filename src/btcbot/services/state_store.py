@@ -271,6 +271,65 @@ class StateStore:
             )
             """
         )
+        if getattr(self, "_transaction_conn", None) is not conn:
+            conn.commit()
+
+    def _ensure_anomaly_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS anomaly_events (
+                id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                cycle_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                details_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_ts ON anomaly_events(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_code ON anomaly_events(code)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_events_cycle_id ON anomaly_events(cycle_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS degrade_state_current (
+                state_id INTEGER PRIMARY KEY CHECK(state_id = 1),
+                cooldown_until TEXT,
+                current_override_mode TEXT,
+                last_reasons_json TEXT,
+                warn_window_count INTEGER NOT NULL DEFAULT 0,
+                last_warn_codes_json TEXT NOT NULL DEFAULT '[]',
+                cursor_stall_cycles_json TEXT NOT NULL DEFAULT '{}',
+                last_reject_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(degrade_state_current)")
+        }
+        if "warn_window_count" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN warn_window_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_warn_codes_json" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN last_warn_codes_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "cursor_stall_cycles_json" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN cursor_stall_cycles_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "last_reject_count" not in columns:
+            conn.execute(
+                "ALTER TABLE degrade_state_current "
+                "ADD COLUMN last_reject_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _ensure_anomaly_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -1521,7 +1580,13 @@ class StateStore:
     def get_risk_state_current(self) -> dict[str, str | None]:
         with self._connect() as conn:
             self._ensure_risk_budget_schema(conn)
-            row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
+            try:
+                row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table: risk_state_current" not in str(exc):
+                    raise
+                self._ensure_risk_budget_schema(conn)
+                row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
         if row is None:
             return {
                 "current_mode": None,

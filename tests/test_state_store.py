@@ -386,3 +386,17 @@ def test_record_stage4_order_error_persists_context(tmp_path) -> None:
     assert row["status"] == "error"
     assert row["mode"] == "live"
     assert row["last_error"] == "cancel_missing_exchange_order_id"
+
+
+def test_get_risk_state_current_on_fresh_db_does_not_raise(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "fresh-risk.db"))
+
+    current = store.get_risk_state_current()
+
+    assert current == {
+        "current_mode": None,
+        "peak_equity_try": None,
+        "peak_equity_date": None,
+        "fees_try_today": None,
+        "fees_day": None,
+    }
