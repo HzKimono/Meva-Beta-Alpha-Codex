@@ -18,7 +18,7 @@ from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
 
 if TYPE_CHECKING:
-    from btcbot.domain.risk_budget import RiskDecision
+    from btcbot.domain.risk_budget import Mode, RiskDecision
 
 
 @dataclass
@@ -1464,28 +1464,13 @@ class StateStore:
         fees_day: str,
     ) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO risk_state_current(
-                    state_id, current_mode, peak_equity_try, peak_equity_date,
-                    fees_try_today, fees_day, updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(state_id) DO UPDATE SET
-                    current_mode=excluded.current_mode,
-                    peak_equity_try=excluded.peak_equity_try,
-                    peak_equity_date=excluded.peak_equity_date,
-                    fees_try_today=excluded.fees_try_today,
-                    fees_day=excluded.fees_day,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    mode,
-                    str(peak_equity_try),
-                    peak_equity_date,
-                    str(fees_try_today),
-                    fees_day,
-                    datetime.now(UTC).isoformat(),
-                ),
+            self._upsert_risk_state_current_with_conn(
+                conn=conn,
+                mode=mode,
+                peak_equity_try=peak_equity_try,
+                peak_equity_date=peak_equity_date,
+                fees_try_today=fees_try_today,
+                fees_day=fees_day,
             )
 
     def save_risk_decision(
@@ -1495,32 +1480,126 @@ class StateStore:
         decision: RiskDecision,
         prev_mode: str | None,
     ) -> None:
-        from btcbot.services.risk_budget_service import serialize_dataclass_payload
-
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO risk_decisions(
-                    decision_id, ts, mode, reasons_json, signals_json, limits_json, decision_json,
-                    prev_mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(decision_id) DO UPDATE SET
-                    ts=excluded.ts,
-                    mode=excluded.mode,
-                    reasons_json=excluded.reasons_json,
-                    signals_json=excluded.signals_json,
-                    limits_json=excluded.limits_json,
-                    decision_json=excluded.decision_json,
-                    prev_mode=excluded.prev_mode
-                """,
-                (
-                    cycle_id,
-                    decision.decided_at.isoformat(),
-                    decision.mode.value,
-                    json.dumps(decision.reasons, sort_keys=True),
-                    serialize_dataclass_payload(decision.signals),
-                    serialize_dataclass_payload(decision.limits),
-                    serialize_dataclass_payload(decision),
-                    prev_mode,
-                ),
+            self._save_risk_decision_with_conn(
+                conn=conn,
+                cycle_id=cycle_id,
+                decision=decision,
+                prev_mode=prev_mode,
             )
+
+    def persist_risk(
+        self,
+        *,
+        cycle_id: str,
+        decision: RiskDecision,
+        prev_mode: str | None,
+        mode: Mode,
+        peak_equity_try: Decimal,
+        peak_day: str,
+        fees_today_try: Decimal,
+        fees_day: str,
+    ) -> None:
+        with self.transaction() as conn:
+            self._save_risk_decision_with_conn(
+                conn=conn,
+                cycle_id=cycle_id,
+                decision=decision,
+                prev_mode=prev_mode,
+            )
+            self._upsert_risk_state_current_with_conn(
+                conn=conn,
+                mode=mode.value,
+                peak_equity_try=peak_equity_try,
+                peak_equity_date=peak_day,
+                fees_try_today=fees_today_try,
+                fees_day=fees_day,
+            )
+
+    def _save_risk_decision_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        cycle_id: str,
+        decision: RiskDecision,
+        prev_mode: str | None,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO risk_decisions(
+                decision_id, ts, mode, reasons_json, signals_json, limits_json, decision_json,
+                prev_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(decision_id) DO UPDATE SET
+                ts=excluded.ts,
+                mode=excluded.mode,
+                reasons_json=excluded.reasons_json,
+                signals_json=excluded.signals_json,
+                limits_json=excluded.limits_json,
+                decision_json=excluded.decision_json,
+                prev_mode=excluded.prev_mode
+            """,
+            (
+                cycle_id,
+                decision.decided_at.isoformat(),
+                decision.mode.value,
+                json.dumps(decision.reasons, sort_keys=True),
+                self._serialize_risk_payload(decision.signals),
+                self._serialize_risk_payload(decision.limits),
+                self._serialize_risk_payload(decision),
+                prev_mode,
+            ),
+        )
+
+    def _upsert_risk_state_current_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        mode: str,
+        peak_equity_try: Decimal,
+        peak_equity_date: str,
+        fees_try_today: Decimal,
+        fees_day: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO risk_state_current(
+                state_id, current_mode, peak_equity_try, peak_equity_date,
+                fees_try_today, fees_day, updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(state_id) DO UPDATE SET
+                current_mode=excluded.current_mode,
+                peak_equity_try=excluded.peak_equity_try,
+                peak_equity_date=excluded.peak_equity_date,
+                fees_try_today=excluded.fees_try_today,
+                fees_day=excluded.fees_day,
+                updated_at=excluded.updated_at
+            """,
+            (
+                mode,
+                str(peak_equity_try),
+                peak_equity_date,
+                str(fees_try_today),
+                fees_day,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+
+    def _serialize_risk_payload(self, value: object) -> str:
+        from dataclasses import asdict
+
+        from btcbot.domain.risk_budget import Mode
+
+        def _json_default(obj: object) -> str:
+            if isinstance(obj, Decimal):
+                return str(obj)
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if isinstance(obj, Mode):
+                return obj.value
+            raise TypeError(
+                f"Unsupported type for risk payload serialization: {type(obj).__name__}"
+            )
+
+        payload = asdict(value)
+        return json.dumps(payload, sort_keys=True, default=_json_default)

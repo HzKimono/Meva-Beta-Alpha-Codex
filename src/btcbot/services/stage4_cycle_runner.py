@@ -11,7 +11,13 @@ from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.domain.risk_budget import Mode, RiskLimits
-from btcbot.domain.stage4 import LifecycleAction, Order, Position, Quantizer
+from btcbot.domain.stage4 import (
+    LifecycleAction,
+    LifecycleActionType,
+    Order,
+    Position,
+    Quantizer,
+)
 from btcbot.domain.strategy_core import PositionSummary
 from btcbot.services import metrics_service
 from btcbot.services.accounting_service_stage4 import AccountingService
@@ -267,7 +273,6 @@ class Stage4CycleRunner:
                     positions=positions,
                     mark_prices=mark_prices,
                     realized_today_try=snapshot.realized_today_try,
-                    fills=fills,
                     kill_switch_active=settings.kill_switch,
                 )
             )
@@ -560,10 +565,13 @@ class Stage4CycleRunner:
         if mode == Mode.REDUCE_RISK_ONLY:
             gated = []
             for action in actions:
-                if action.action_type.name == "CANCEL":
+                if action.action_type == LifecycleActionType.CANCEL:
                     gated.append(action)
                     continue
-                if action.action_type.name == "SUBMIT" and str(action.side).upper() == "SELL":
+                if (
+                    action.action_type == LifecycleActionType.SUBMIT
+                    and str(action.side).upper() == "SELL"
+                ):
                     gated.append(action)
             return gated
         return actions

@@ -30,7 +30,7 @@ Signals include:
 - daily realized PnL (TRY)
 - gross exposure (TRY)
 - largest position as equity percentage
-- today's TRY fees
+- today's TRY fees (single source from ledger PnL report fees)
 
 Limits are configured via settings/env:
 
@@ -45,7 +45,7 @@ Limits are configured via settings/env:
 ## Persistence and auditability
 
 Per-cycle decision snapshots are persisted in `risk_decisions` (mode, reasons, signals, limits, previous mode).
-Current rolling risk state (mode, peak equity, day fee state) is stored in `risk_state_current`.
+Current rolling risk state (mode, rolling peak equity, fee-day state) is stored in `risk_state_current`. Peak equity is cumulative (no daily reset).
 
 Each cycle emits a structured `risk_decision` log with:
 

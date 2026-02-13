@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -49,33 +49,20 @@ class RiskDecision:
     decided_at: datetime
 
 
-def decide_mode(limits: RiskLimits, signals: RiskSignals) -> RiskDecision:
+def decide_mode(limits: RiskLimits, signals: RiskSignals) -> tuple[Mode, list[str]]:
     if (
         signals.drawdown_try >= limits.max_drawdown_try
         or signals.daily_pnl_try <= -limits.max_daily_drawdown_try
     ):
-        mode = Mode.OBSERVE_ONLY
-        reasons = [REASON_DRAWDOWN_LIMIT]
-    elif (
+        return Mode.OBSERVE_ONLY, [REASON_DRAWDOWN_LIMIT]
+    if (
         signals.gross_exposure_try > limits.max_gross_exposure_try
         or signals.largest_position_pct > limits.max_position_pct
     ):
-        mode = Mode.REDUCE_RISK_ONLY
-        reasons = [REASON_EXPOSURE_LIMIT]
-    elif (
+        return Mode.REDUCE_RISK_ONLY, [REASON_EXPOSURE_LIMIT]
+    if (
         limits.max_fee_try_per_day is not None
         and signals.fees_try_today > limits.max_fee_try_per_day
     ):
-        mode = Mode.REDUCE_RISK_ONLY
-        reasons = [REASON_FEE_BUDGET]
-    else:
-        mode = Mode.NORMAL
-        reasons = [REASON_OK]
-
-    return RiskDecision(
-        mode=mode,
-        reasons=reasons,
-        limits=limits,
-        signals=signals,
-        decided_at=datetime.now(UTC),
-    )
+        return Mode.REDUCE_RISK_ONLY, [REASON_FEE_BUDGET]
+    return Mode.NORMAL, [REASON_OK]

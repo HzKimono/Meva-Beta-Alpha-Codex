@@ -193,6 +193,29 @@ class Settings(BaseSettings):
             raise ValueError("COOLDOWN_SECONDS must be >= 0")
         return value
 
+    @field_validator(
+        "risk_max_daily_drawdown_try",
+        "risk_max_drawdown_try",
+        "risk_max_gross_exposure_try",
+        "risk_max_order_notional_try",
+    )
+    def validate_positive_risk_try_limits(cls, value: Decimal) -> Decimal:
+        if value <= 0:
+            raise ValueError("Risk TRY limits must be > 0")
+        return value
+
+    @field_validator("risk_max_position_pct")
+    def validate_risk_max_position_pct(cls, value: Decimal) -> Decimal:
+        if value <= 0 or value > 1:
+            raise ValueError("RISK_MAX_POSITION_PCT must be in (0, 1]")
+        return value
+
+    @field_validator("risk_max_fee_try_per_day")
+    def validate_risk_max_fee_try_per_day(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and value <= 0:
+            raise ValueError("RISK_MAX_FEE_TRY_PER_DAY must be > 0 when configured")
+        return value
+
     def universe_knobs(self) -> UniverseKnobs:
         return UniverseKnobs(
             quote_currency=self.universe_quote_currency,

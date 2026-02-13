@@ -7,7 +7,10 @@ from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services import stage4_cycle_runner as runner_module
+from btcbot.services.ledger_service import PnlReport
+from btcbot.services.risk_budget_service import RiskBudgetService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
+from btcbot.services.state_store import StateStore
 
 
 def _limits() -> RiskLimits:
@@ -35,28 +38,103 @@ def _signals(**overrides: Decimal) -> RiskSignals:
     return RiskSignals(**base)
 
 
-def test_decide_mode_drawdown_triggers_observe_only() -> None:
-    decision = decide_mode(_limits(), _signals(drawdown_try=Decimal("250")))
-    assert decision.mode == Mode.OBSERVE_ONLY
-    assert decision.reasons == ["DRAWDOWN_LIMIT"]
+def test_decide_mode_is_deterministic_for_same_inputs() -> None:
+    first = decide_mode(_limits(), _signals(drawdown_try=Decimal("250")))
+    second = decide_mode(_limits(), _signals(drawdown_try=Decimal("250")))
+    assert first == second
+    assert first == (Mode.OBSERVE_ONLY, ["DRAWDOWN_LIMIT"])
 
 
 def test_decide_mode_exposure_triggers_reduce_risk_only() -> None:
-    decision = decide_mode(_limits(), _signals(gross_exposure_try=Decimal("600")))
-    assert decision.mode == Mode.REDUCE_RISK_ONLY
-    assert decision.reasons == ["EXPOSURE_LIMIT"]
+    mode, reasons = decide_mode(_limits(), _signals(gross_exposure_try=Decimal("600")))
+    assert mode == Mode.REDUCE_RISK_ONLY
+    assert reasons == ["EXPOSURE_LIMIT"]
 
 
 def test_decide_mode_fee_budget_triggers_reduce_risk_only() -> None:
-    decision = decide_mode(_limits(), _signals(fees_try_today=Decimal("11")))
-    assert decision.mode == Mode.REDUCE_RISK_ONLY
-    assert decision.reasons == ["FEE_BUDGET"]
+    mode, reasons = decide_mode(_limits(), _signals(fees_try_today=Decimal("11")))
+    assert mode == Mode.REDUCE_RISK_ONLY
+    assert reasons == ["FEE_BUDGET"]
 
 
 def test_decide_mode_ok_triggers_normal() -> None:
-    decision = decide_mode(_limits(), _signals(drawdown_try=Decimal("10")))
-    assert decision.mode == Mode.NORMAL
-    assert decision.reasons == ["OK"]
+    mode, reasons = decide_mode(_limits(), _signals(drawdown_try=Decimal("10")))
+    assert mode == Mode.NORMAL
+    assert reasons == ["OK"]
+
+
+def test_risk_budget_service_fees_is_idempotent(tmp_path) -> None:
+    db = StateStore(str(tmp_path / "risk.sqlite"))
+    fixed_now = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
+    service = RiskBudgetService(db, now_provider=lambda: fixed_now)
+
+    pnl_report = PnlReport(
+        realized_pnl_total=Decimal("0"),
+        unrealized_pnl_total=Decimal("0"),
+        fees_total_by_currency={"TRY": Decimal("12.5")},
+        per_symbol=[],
+        equity_estimate=Decimal("1000"),
+    )
+
+    first, _, peak_first, fees_first, day_first = service.compute_decision(
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=False,
+    )
+    service.persist_decision(
+        cycle_id="c1",
+        decision=first,
+        prev_mode=None,
+        peak_equity=peak_first,
+        peak_day=day_first,
+        fees_today=fees_first,
+        fees_day=day_first,
+    )
+    second, _, _, fees_second, _ = service.compute_decision(
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=False,
+    )
+
+    assert first.signals.fees_try_today == Decimal("12.5")
+    assert second.signals.fees_try_today == Decimal("12.5")
+    assert fees_first == fees_second
+
+
+def test_risk_budget_service_persist_is_single_atomic_call() -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeStore:
+        def persist_risk(self, **kwargs):
+            calls.append(kwargs)
+
+    service = RiskBudgetService(FakeStore())  # type: ignore[arg-type]
+    decision = RiskDecision(
+        mode=Mode.NORMAL,
+        reasons=["OK"],
+        limits=_limits(),
+        signals=_signals(),
+        decided_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    service.persist_decision(
+        cycle_id="cycle-1",
+        decision=decision,
+        prev_mode=Mode.REDUCE_RISK_ONLY,
+        peak_equity=Decimal("1000"),
+        peak_day=datetime(2026, 1, 1, tzinfo=UTC).date(),
+        fees_today=Decimal("1"),
+        fees_day=datetime(2026, 1, 1, tzinfo=UTC).date(),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["cycle_id"] == "cycle-1"
 
 
 class _FakeExchange:
