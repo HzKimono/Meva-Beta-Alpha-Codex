@@ -17,6 +17,7 @@ from btcbot.services.decision_pipeline_service import DecisionPipelineService
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
+from btcbot.services.ledger_service import LedgerService
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskPolicy
@@ -113,6 +114,7 @@ class Stage4CycleRunner:
                 exchange_open_orders=exchange_open_orders,
                 db_open_orders=db_open_orders,
             )
+            ledger_service = LedgerService(state_store=state_store, logger=logger)
             for order in reconcile_result.import_external:
                 state_store.import_stage4_external_order(order)
             for client_order_id, exchange_order_id in reconcile_result.enrich_exchange_ids:
@@ -141,6 +143,8 @@ class Stage4CycleRunner:
                         extra={"extra": {"symbol": normalized, "error_type": type(exc).__name__}},
                     )
 
+            ledger_ingest = ledger_service.ingest_exchange_updates(fills)
+            pnl_report = ledger_service.report(mark_prices=mark_prices, cash_try=try_cash)
             snapshot = accounting_service.apply_fills(
                 fills, mark_prices=mark_prices, try_cash=try_cash
             )
@@ -237,6 +241,8 @@ class Stage4CycleRunner:
             )
 
             counts = {
+                "ledger_events_attempted": ledger_ingest.events_attempted,
+                "ledger_events_inserted": ledger_ingest.events_inserted,
                 "exchange_open": len(exchange_open_orders),
                 "db_open": len(db_open_orders),
                 "imported": len(reconcile_result.import_external),
@@ -285,6 +291,20 @@ class Stage4CycleRunner:
             )
             state_store.set_last_cycle_id(cycle_id)
 
+            logger.info(
+                "stage4_ledger_pnl_snapshot",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "realized_pnl_total": str(pnl_report.realized_pnl_total),
+                        "unrealized_pnl_total": str(pnl_report.unrealized_pnl_total),
+                        "fees_total_by_currency": {
+                            k: str(v) for k, v in pnl_report.fees_total_by_currency.items()
+                        },
+                        "equity_estimate": str(pnl_report.equity_estimate),
+                    }
+                },
+            )
             logger.info(
                 "Stage 4 cycle completed", extra={"extra": {"cycle_id": cycle_id, **counts}}
             )
