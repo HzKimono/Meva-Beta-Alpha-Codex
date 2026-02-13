@@ -103,3 +103,44 @@ Default weights (normalized if custom values are provided):
 - `stage7_cycle_trace.universe_scores_json`: top scored candidates and score breakdown.
 
 Universe selection is read-only and does not place orders. Stage 7 remains dry-run only.
+
+## Portfolio Policy v1 (PR-3)
+
+Stage 7 now computes a deterministic, explainable **portfolio plan** each cycle (dry-run only).
+
+### Inputs
+- Selected universe (from PR-2).
+- Mark prices in TRY for selected symbols.
+- Account balances (TRY cash + base-asset quantities).
+
+### Constraints enforced
+- TRY cash buffer target using `TRY_CASH_TARGET`, bounded by `TRY_CASH_MAX`.
+- Per-symbol max target notional with `MAX_POSITION_NOTIONAL_TRY`.
+- Per-cycle turnover cap with `NOTIONAL_CAP_TRY_PER_CYCLE`.
+- Max action count with `MAX_ORDERS_PER_CYCLE`.
+- Min action notional with `MIN_ORDER_NOTIONAL_TRY`.
+
+### Policy logic (v1)
+- Build portfolio snapshot (`cash_try`, positions, `equity_try`).
+- Compute investable equity after cash target.
+- Assign equal target weights over universe.
+- Clip each symbol target by per-symbol max notional.
+- Send leftover allocation to cash (implicit cash weight).
+
+### Rebalance output
+The plan contains:
+- `target_weights` equivalent via per-symbol `weight` in `allocations`.
+- `cash_target_try`.
+- `actions` with deterministic SELL-first then BUY ordering, desired TRY notional, estimated qty, and reason. SELL-first is enforced during turnover allocation and max-order selection, not only in final display order.
+- Trace skip reasons are explicit and deterministic (e.g. `min_notional`, `turnover_cap`, `max_orders`, `mode_reduce_risk_only`, `observe_only`, `missing_mark_price`).
+
+Mode gating:
+- `OBSERVE_ONLY`: build plan, but no actions.
+- `REDUCE_RISK_ONLY`: SELL-only actions retained.
+
+### Persistence
+`stage7_cycle_trace` now also stores:
+- `portfolio_plan_json`: full serialized plan + notes/constraints.
+
+### Scope note
+PR-3 only produces and persists a plan. It does **not** place live orders; execution belongs to PR-4+.

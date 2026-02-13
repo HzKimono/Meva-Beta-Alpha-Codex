@@ -324,7 +324,8 @@ class StateStore:
                 universe_scores_json TEXT NOT NULL DEFAULT '[]',
                 intents_summary_json TEXT NOT NULL,
                 mode_json TEXT NOT NULL,
-                order_decisions_json TEXT NOT NULL
+                order_decisions_json TEXT NOT NULL,
+                portfolio_plan_json TEXT NOT NULL DEFAULT '{}'
             )
             """
         )
@@ -335,6 +336,11 @@ class StateStore:
             conn.execute(
                 "ALTER TABLE stage7_cycle_trace "
                 "ADD COLUMN universe_scores_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "portfolio_plan_json" not in columns:
+            conn.execute(
+                "ALTER TABLE stage7_cycle_trace "
+                "ADD COLUMN portfolio_plan_json TEXT NOT NULL DEFAULT '{}'"
             )
         conn.execute(
             """
@@ -371,6 +377,7 @@ class StateStore:
         intents_summary: dict[str, object],
         mode_payload: dict[str, object],
         order_decisions: list[dict[str, object]],
+        portfolio_plan: dict[str, object],
         ledger_metrics: dict[str, Decimal],
     ) -> None:
         with self.transaction() as conn:
@@ -379,15 +386,16 @@ class StateStore:
                 INSERT INTO stage7_cycle_trace(
                     cycle_id, ts, selected_universe_json,
                     universe_scores_json, intents_summary_json,
-                    mode_json, order_decisions_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    mode_json, order_decisions_json, portfolio_plan_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cycle_id) DO UPDATE SET
                     ts=excluded.ts,
                     selected_universe_json=excluded.selected_universe_json,
                     universe_scores_json=excluded.universe_scores_json,
                     intents_summary_json=excluded.intents_summary_json,
                     mode_json=excluded.mode_json,
-                    order_decisions_json=excluded.order_decisions_json
+                    order_decisions_json=excluded.order_decisions_json,
+                    portfolio_plan_json=excluded.portfolio_plan_json
                 """,
                 (
                     cycle_id,
@@ -397,6 +405,7 @@ class StateStore:
                     json.dumps(intents_summary, sort_keys=True),
                     json.dumps(mode_payload, sort_keys=True),
                     json.dumps(order_decisions, sort_keys=True),
+                    json.dumps(portfolio_plan, sort_keys=True),
                 ),
             )
             conn.execute(
