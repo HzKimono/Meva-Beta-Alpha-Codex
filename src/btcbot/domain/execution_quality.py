@@ -43,34 +43,58 @@ def compute_execution_quality(
     if orders_submitted > 0:
         fills_per_submitted_order = Decimal(fills_count) / Decimal(orders_submitted)
 
-    slippages: list[Decimal] = []
-    per_symbol_map: dict[str, list[Decimal]] = {}
+    weighted_slippage_numerator = Decimal("0")
+    weighted_slippage_qty = Decimal("0")
+    per_symbol_total_fills: dict[str, int] = {}
+    per_symbol_weighted_slippage_numerator: dict[str, Decimal] = {}
+    per_symbol_weighted_slippage_qty: dict[str, Decimal] = {}
     for fill in fills:
         symbol = normalize_symbol(fill.symbol)
+        per_symbol_total_fills[symbol] = per_symbol_total_fills.get(symbol, 0) + 1
+
         mark = market_marks.get(symbol)
         if mark is None or mark <= 0:
             continue
-        if fill.side.lower() == "buy":
+
+        side = fill.side.lower()
+        if side == "buy":
             bps = ((fill.price - mark) / mark) * Decimal("10000")
-        else:
+        elif side == "sell":
             bps = ((mark - fill.price) / mark) * Decimal("10000")
-        slippages.append(bps)
-        per_symbol_map.setdefault(symbol, []).append(bps)
+        else:
+            continue
+
+        if fill.qty <= 0:
+            continue
+
+        weighted_slippage_numerator += bps * fill.qty
+        weighted_slippage_qty += fill.qty
+        per_symbol_weighted_slippage_numerator[symbol] = per_symbol_weighted_slippage_numerator.get(
+            symbol, Decimal("0")
+        ) + (bps * fill.qty)
+        per_symbol_weighted_slippage_qty[symbol] = (
+            per_symbol_weighted_slippage_qty.get(symbol, Decimal("0")) + fill.qty
+        )
 
     slippage_bps_avg = None
-    if slippages:
-        slippage_bps_avg = sum(slippages, Decimal("0")) / Decimal(len(slippages))
+    if weighted_slippage_qty > 0:
+        slippage_bps_avg = weighted_slippage_numerator / weighted_slippage_qty
 
     per_symbol = [
         PerSymbolExecutionQuality(
             symbol=symbol,
-            fills_count=len(values),
-            slippage_bps_avg=(sum(values, Decimal("0")) / Decimal(len(values))),
-            fills_per_submitted_order=(Decimal(len(values)) / Decimal(orders_submitted))
+            fills_count=total_fills,
+            slippage_bps_avg=(
+                per_symbol_weighted_slippage_numerator[symbol]
+                / per_symbol_weighted_slippage_qty[symbol]
+                if per_symbol_weighted_slippage_qty.get(symbol, Decimal("0")) > 0
+                else None
+            ),
+            fills_per_submitted_order=(Decimal(total_fills) / Decimal(orders_submitted))
             if orders_submitted > 0
             else None,
         )
-        for symbol, values in sorted(per_symbol_map.items())
+        for symbol, total_fills in sorted(per_symbol_total_fills.items())
     ]
 
     return ExecutionQualitySnapshot(

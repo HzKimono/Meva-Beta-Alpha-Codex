@@ -166,6 +166,73 @@ def test_accounting_fill_idempotency_unique_applied_fills(tmp_path) -> None:
     assert pos.qty == Decimal("0.1")
 
 
+def test_cycle_metrics_persist_called_once(monkeypatch, tmp_path) -> None:
+    exchange = ExchangeForAtomicity()
+    runner = Stage4CycleRunner()
+    db_path = tmp_path / "persist-once.sqlite"
+    settings = Settings(
+        DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path), SYMBOLS="BTC_TRY"
+    )
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    from btcbot.services import stage4_cycle_runner as runner_mod
+
+    call_count = {"n": 0}
+    original = runner_mod.persist_cycle_metrics
+
+    def counting_persist(state_store, cycle_metrics):
+        call_count["n"] += 1
+        return original(state_store, cycle_metrics)
+
+    monkeypatch.setattr(runner_mod, "persist_cycle_metrics", counting_persist)
+
+    assert runner.run_one_cycle(settings) == 0
+    assert call_count["n"] == 1
+
+
+def test_compute_execution_quality_per_symbol_counts_all_fills_and_weighted_slippage() -> None:
+    ts = datetime.now(UTC)
+    fills = [
+        Fill(
+            fill_id="a",
+            order_id="oa",
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("101"),
+            qty=Decimal("2"),
+            fee=Decimal("0"),
+            fee_asset="TRY",
+            ts=ts,
+        ),
+        Fill(
+            fill_id="b",
+            order_id="ob",
+            symbol="BTC_TRY",
+            side="HOLD",
+            price=Decimal("99"),
+            qty=Decimal("1"),
+            fee=Decimal("0"),
+            fee_asset="TRY",
+            ts=ts,
+        ),
+    ]
+
+    snapshot = compute_execution_quality(
+        {"orders_submitted": 2, "orders_canceled": 0, "rejects_count": 0},
+        fills,
+        {"BTCTRY": Decimal("100")},
+    )
+
+    assert len(snapshot.per_symbol) == 1
+    symbol_metrics = snapshot.per_symbol[0]
+    assert symbol_metrics.fills_count == 2
+    assert symbol_metrics.slippage_bps_avg == Decimal("100")
+
+
 def test_compute_execution_quality_fills_per_submitted_order_and_slippage() -> None:
     ts = datetime.now(UTC)
     fills = [
