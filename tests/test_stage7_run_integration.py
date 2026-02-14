@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from btcbot import cli
 from btcbot.config import Settings
+from btcbot.domain.adaptation_models import ParamChange
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType
 from btcbot.domain.risk_budget import Mode
 from btcbot.services.state_store import StateStore
@@ -80,6 +81,20 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
         lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
+    monkeypatch.setattr(
+        "btcbot.services.adaptation_service.AdaptationService.evaluate_and_apply",
+        lambda self, **kwargs: ParamChange(
+            change_id="s7chg:test:1->1:abc",
+            ts=datetime(2024, 1, 1, tzinfo=UTC),
+            from_version=1,
+            to_version=1,
+            changes={},
+            reason="test",
+            metrics_window={"cycles": "1"},
+            outcome="REJECTED",
+            notes=["test"],
+        ),
+    )
 
     settings = Settings(
         DRY_RUN=True,
@@ -96,6 +111,9 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
         cycle = conn.execute("SELECT * FROM stage7_cycle_trace").fetchone()
         metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
         run_metrics = conn.execute("SELECT * FROM stage7_run_metrics").fetchone()
+        active_params = conn.execute(
+            "SELECT * FROM stage7_params_active WHERE key = 'active'"
+        ).fetchone()
         intents = conn.execute("SELECT * FROM stage7_order_intents").fetchall()
         oms_orders = conn.execute("SELECT * FROM stage7_orders").fetchall()
         oms_events = conn.execute("SELECT * FROM stage7_order_events").fetchall()
@@ -105,6 +123,7 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     assert cycle is not None
     assert metrics is not None
     assert run_metrics is not None
+    assert active_params is not None
     selected_universe = json.loads(str(cycle["selected_universe_json"]))
     assert selected_universe
     universe_scores = json.loads(str(cycle["universe_scores_json"]))
@@ -117,10 +136,14 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     assert "allocations" in portfolio_plan
     assert "actions" in portfolio_plan
     trace_summary = json.loads(str(cycle["intents_summary_json"]))
+    param_change = json.loads(str(cycle["param_change_json"]))
+    assert int(cycle["active_param_version"]) == int(active_params["version"])
+    assert param_change["outcome"] == "REJECTED"
     assert trace_summary["order_intents_total"] >= 1
     assert "order_intents_planned" in trace_summary
     assert "order_intents_skipped" in trace_summary
     assert "rules_stats" in trace_summary
+    assert "oms_summary" in trace_summary
     assert intents
     assert oms_orders
     assert oms_events
@@ -382,11 +405,15 @@ def test_stage7_universe_selection_does_not_change_ledger_metrics_shape(
     try:
         metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
         run_metrics = conn.execute("SELECT * FROM stage7_run_metrics").fetchone()
+        active_params = conn.execute(
+            "SELECT * FROM stage7_params_active WHERE key = 'active'"
+        ).fetchone()
     finally:
         conn.close()
 
     assert metrics is not None
     assert run_metrics is not None
+    assert active_params is not None
     for key in [
         "gross_pnl_try",
         "realized_pnl_try",

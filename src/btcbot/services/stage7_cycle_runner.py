@@ -11,6 +11,7 @@ from btcbot.domain.models import Balance, normalize_symbol
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.logging_context import with_cycle_context
+from btcbot.services.adaptation_service import AdaptationService
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.exposure_tracker import ExposureTracker
@@ -43,6 +44,19 @@ class Stage7CycleRunner:
         state_store = StateStore(db_path=settings.state_db_path)
         stage4 = Stage4CycleRunner(command=self.command)
         result = stage4.run_one_cycle(settings)
+
+        adaptation_service = AdaptationService()
+        active_params = state_store.get_active_stage7_params(settings=settings, now_utc=now)
+
+        runtime = settings.model_copy(deep=True)
+        runtime.stage7_universe_size = active_params.universe_size
+        runtime.stage7_score_weights = {k: float(v) for k, v in active_params.score_weights.items()}
+        runtime.stage7_max_spread_bps = Decimal(str(active_params.max_spread_bps))
+        runtime.notional_cap_try_per_cycle = active_params.turnover_cap_try
+        runtime.max_orders_per_cycle = active_params.max_orders_per_cycle
+        runtime.try_cash_target = active_params.cash_target_try
+        runtime.stage7_order_offset_bps = Decimal(str(active_params.order_offset_bps))
+        runtime.stage7_min_quote_volume_try = active_params.min_quote_volume_try
 
         ledger_service = LedgerService(state_store=state_store, logger=logger)
         exchange = build_exchange_stage4(settings, dry_run=True)
@@ -97,7 +111,7 @@ class Stage7CycleRunner:
             exposure_snapshot = exposure_tracker.compute_snapshot(
                 balances=balances,
                 mark_prices_try=bootstrap_marks,
-                settings=settings,
+                settings=runtime,
                 now_utc=now,
                 plan=None,
             )
@@ -159,7 +173,7 @@ class Stage7CycleRunner:
                 exposure_snapshot=exposure_snapshot,
             )
             stage7_risk_decision = risk_budget_service.decide(
-                settings=settings,
+                settings=runtime,
                 now_utc=now,
                 inputs=risk_inputs,
                 previous_decision=previous_risk_decision,
@@ -167,7 +181,7 @@ class Stage7CycleRunner:
 
             universe_result = universe_service.select_universe(
                 exchange=base_client,
-                settings=settings,
+                settings=runtime,
                 now_utc=now,
             )
             collector.stop_timer("selection")
@@ -230,7 +244,7 @@ class Stage7CycleRunner:
                 universe=universe_result.selected_symbols,
                 mark_prices_try=mark_prices,
                 balances=balances,
-                settings=settings,
+                settings=runtime,
                 now_utc=now,
                 final_mode=final_mode,
             )
@@ -243,7 +257,7 @@ class Stage7CycleRunner:
                     plan=portfolio_plan,
                     mark_prices_try=mark_prices,
                     rules=rules_service,
-                    settings=settings,
+                    settings=runtime,
                     final_mode=final_mode,
                     now_utc=now,
                     rules_unavailable=rules_unavailable,
@@ -305,7 +319,7 @@ class Stage7CycleRunner:
                     cycle_id=cycle_id,
                     now_utc=now,
                     state_store=state_store,
-                    settings=settings,
+                    settings=runtime,
                     market_sim=market_simulator,
                 )
                 planned_intents = [intent for intent in order_intents if not intent.skipped]
@@ -315,7 +329,7 @@ class Stage7CycleRunner:
                     intents=planned_intents,
                     market_sim=market_simulator,
                     state_store=state_store,
-                    settings=settings,
+                    settings=runtime,
                     cancel_requests=[],
                 )
                 oms_orders = [*reconciled_orders, *oms_orders]
@@ -432,7 +446,7 @@ class Stage7CycleRunner:
                             "total_score": str(item.total_score),
                             "breakdown": item.breakdown,
                         }
-                        for item in universe_result.scored[: max(0, settings.stage7_universe_size)]
+                        for item in universe_result.scored[: max(0, runtime.stage7_universe_size)]
                     ],
                     intents_summary={
                         "order_decisions_total": len(actions),
@@ -488,6 +502,7 @@ class Stage7CycleRunner:
                         "max_drawdown": snapshot.max_drawdown,
                     },
                     risk_decision=stage7_risk_decision,
+                    active_param_version=active_params.version,
                 )
             finally:
                 collector.stop_timer("persist")
@@ -505,6 +520,18 @@ class Stage7CycleRunner:
                 "cycle_total_ms": int(finalized.get("cycle_total_ms", 0)),
             }
             state_store.save_stage7_run_metrics(cycle_id, run_metrics)
+            param_change = adaptation_service.evaluate_and_apply(
+                state_store=state_store, settings=runtime, now_utc=now
+            )
+            active_after_eval = state_store.get_active_stage7_params(
+                settings=runtime,
+                now_utc=now,
+            )
+            state_store.update_stage7_cycle_adaptation_metadata(
+                cycle_id=cycle_id,
+                active_param_version=active_after_eval.version,
+                param_change=param_change,
+            )
             state_store.set_last_stage7_cycle_id(cycle_id)
 
         logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})
