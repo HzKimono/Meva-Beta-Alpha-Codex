@@ -44,6 +44,8 @@ If any live gate is not satisfied, execution remains blocked.
 
 ## Setup
 
+**Python 3.12+ required** (project metadata: `requires-python = ">=3.12"`).
+
 ### Linux/macOS
 
 ```bash
@@ -89,11 +91,15 @@ python -m btcbot.cli run --dry-run
 ## Common commands
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -e ".[dev]"
+ruff format --check .
+ruff check .
+python -m pytest -q
 python -m btcbot.cli health
 python -m btcbot.cli run --dry-run
-python -m btcbot.cli stage4-run --dry-run
-python -m pytest -q
 ```
 
 ## Quality gates (CI/local)
