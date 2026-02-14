@@ -120,11 +120,10 @@ def test_doctor_detects_stage7_gate_conflicts() -> None:
     _debug_checks(report)
     assert report.ok
 
-    unsafe = Settings(STAGE7_ENABLED=False, DRY_RUN=True, LIVE_TRADING=True)
-    unsafe_report = run_health_checks(unsafe, db_path=None, dataset_path=None)
-    _debug_checks(unsafe_report)
-    assert not unsafe_report.ok
-    assert any("LIVE_TRADING=true" in error for error in unsafe_report.errors)
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(STAGE7_ENABLED=False, DRY_RUN=True, LIVE_TRADING=True)
 
 
 class _DoctorExchange:

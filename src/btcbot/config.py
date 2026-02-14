@@ -484,6 +484,23 @@ class Settings(BaseSettings):
     def validate_stage7_safety(self) -> Settings:
         if self.stage7_enabled and (not self.dry_run or self.live_trading):
             raise ValueError("STAGE7_ENABLED requires DRY_RUN=true and LIVE_TRADING=false")
+
+        if self.dry_run and self.live_trading:
+            raise ValueError("LIVE_TRADING=true cannot be combined with DRY_RUN=true")
+
+        if self.live_trading:
+            if self.live_trading_ack != "I_UNDERSTAND":
+                raise ValueError("LIVE_TRADING=true requires LIVE_TRADING_ACK=I_UNDERSTAND")
+            if self.kill_switch:
+                raise ValueError("LIVE_TRADING=true requires KILL_SWITCH=false")
+            if self.btcturk_api_key is None or self.btcturk_api_secret is None:
+                raise ValueError(
+                    "LIVE_TRADING=true requires BTCTURK_API_KEY and BTCTURK_API_SECRET"
+                )
+
+        self.log_level = self.log_level.strip().upper()
+        if self.log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            raise ValueError("LOG_LEVEL must be one of CRITICAL, ERROR, WARNING, INFO, DEBUG")
         return self
 
     def parsed_degrade_warn_codes(self) -> set[AnomalyCode]:

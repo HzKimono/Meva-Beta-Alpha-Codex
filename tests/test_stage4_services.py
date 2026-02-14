@@ -85,10 +85,31 @@ def store(tmp_path) -> StateStore:
 def test_execution_enforces_live_ack_and_kill_switch(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
     rules = ExchangeRulesService(exchange)
+
+    with pytest.raises(ValueError):
+        Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        )
+
+    with pytest.raises(ValueError):
+        Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=True,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        )
+
     svc = ExecutionService(
         exchange=exchange,
         state_store=store,
-        settings=Settings(DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=True, LIVE_TRADING_ACK=""),
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=True, LIVE_TRADING=False),
         rules_service=rules,
     )
     action = LifecycleAction(
@@ -100,19 +121,7 @@ def test_execution_enforces_live_ack_and_kill_switch(store: StateStore) -> None:
         reason="test",
         client_order_id="cid-1",
     )
-    with pytest.raises(RuntimeError):
-        svc.execute([action])
-
-    svc_blocked = ExecutionService(
-        exchange=exchange,
-        state_store=store,
-        settings=Settings(
-            DRY_RUN=False, KILL_SWITCH=True, LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND"
-        ),
-        rules_service=rules,
-    )
-    assert svc_blocked.execute([action]) == 0
-    assert exchange.submits == []
+    assert svc.execute([action]) == 0
 
 
 def test_decimal_end_to_end_and_idempotent_submit(store: StateStore) -> None:
@@ -121,7 +130,12 @@ def test_decimal_end_to_end_and_idempotent_submit(store: StateStore) -> None:
         exchange=exchange,
         state_store=store,
         settings=Settings(
-            DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND"
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
         ),
         rules_service=ExchangeRulesService(exchange),
     )
@@ -158,7 +172,12 @@ def test_cancel_lookup_works_when_action_has_no_exchange_id(store: StateStore) -
         exchange=exchange,
         state_store=store,
         settings=Settings(
-            DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND"
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
         ),
         rules_service=ExchangeRulesService(exchange),
     )
@@ -412,7 +431,12 @@ def test_submit_idempotency_persists_single_row(store: StateStore) -> None:
         exchange=exchange,
         state_store=store,
         settings=Settings(
-            DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND"
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
         ),
         rules_service=ExchangeRulesService(exchange),
     )

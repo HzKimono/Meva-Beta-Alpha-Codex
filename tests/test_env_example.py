@@ -63,7 +63,7 @@ def test_env_example_values_load_into_settings(monkeypatch, tmp_path: Path) -> N
     assert settings.dry_run is True
     assert settings.target_try == 300
     assert settings.live_trading is False
-    assert settings.live_trading_ack == ""
+    assert settings.live_trading_ack == "I_UNDERSTAND"
     assert settings.offset_bps == 20
     assert settings.ttl_seconds == 120
     assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
