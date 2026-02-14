@@ -377,3 +377,64 @@ SELECT * FROM stage7_param_changes ORDER BY ts DESC LIMIT 20;
 SELECT * FROM stage7_params_checkpoints ORDER BY version DESC;
 SELECT cycle_id, active_param_version, param_change_json FROM stage7_cycle_trace ORDER BY ts DESC LIMIT 20;
 ```
+
+## PR-10 Backtest Harness Parity (DRY-RUN ONLY)
+
+PR-10 adds an offline replay/backtest harness that reuses Stage 7 services and persists into the same Stage 7 schema.
+
+### Data format (folder option)
+Replay loader expects:
+- `data/candles/<SYMBOL>.csv` with: `ts,open,high,low,close,volume`
+- `data/orderbook/<SYMBOL>.csv` with: `ts,best_bid,best_ask`
+- `data/ticker/<SYMBOL>.csv` with: `ts,last,high,low,volume,quote_volume` (`quote_volume` optional)
+
+Schema is strict and deterministic (invalid/missing required headers fail fast).
+
+### Replay stepping
+- Fixed `step_seconds` timeline between `start` and `end`.
+- `now()` is controlled by replay clock only.
+- `advance()` moves exactly one step and returns `False` when done.
+- Missing points use deterministic nearest-prior carry-forward.
+
+### Reproducibility guarantees
+- Backtest is DRY-RUN only.
+- Deterministic cycle IDs in backtest: `bt:<YYYYmmddHHMMSS>:<idx>`.
+- No `datetime.now()` in replay cycles; time source is replay clock.
+- Seed is accepted and persisted in run metadata path, but deterministic rules prefer stable ordering/carry-forward over randomness.
+- Params are frozen by default and adaptation is disabled by default (`freeze_params=True`, `disable_adaptation=True`).
+
+### CLI
+Run replay backtest:
+```bash
+python -m btcbot.cli stage7-backtest \
+  --data ./data \
+  --out-db ./backtest.db \
+  --start 2024-01-01T00:00:00Z \
+  --end 2024-01-01T01:00:00Z \
+  --step-seconds 60 \
+  --seed 123
+```
+
+Compare two runs:
+```bash
+python -m btcbot.cli stage7-parity \
+  --db-a ./run_a.db \
+  --db-b ./run_b.db \
+  --start 2024-01-01T00:00:00Z \
+  --end 2024-01-01T01:00:00Z
+```
+
+Export backtest rows:
+```bash
+python -m btcbot.cli stage7-backtest-export --db ./backtest.db --last 100 --format jsonl --out out.jsonl
+```
+
+### Fingerprint mismatches
+`stage7-parity` computes SHA-256 over deterministic per-cycle essentials:
+- timestamp + cycle id
+- base/final mode
+- selected universe symbols
+- net/fees/slippage/turnover
+- intents count + filled/rejected counts
+
+A mismatch means at least one of those canonical inputs diverged in the compared DB windows.
