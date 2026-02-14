@@ -123,7 +123,7 @@ class Settings(BaseSettings):
     stage7_sim_reject_prob_bps: Decimal = Field(
         default=Decimal("0"), alias="STAGE7_SIM_REJECT_PROB_BPS"
     )
-    stage7_rate_limit_rps: Decimal = Field(default=Decimal("5"), alias="STAGE7_RATE_LIMIT_RPS")
+    stage7_rate_limit_rps: float = Field(default=5.0, alias="STAGE7_RATE_LIMIT_RPS")
     stage7_rate_limit_burst: int = Field(default=5, alias="STAGE7_RATE_LIMIT_BURST")
     stage7_retry_max_attempts: int = Field(default=3, alias="STAGE7_RETRY_MAX_ATTEMPTS")
     stage7_retry_base_delay_ms: int = Field(default=100, alias="STAGE7_RETRY_BASE_DELAY_MS")
@@ -348,6 +348,33 @@ class Settings(BaseSettings):
             raise ValueError("PNL_DIVERGENCE_TRY_ERROR must be >= PNL_DIVERGENCE_TRY_WARN")
         return value
 
+    @field_validator("stage7_score_weights", mode="before")
+    def validate_stage7_score_weights(
+        cls, value: str | dict[str, object] | None
+    ) -> dict[str, float] | None:
+        if value is None:
+            return None
+        parsed: object = value
+        if isinstance(value, str):
+            token = value.strip()
+            if not token:
+                return None
+            try:
+                parsed = json.loads(token)
+            except json.JSONDecodeError as exc:
+                raise ValueError("STAGE7_SCORE_WEIGHTS must be valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("STAGE7_SCORE_WEIGHTS must be a dict[str,float]")
+        normalized: dict[str, float] = {}
+        for key, weight in parsed.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("STAGE7_SCORE_WEIGHTS keys must be non-empty strings")
+            try:
+                normalized[key] = float(weight)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("STAGE7_SCORE_WEIGHTS values must be numeric") from exc
+        return normalized
+
     @field_validator("stage7_slippage_bps", "stage7_fees_bps")
     def validate_stage7_non_negative_bps(cls, value: Decimal) -> Decimal:
         if value < 0:
@@ -397,11 +424,14 @@ class Settings(BaseSettings):
             )
         return normalized
 
-    @field_validator(
-        "stage7_max_drawdown_pct",
-        "stage7_max_daily_loss_try",
-    )
-    def validate_stage7_risk_non_negative_decimal(cls, value: Decimal) -> Decimal:
+    @field_validator("stage7_max_drawdown_pct")
+    def validate_stage7_max_drawdown_pct(cls, value: Decimal) -> Decimal:
+        if value < 0 or value > 1:
+            raise ValueError("STAGE7_MAX_DRAWDOWN_PCT must be in [0, 1]")
+        return value
+
+    @field_validator("stage7_max_daily_loss_try")
+    def validate_stage7_max_daily_loss_try(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("Stage7 risk decimal settings must be >= 0")
         return value
@@ -421,11 +451,15 @@ class Settings(BaseSettings):
             raise ValueError("Stage7 risk integer settings must be >= 0")
         return value
 
-    @field_validator("stage7_rate_limit_rps")
-    def validate_stage7_rate_limit_rps(cls, value: Decimal) -> Decimal:
-        if value <= 0:
+    @field_validator("stage7_rate_limit_rps", mode="before")
+    def validate_stage7_rate_limit_rps(cls, value: object) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("STAGE7_RATE_LIMIT_RPS must be numeric") from exc
+        if parsed <= 0:
             raise ValueError("STAGE7_RATE_LIMIT_RPS must be > 0")
-        return value
+        return parsed
 
     @field_validator(
         "stage7_max_consecutive_losses",

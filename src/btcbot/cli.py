@@ -333,20 +333,40 @@ def _close_best_effort(resource: object, label: str) -> None:
         )
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def _normalize_flag_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"true", "1", "yes", "y"}:
+            return True
+        if token in {"false", "0", "no", "n", ""}:
+            return False
+    return False
+
+
+def _csv_safe_value(value: object) -> object:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=str)
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def run_stage7_report(settings: Settings, last: int) -> int:
     store = StateStore(db_path=settings.state_db_path)
     rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
-    print("ts mode net_pnl_try max_dd turnover intents rejects throttled")
+    print("cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled")
     for row in rows:
-        quality_flags = row.get("quality_flags", {})
         print(
-            f"{row['ts']} {row['mode_final']} {row['net_pnl_try']} {row['max_drawdown_pct']} "
-            f"{row['turnover_try']} {row['intents_planned_count']} {row['oms_rejected_count']} "
-            f"{quality_flags.get('throttled', False)}"
+            f"{row['cycle_id']} {row['ts']} {row['mode_final']} "
+            f"{row['net_pnl_try']} {row['max_drawdown_pct']} {row['turnover_try']} "
+            f"{row['intents_planned_count']} {row['oms_rejected_count']} "
+            f"{int(row.get('oms_throttled_count', 0))}"
         )
     return 0
 
@@ -365,10 +385,7 @@ def run_stage7_export(settings: Settings, last: int, export_format: str, out_pat
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            normalized = {
-                key: (json.dumps(value, sort_keys=True) if isinstance(value, dict) else value)
-                for key, value in row.items()
-            }
+            normalized = {key: _csv_safe_value(value) for key, value in row.items()}
             writer.writerow(normalized)
     return 0
 
@@ -379,7 +396,12 @@ def run_stage7_alerts(settings: Settings, last: int) -> int:
     print("cycle_id ts alerts")
     for row in rows:
         alerts = row.get("alert_flags", {})
-        if any(bool(value) for value in alerts.values()):
-            active = ",".join(sorted(name for name, value in alerts.items() if value))
+        normalized_alerts = {name: _normalize_flag_bool(value) for name, value in alerts.items()}
+        if any(normalized_alerts.values()):
+            active = ",".join(sorted(name for name, value in normalized_alerts.items() if value))
             print(f"{row['cycle_id']} {row['ts']} {active}")
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

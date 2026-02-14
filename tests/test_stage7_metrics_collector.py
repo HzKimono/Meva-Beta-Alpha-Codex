@@ -25,3 +25,24 @@ def test_metrics_collector_timer_non_negative() -> None:
     assert elapsed >= 0
     assert payload["selection_ms"] >= 0
     assert payload["latency_ms_total"] >= payload["selection_ms"]
+
+
+def test_metrics_collector_finalize_stops_running_timers() -> None:
+    collector = MetricsCollector()
+    collector.start_timer("planning")
+
+    payload = collector.finalize()
+
+    assert payload["planning_ms"] >= 0
+    assert payload["latency_ms_total"] >= payload["planning_ms"]
+
+
+def test_metrics_collector_double_start_increments_counter() -> None:
+    collector = MetricsCollector()
+    collector.start_timer("selection")
+    collector.start_timer("selection")
+    collector.stop_timer("selection")
+
+    payload = collector.finalize()
+
+    assert payload["timer_double_start"] == 1

@@ -420,6 +420,9 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS idx_stage7_run_metrics_ts ON stage7_run_metrics(ts)"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_run_metrics_run_id ON stage7_run_metrics(run_id)"
+        )
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS stage7_order_intents (
                 client_order_id TEXT PRIMARY KEY,
@@ -598,7 +601,11 @@ class StateStore:
                 int(metrics_dict["persist_ms"]),
                 json.dumps(metrics_dict["quality_flags"], sort_keys=True),
                 json.dumps(metrics_dict["alert_flags"], sort_keys=True),
-                str(metrics_dict.get("run_id") or ""),
+                (
+                    str(metrics_dict["run_id"])
+                    if metrics_dict.get("run_id") not in (None, "")
+                    else None
+                ),
             ),
         )
 

@@ -12,6 +12,9 @@ class MetricsCollector:
         self._gauges: dict[str, object] = {}
 
     def start_timer(self, step_name: str) -> None:
+        if step_name in self._starts:
+            self.inc("timer_double_start")
+            return
         self._starts[step_name] = perf_counter()
 
     def stop_timer(self, step_name: str) -> int:
@@ -30,6 +33,9 @@ class MetricsCollector:
         self._gauges[name] = value
 
     def finalize(self) -> dict[str, object]:
+        for step_name in sorted(self._starts):
+            self.stop_timer(step_name)
+
         ordered: OrderedDict[str, object] = OrderedDict()
         for key in sorted(self._counters):
             ordered[key] = self._counters[key]
