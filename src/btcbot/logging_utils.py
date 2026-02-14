@@ -6,6 +6,8 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+from btcbot.logging_context import get_logging_context
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -18,6 +20,12 @@ class JsonFormatter(logging.Formatter):
         extras = getattr(record, "extra", None)
         if isinstance(extras, dict):
             payload.update(extras)
+
+        context = get_logging_context()
+        if context.get("run_id"):
+            payload["run_id"] = context["run_id"]
+        if context.get("cycle_id"):
+            payload["cycle_id"] = context["cycle_id"]
 
         if record.exc_info:
             exc_type, exc_value, _ = record.exc_info

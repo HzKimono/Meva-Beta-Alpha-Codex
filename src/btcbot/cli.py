@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -57,6 +59,17 @@ def main() -> int:
 
     subparsers.add_parser("health", help="Check exchange connectivity")
 
+    report_parser = subparsers.add_parser("stage7-report", help="Print recent Stage 7 metrics")
+    report_parser.add_argument("--last", type=int, default=10)
+
+    export_parser = subparsers.add_parser("stage7-export", help="Export recent Stage 7 metrics")
+    export_parser.add_argument("--last", type=int, default=50)
+    export_parser.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+    export_parser.add_argument("--out", required=True)
+
+    alerts_parser = subparsers.add_parser("stage7-alerts", help="Print recent Stage 7 alert cycles")
+    alerts_parser.add_argument("--last", type=int, default=50)
+
     args = parser.parse_args()
     settings = Settings()
     setup_logging(settings.log_level)
@@ -72,6 +85,17 @@ def main() -> int:
 
     if args.command == "health":
         return run_health(settings)
+
+    if args.command == "stage7-report":
+        return run_stage7_report(settings, last=args.last)
+
+    if args.command == "stage7-export":
+        return run_stage7_export(
+            settings, last=args.last, export_format=args.format, out_path=args.out
+        )
+
+    if args.command == "stage7-alerts":
+        return run_stage7_alerts(settings, last=args.last)
 
     return 1
 
@@ -311,3 +335,51 @@ def _close_best_effort(resource: object, label: str) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def run_stage7_report(settings: Settings, last: int) -> int:
+    store = StateStore(db_path=settings.state_db_path)
+    rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
+    print("ts mode net_pnl_try max_dd turnover intents rejects throttled")
+    for row in rows:
+        quality_flags = row.get("quality_flags", {})
+        print(
+            f"{row['ts']} {row['mode_final']} {row['net_pnl_try']} {row['max_drawdown_pct']} "
+            f"{row['turnover_try']} {row['intents_planned_count']} {row['oms_rejected_count']} "
+            f"{quality_flags.get('throttled', False)}"
+        )
+    return 0
+
+
+def run_stage7_export(settings: Settings, last: int, export_format: str, out_path: str) -> int:
+    store = StateStore(db_path=settings.state_db_path)
+    rows = store.fetch_stage7_cycles_for_export(limit=last)
+    if export_format == "jsonl":
+        with open(out_path, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+        return 0
+
+    fieldnames = sorted({key for row in rows for key in row.keys()})
+    with open(out_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            normalized = {
+                key: (json.dumps(value, sort_keys=True) if isinstance(value, dict) else value)
+                for key, value in row.items()
+            }
+            writer.writerow(normalized)
+    return 0
+
+
+def run_stage7_alerts(settings: Settings, last: int) -> int:
+    store = StateStore(db_path=settings.state_db_path)
+    rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
+    print("cycle_id ts alerts")
+    for row in rows:
+        alerts = row.get("alert_flags", {})
+        if any(bool(value) for value in alerts.values()):
+            active = ",".join(sorted(name for name, value in alerts.items() if value))
+            print(f"{row['cycle_id']} {row['ts']} {active}")
+    return 0
