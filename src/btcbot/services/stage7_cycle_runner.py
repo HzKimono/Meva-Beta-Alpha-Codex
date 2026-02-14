@@ -53,7 +53,7 @@ class Stage7CycleRunner:
                 lifecycle_actions.append(
                     LifecycleAction(
                         action_type=LifecycleActionType.SUBMIT,
-                        symbol=order.symbol,
+                        symbol=normalize_symbol(order.symbol),
                         side=order.side,
                         price=order.price,
                         qty=order.qty,
@@ -159,9 +159,11 @@ class Stage7CycleRunner:
                 settings=settings,
                 now_utc=now,
             )
-            symbols_needed = sorted(
-                {normalize_symbol(symbol) for symbol in universe_result.selected_symbols}
-            )
+            universe_syms = {
+                normalize_symbol(symbol) for symbol in universe_result.selected_symbols
+            }
+            lifecycle_syms = {normalize_symbol(action.symbol) for action in lifecycle_actions}
+            symbols_needed = sorted(universe_syms | lifecycle_syms)
             mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
             rules_symbols_fallback: set[str] = set()
             rules_symbols_invalid: set[str] = set()
@@ -304,7 +306,7 @@ class Stage7CycleRunner:
                     ]
                     + [
                         {
-                            "symbol": order.symbol,
+                            "symbol": normalize_symbol(order.symbol),
                             "side": order.side,
                             "qty": str(order.qty),
                             "status": order.status.value,
