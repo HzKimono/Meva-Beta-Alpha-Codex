@@ -20,6 +20,7 @@ class DoctorCheck:
     def __post_init__(self) -> None:
         normalized = self.status.strip().lower()
         status_map = {
+            "ok": "pass",
             "warning": "warn",
             "error": "fail",
         }
@@ -132,12 +133,31 @@ def _check_exchange_rules(
         cache_ttl_sec=settings.rules_cache_ttl_sec,
         settings=settings,
     )
-    allow_fallback = not bool(getattr(settings, "stage7_rules_require_metadata", True))
-    bad_symbols: list[tuple[str, str]] = []
+    invalid_symbols: list[tuple[str, str]] = []
+    degraded_symbols: list[tuple[str, str]] = []
 
     get_info = getattr(base_client, "get_exchange_info", None)
     try:
-        pairs = get_info() if callable(get_info) else []
+        try:
+            pairs = get_info() if callable(get_info) else []
+        except Exception as exc:  # pragma: no cover - defensive network guard
+            checks.append(
+                DoctorCheck(
+                    "exchange_rules",
+                    "symbols_metadata_unavailable",
+                    "warn",
+                    f"exchange info unavailable; could not validate symbol rules ({exc})",
+                )
+            )
+            warnings.append("exchange info unavailable; skipped exchange_rules validation")
+            actions.extend(
+                [
+                    "Check BTCTurk public API connectivity and base URL.",
+                    "Re-run doctor when exchangeinfo endpoint is reachable.",
+                ]
+            )
+            return
+
         if not pairs:
             checks.append(
                 DoctorCheck(
@@ -158,17 +178,22 @@ def _check_exchange_rules(
 
         for symbol in settings.symbols:
             _, status = rules_service.get_symbol_rules_status(symbol)
-            if status in {"missing", "invalid"}:
-                bad_symbols.append((symbol, status))
-            if status == "fallback" and not allow_fallback:
-                bad_symbols.append((symbol, status))
+            if status == "invalid":
+                invalid_symbols.append((symbol, status))
+            elif status in {"missing", "fallback"}:
+                degraded_symbols.append((symbol, status))
     finally:
         close = getattr(exchange, "close", None)
         if callable(close):
             close()
 
-    if bad_symbols:
-        for symbol, status in bad_symbols:
+    for symbol, status in degraded_symbols:
+        message = f"exchange rules degraded for symbol={symbol} status={status}"
+        checks.append(DoctorCheck("exchange_rules", f"rules_{symbol.lower()}", "warn", message))
+        warnings.append(message)
+
+    if invalid_symbols:
+        for symbol, status in invalid_symbols:
             message = f"exchange rules unusable for symbol={symbol} status={status}"
             checks.append(DoctorCheck("exchange_rules", f"rules_{symbol.lower()}", "fail", message))
             errors.append(message)
@@ -176,18 +201,18 @@ def _check_exchange_rules(
             [
                 "Verify BTCTurk /api/v2/server/exchangeinfo schema and symbol names.",
                 "Update exchange rules parser for current payload fields/filters.",
-                "Set STAGE7_RULES_REQUIRE_METADATA=false only as temporary fallback.",
             ]
         )
-    else:
-        checks.append(
-            DoctorCheck(
-                "exchange_rules",
-                "symbols_metadata",
-                "pass",
-                f"exchange rules usable for {len(settings.symbols)} configured symbols",
-            )
+        return
+
+    checks.append(
+        DoctorCheck(
+            "exchange_rules",
+            "symbols_metadata",
+            "pass",
+            f"exchange rules usable for {len(settings.symbols)} configured symbols",
         )
+    )
 
 
 def _merge_dataset_report(

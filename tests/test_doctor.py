@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,12 @@ import pytest
 from btcbot import cli
 from btcbot.config import Settings
 from btcbot.services.doctor import DoctorCheck, DoctorReport, run_health_checks
+
+
+def _debug_checks(report: DoctorReport) -> None:
+    if os.getenv("DOCTOR_DEBUG") == "1":
+        print([(c.category, c.name, c.status) for c in report.checks])
+        print(report.ok)
 
 
 def test_doctor_report_ok_true_when_all_checks_pass() -> None:
@@ -55,6 +62,7 @@ def test_doctor_accepts_creatable_db_path(tmp_path: Path) -> None:
         db_path=str(tmp_path / "nested" / "new.db"),
         dataset_path=None,
     )
+    _debug_checks(report)
 
     assert report.ok
     assert any("schema_version table missing" in warning for warning in report.warnings)
@@ -71,6 +79,9 @@ def test_doctor_fails_when_dataset_is_file(tmp_path: Path) -> None:
 
 
 def test_doctor_dataset_optional_ok(capsys) -> None:
+    report = run_health_checks(Settings(), db_path="btcbot_state.db", dataset_path=None)
+    _debug_checks(report)
+
     code = cli.run_doctor(
         Settings(), db_path="btcbot_state.db", dataset_path=None, json_output=False
     )
@@ -109,6 +120,7 @@ def test_doctor_missing_dataset_fail_actions(capsys) -> None:
 def test_doctor_detects_stage7_gate_conflicts() -> None:
     settings = Settings(STAGE7_ENABLED=True, DRY_RUN=True, LIVE_TRADING=False)
     report = run_health_checks(settings, db_path=None, dataset_path=None)
+    _debug_checks(report)
     assert report.ok
 
     unsafe = Settings(STAGE7_ENABLED=False, DRY_RUN=True, LIVE_TRADING=True)
