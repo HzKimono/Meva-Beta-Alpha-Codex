@@ -267,3 +267,46 @@ Indexes:
 - Otherwise, Stage 7 processes planned intents through OMS and stores:
   - `oms_summary` counts by status
   - `events_total`
+
+## PR-7 OMS / Execution v2 Reliability Hardening (DRY-RUN)
+
+PR-7 hardens the Stage 7 OMS for restart safety and deterministic reliability behavior while remaining **DRY-RUN ONLY**.
+
+### Idempotency model
+- `client_order_id` remains the primary dedupe key for order intent processing.
+- New table `stage7_idempotency_keys(key, ts, payload_hash)` persists action-level idempotency.
+- Lifecycle actions (`submit/cancel/replace`) are guarded by idempotency key registration.
+- Reused key with same payload is treated as duplicate and ignored (`DUPLICATE_IGNORED` event).
+- Reused key with different payload hash raises conflict and emits `IDEMPOTENCY_CONFLICT`.
+
+### Event-log source of truth
+- `stage7_order_events` remains append-only and guarded by unique `event_id` PK.
+- State transitions are constrained by an allowed transition graph to prevent out-of-order corruption.
+- `stage7_orders` is the latest snapshot view derived consistently from event-driven transitions.
+
+### Retry / backoff policy
+- Transient errors retried with deterministic exponential backoff + seeded jitter:
+  - transient: `NetworkTimeout`, `RateLimitError`, `TemporaryUnavailable`
+  - non-retryable: all others (including explicit non-retryable adapter failures)
+- Retry policy settings:
+  - `STAGE7_RETRY_MAX_ATTEMPTS`
+  - `STAGE7_RETRY_BASE_DELAY_MS`
+  - `STAGE7_RETRY_MAX_DELAY_MS`
+- Retry lifecycle events:
+  - `RETRY_SCHEDULED` for each retry attempt
+  - `RETRY_GIVEUP` when retry budget is exhausted
+
+### Throttling guardrails
+- Token-bucket throttling is applied before submit/cancel/replace:
+  - `STAGE7_RATE_LIMIT_RPS`
+  - `STAGE7_RATE_LIMIT_BURST`
+- If throttled, OMS records `THROTTLED` with `next_eligible_ts` and defers processing.
+
+### Crash-recovery and rerun safety
+- New `reconcile_open_orders()` reloads non-terminal orders, replays/resumes pending actions, and continues processing safely.
+- Running `stage7-run` repeatedly does not duplicate submissions/events due to:
+  - idempotency key checks
+  - event-id dedupe
+  - transition guards
+
+Stage 7 safety gates are unchanged: `STAGE7_ENABLED` requires `DRY_RUN=true` and `LIVE_TRADING=false`.
