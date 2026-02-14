@@ -23,6 +23,7 @@ class AdaptationService:
         recent_metrics: list[dict[str, object]],
         active_params: Stage7Params,
         settings: Settings,
+        now_utc: datetime,
     ) -> tuple[Stage7Params, ParamChange]:
         proposed = active_params
         reasons: list[str] = []
@@ -85,7 +86,6 @@ class AdaptationService:
         else:
             reason = reasons[0] if reasons else "heuristic_update"
         changes = _diff_params(active_params, bounded)
-        now_utc = datetime.now(UTC)
         next_version = active_params.version + (1 if changes else 0)
         candidate = replace(bounded, version=next_version, updated_at=now_utc)
         window_summary = _metrics_summary(recent_metrics)
@@ -119,6 +119,7 @@ class AdaptationService:
         if not recent:
             return None
         if has_rollback_trigger(recent_metrics=recent):
+            state_store.set_stage7_checkpoint_goodness(version=active.version, is_good=False)
             checkpoint = state_store.get_last_good_stage7_params_checkpoint()
             if checkpoint is None:
                 return None
@@ -151,6 +152,7 @@ class AdaptationService:
             recent_metrics=recent,
             active_params=active,
             settings=settings,
+            now_utc=now_utc,
         )
         latest = recent[0]
         if str(latest.get("mode_final")) != Mode.NORMAL.value:
@@ -169,7 +171,6 @@ class AdaptationService:
 
         applied = replace(change, outcome="APPLIED", ts=now_utc)
         state_store.set_active_stage7_params(replace(candidate, updated_at=now_utc), applied)
-        state_store.mark_checkpoint(version=candidate.version, is_good=True)
         return applied
 
 

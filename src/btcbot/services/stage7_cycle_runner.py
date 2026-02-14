@@ -523,57 +523,15 @@ class Stage7CycleRunner:
             param_change = adaptation_service.evaluate_and_apply(
                 state_store=state_store, settings=runtime, now_utc=now
             )
-            if param_change is not None:
-                state_store.save_stage7_cycle(
-                    cycle_id=cycle_id,
-                    ts=now,
-                    selected_universe=universe_result.selected_symbols,
-                    universe_scores=[
-                        {
-                            "symbol": item.symbol,
-                            "total_score": str(item.total_score),
-                            "breakdown": item.breakdown,
-                        }
-                        for item in universe_result.scored[: max(0, runtime.stage7_universe_size)]
-                    ],
-                    intents_summary={
-                        "order_decisions_total": len(actions),
-                        "orders_simulated": len(oms_orders),
-                        "order_intents_total": len(order_intents),
-                        "order_intents_planned": planned_count,
-                        "order_intents_skipped": skipped_count,
-                        "rules_stats": rules_stats,
-                        "events_total": len(oms_events),
-                    },
-                    mode_payload=mode_payload,
-                    order_decisions=actions,
-                    portfolio_plan=portfolio_plan.to_dict(),
-                    order_intents=order_intents,
-                    order_intents_trace=[
-                        {
-                            "client_order_id": intent.client_order_id,
-                            "symbol": intent.symbol,
-                            "side": intent.side,
-                            "skipped": intent.skipped,
-                            "skip_reason": intent.skip_reason,
-                        }
-                        for intent in order_intents
-                    ],
-                    ledger_metrics={
-                        "gross_pnl_try": snapshot.gross_pnl_try,
-                        "realized_pnl_try": snapshot.realized_pnl_try,
-                        "unrealized_pnl_try": snapshot.unrealized_pnl_try,
-                        "net_pnl_try": snapshot.net_pnl_try,
-                        "fees_try": snapshot.fees_try,
-                        "slippage_try": snapshot.slippage_try,
-                        "turnover_try": snapshot.turnover_try,
-                        "equity_try": snapshot.equity_try,
-                        "max_drawdown": snapshot.max_drawdown,
-                    },
-                    risk_decision=stage7_risk_decision,
-                    active_param_version=active_params.version,
-                    param_change=param_change,
-                )
+            active_after_eval = state_store.get_active_stage7_params(
+                settings=runtime,
+                now_utc=now,
+            )
+            state_store.update_stage7_cycle_adaptation_metadata(
+                cycle_id=cycle_id,
+                active_param_version=active_after_eval.version,
+                param_change=param_change,
+            )
             state_store.set_last_stage7_cycle_id(cycle_id)
 
         logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})

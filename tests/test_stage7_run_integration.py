@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from btcbot import cli
 from btcbot.config import Settings
+from btcbot.domain.adaptation_models import ParamChange
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType
 from btcbot.domain.risk_budget import Mode
 from btcbot.services.state_store import StateStore
@@ -80,6 +81,20 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
         lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
+    monkeypatch.setattr(
+        "btcbot.services.adaptation_service.AdaptationService.evaluate_and_apply",
+        lambda self, **kwargs: ParamChange(
+            change_id="s7chg:test:1->1:abc",
+            ts=datetime(2024, 1, 1, tzinfo=UTC),
+            from_version=1,
+            to_version=1,
+            changes={},
+            reason="test",
+            metrics_window={"cycles": "1"},
+            outcome="REJECTED",
+            notes=["test"],
+        ),
+    )
 
     settings = Settings(
         DRY_RUN=True,
@@ -121,10 +136,14 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     assert "allocations" in portfolio_plan
     assert "actions" in portfolio_plan
     trace_summary = json.loads(str(cycle["intents_summary_json"]))
+    param_change = json.loads(str(cycle["param_change_json"]))
+    assert int(cycle["active_param_version"]) == int(active_params["version"])
+    assert param_change["outcome"] == "REJECTED"
     assert trace_summary["order_intents_total"] >= 1
     assert "order_intents_planned" in trace_summary
     assert "order_intents_skipped" in trace_summary
     assert "rules_stats" in trace_summary
+    assert "oms_summary" in trace_summary
     assert intents
     assert oms_orders
     assert oms_events

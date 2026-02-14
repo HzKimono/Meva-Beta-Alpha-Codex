@@ -17,7 +17,7 @@ def _active() -> Stage7Params:
             "volatility": Decimal("0.2"),
         },
         order_offset_bps=10,
-        turnover_cap_try=Decimal("1000"),
+        turnover_cap_try=Decimal("900"),
         max_orders_per_cycle=3,
         max_spread_bps=200,
         cash_target_try=Decimal("300"),
@@ -30,6 +30,7 @@ def _active() -> Stage7Params:
 def test_proposal_reject_spike_reduces_offset() -> None:
     svc = AdaptationService()
     settings = Settings()
+    now_utc = datetime(2024, 1, 1, tzinfo=UTC)
     candidate, change = svc.propose_update(
         recent_metrics=[
             {
@@ -41,6 +42,7 @@ def test_proposal_reject_spike_reduces_offset() -> None:
         ],
         active_params=_active(),
         settings=settings,
+        now_utc=now_utc,
     )
     assert candidate.order_offset_bps == 8
     assert "order_offset_bps" in change.changes
@@ -48,7 +50,8 @@ def test_proposal_reject_spike_reduces_offset() -> None:
 
 def test_proposal_healthy_window_increases_universe_and_turnover() -> None:
     svc = AdaptationService()
-    settings = Settings()
+    settings = Settings(NOTIONAL_CAP_TRY_PER_CYCLE="1000")
+    now_utc = datetime(2024, 1, 1, tzinfo=UTC)
     healthy = [
         {
             "alert_flags": {},
@@ -64,7 +67,8 @@ def test_proposal_healthy_window_increases_universe_and_turnover() -> None:
         recent_metrics=healthy,
         active_params=_active(),
         settings=settings,
+        now_utc=now_utc,
     )
     assert candidate.universe_size == 21
-    assert candidate.turnover_cap_try == Decimal("1000")
+    assert candidate.turnover_cap_try == Decimal("945.00")
     assert "universe_size" in change.changes

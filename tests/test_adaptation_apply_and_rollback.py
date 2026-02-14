@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from btcbot.config import Settings
 from btcbot.services.adaptation_service import AdaptationService
@@ -48,35 +49,98 @@ def _metric(
     }
 
 
-def test_apply_reject_and_rollback_paths(tmp_path) -> None:
+def test_seed_apply_and_rollback_marking(tmp_path) -> None:
     db = tmp_path / "adapt.db"
     store = StateStore(str(db))
-    settings = Settings(STATE_DB_PATH=str(db), STAGE7_ENABLED=True, DRY_RUN=True)
+    settings = Settings(
+        STATE_DB_PATH=str(db),
+        STAGE7_ENABLED=True,
+        DRY_RUN=True,
+        NOTIONAL_CAP_TRY_PER_CYCLE="1000",
+    )
     svc = AdaptationService()
-    now = datetime.now(UTC)
-    active = store.get_active_stage7_params(settings=settings, now_utc=now)
-    assert active.version == 1
+    now = datetime(2024, 1, 1, tzinfo=UTC)
 
-    # healthy apply
+    seeded = store.get_active_stage7_params(settings=settings, now_utc=now)
+    assert seeded.version == 1
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        seed_active = conn.execute(
+            "SELECT * FROM stage7_params_active WHERE key='active'"
+        ).fetchone()
+        seed_ckpt = conn.execute(
+            "SELECT * FROM stage7_params_checkpoints WHERE version=1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert seed_active is not None
+    assert seed_ckpt is not None
+    assert int(seed_ckpt["is_good"]) == 1
+
     for i in range(3):
         store.save_stage7_run_metrics(f"c{i}", _metric(f"2024-01-01T00:00:0{i}+00:00"))
     applied = svc.evaluate_and_apply(state_store=store, settings=settings, now_utc=now)
-    assert applied is not None and applied.outcome == "APPLIED"
-    assert store.get_active_stage7_params(settings=settings, now_utc=now).version == 2
+    assert applied is not None
+    assert applied.outcome == "APPLIED"
 
-    # reject due to non-normal mode
-    store.save_stage7_run_metrics("cx", _metric("2024-01-01T00:00:10+00:00", mode="OBSERVE_ONLY"))
-    rejected = svc.evaluate_and_apply(state_store=store, settings=settings, now_utc=now)
-    assert rejected is not None and rejected.outcome == "REJECTED"
-
-    # rollback on drawdown breach
-    store.save_stage7_run_metrics("cy", _metric("2024-01-01T00:00:11+00:00", drawdown=True))
-    rolled = svc.evaluate_and_apply(state_store=store, settings=settings, now_utc=now)
-    assert rolled is not None and rolled.outcome == "ROLLED_BACK"
+    active_v2 = store.get_active_stage7_params(settings=settings, now_utc=now)
+    assert active_v2.version == 2
 
     conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
     try:
-        changes = conn.execute("SELECT COUNT(*) FROM stage7_param_changes").fetchone()[0]
+        applied_change = conn.execute(
+            "SELECT * FROM stage7_param_changes WHERE outcome='APPLIED' ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+        v2_ckpt = conn.execute("SELECT * FROM stage7_params_checkpoints WHERE version=2").fetchone()
     finally:
         conn.close()
-    assert changes >= 3
+    assert applied_change is not None
+    assert v2_ckpt is not None
+    assert int(v2_ckpt["is_good"]) == 1
+
+    store.save_stage7_run_metrics("cx", _metric("2024-01-01T00:01:00+00:00", mode="OBSERVE_ONLY"))
+    rejected = svc.evaluate_and_apply(
+        state_store=store, settings=settings, now_utc=now + timedelta(seconds=10)
+    )
+    assert rejected is not None
+    assert rejected.outcome == "REJECTED"
+
+    store.save_stage7_run_metrics("cy", _metric("2024-01-01T00:01:01+00:00", drawdown=True))
+    rolled = svc.evaluate_and_apply(
+        state_store=store, settings=settings, now_utc=now + timedelta(seconds=20)
+    )
+    assert rolled is not None
+    assert rolled.outcome == "ROLLED_BACK"
+
+    active_after_rollback = store.get_active_stage7_params(settings=settings, now_utc=now)
+    assert active_after_rollback.version == 1
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        v2_ckpt_after = conn.execute(
+            "SELECT * FROM stage7_params_checkpoints WHERE version=2"
+        ).fetchone()
+        rollback_change = conn.execute(
+            """
+            SELECT * FROM stage7_param_changes
+            WHERE outcome='ROLLED_BACK'
+            ORDER BY ts DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert v2_ckpt_after is not None
+    assert int(v2_ckpt_after["is_good"]) == 0
+    assert rollback_change is not None
+
+    last_good = store.get_last_good_stage7_params_checkpoint()
+    assert last_good is not None
+    assert last_good.version == 1
+
+    payload = json.loads(str(rollback_change["change_json"]))
+    assert payload["outcome"] == "ROLLED_BACK"

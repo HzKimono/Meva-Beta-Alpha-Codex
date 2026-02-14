@@ -37,3 +37,20 @@ def test_bounds_enforced_and_weights_normalized_deterministically() -> None:
     assert bounded.turnover_cap_try == settings.notional_cap_try_per_cycle
     assert sum(bounded.score_weights.values()) == Decimal("1")
     assert bounded.score_weights["spread"] == Decimal("0")
+    assert bounded.score_weights["liquidity"] == Decimal("0.5")
+    assert bounded.score_weights["volatility"] == Decimal("0.5")
+
+
+def test_normalize_weights_zeroes_fallback_defaults() -> None:
+    normalized = ParamBounds.normalize_weights(
+        {
+            "liquidity": Decimal("0"),
+            "spread": Decimal("0"),
+            "volatility": Decimal("0"),
+        }
+    )
+    assert normalized == {
+        "liquidity": Decimal("0.5"),
+        "spread": Decimal("0.3"),
+        "volatility": Decimal("0.2"),
+    }

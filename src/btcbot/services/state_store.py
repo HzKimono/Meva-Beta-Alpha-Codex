@@ -2752,6 +2752,8 @@ class StateStore:
 
     def set_active_stage7_params(self, params: Stage7Params, change: ParamChange) -> None:
         with self.transaction() as conn:
+            params_json = json.dumps(params.to_dict(), sort_keys=True)
+            ts_iso = params.updated_at.isoformat()
             conn.execute(
                 """
                 INSERT INTO stage7_params_active(key, version, params_json, ts)
@@ -2763,11 +2765,18 @@ class StateStore:
                 """,
                 (
                     params.version,
-                    json.dumps(params.to_dict(), sort_keys=True),
-                    params.updated_at.isoformat(),
+                    params_json,
+                    ts_iso,
                 ),
             )
             self._record_stage7_param_change_with_conn(conn=conn, change=change)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO stage7_params_checkpoints(version, ts, params_json, is_good)
+                VALUES (?, ?, ?, 1)
+                """,
+                (params.version, ts_iso, params_json),
+            )
 
     def record_stage7_param_change(self, change: ParamChange) -> None:
         with self._connect() as conn:
@@ -2797,24 +2806,38 @@ class StateStore:
             ),
         )
 
-    def mark_checkpoint(self, version: int, is_good: bool) -> None:
+    def set_stage7_checkpoint_goodness(self, version: int, is_good: bool) -> None:
         with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT params_json, ts
-                FROM stage7_params_active
-                WHERE key = 'active' AND version = ?
-                """,
-                (version,),
-            ).fetchone()
-            if row is None:
-                return
             conn.execute(
                 """
-                INSERT OR REPLACE INTO stage7_params_checkpoints(version, ts, params_json, is_good)
-                VALUES (?, ?, ?, ?)
+                UPDATE stage7_params_checkpoints
+                SET is_good = ?
+                WHERE version = ?
                 """,
-                (version, str(row["ts"]), str(row["params_json"]), 1 if is_good else 0),
+                (1 if is_good else 0, version),
+            )
+
+    def update_stage7_cycle_adaptation_metadata(
+        self,
+        *,
+        cycle_id: str,
+        active_param_version: int,
+        param_change: ParamChange | None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE stage7_cycle_trace
+                SET active_param_version = ?, param_change_json = ?
+                WHERE cycle_id = ?
+                """,
+                (
+                    int(active_param_version),
+                    json.dumps(param_change.to_dict(), sort_keys=True)
+                    if param_change is not None
+                    else "{}",
+                    cycle_id,
+                ),
             )
 
     def get_last_good_stage7_params_checkpoint(self) -> Stage7Params | None:
