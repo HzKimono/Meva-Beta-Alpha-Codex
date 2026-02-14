@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from btcbot.domain.accounting import Position, TradeFill
+from btcbot.domain.adaptation_models import ParamChange, Stage7Params
 from btcbot.domain.intent import Intent
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType, ensure_utc
 from btcbot.domain.models import Order, OrderStatus, normalize_symbol
@@ -509,6 +510,52 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS idx_stage7_risk_decisions_decided_at "
             "ON stage7_risk_decisions(decided_at)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_params_active(
+                key TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                params_json TEXT NOT NULL,
+                ts TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_param_changes(
+                change_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                from_version INTEGER NOT NULL,
+                to_version INTEGER NOT NULL,
+                change_json TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                reason TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_params_checkpoints(
+                version INTEGER PRIMARY KEY,
+                ts TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                is_good INTEGER NOT NULL
+            )
+            """
+        )
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_cycle_trace)")
+        }
+        if "active_param_version" not in columns:
+            conn.execute(
+                "ALTER TABLE stage7_cycle_trace "
+                "ADD COLUMN active_param_version INTEGER NOT NULL DEFAULT 0"
+            )
+        if "param_change_json" not in columns:
+            conn.execute(
+                "ALTER TABLE stage7_cycle_trace "
+                "ADD COLUMN param_change_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def save_stage7_run_metrics(self, cycle_id: str, metrics_dict: dict[str, object]) -> None:
         with self._connect() as conn:
@@ -668,6 +715,8 @@ class StateStore:
         order_intents_trace: list[dict[str, object]] | None = None,
         risk_decision: Stage7RiskDecision | None = None,
         run_metrics: dict[str, object] | None = None,
+        active_param_version: int = 0,
+        param_change: ParamChange | None = None,
     ) -> None:
         with self.transaction() as conn:
             derived_trace = (
@@ -702,8 +751,9 @@ class StateStore:
                 INSERT INTO stage7_cycle_trace(
                     cycle_id, ts, selected_universe_json,
                     universe_scores_json, intents_summary_json,
-                    mode_json, order_decisions_json, portfolio_plan_json, order_intents_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mode_json, order_decisions_json, portfolio_plan_json, order_intents_json,
+                    active_param_version, param_change_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cycle_id) DO UPDATE SET
                     ts=excluded.ts,
                     selected_universe_json=excluded.selected_universe_json,
@@ -712,7 +762,9 @@ class StateStore:
                     mode_json=excluded.mode_json,
                     order_decisions_json=excluded.order_decisions_json,
                     portfolio_plan_json=excluded.portfolio_plan_json,
-                    order_intents_json=excluded.order_intents_json
+                    order_intents_json=excluded.order_intents_json,
+                    active_param_version=excluded.active_param_version,
+                    param_change_json=excluded.param_change_json
                 """,
                 (
                     cycle_id,
@@ -724,6 +776,8 @@ class StateStore:
                     json.dumps(order_decisions, sort_keys=True),
                     json.dumps(portfolio_plan, sort_keys=True),
                     json.dumps(trace_payload, sort_keys=True),
+                    int(active_param_version),
+                    json.dumps(param_change.to_dict(), sort_keys=True) if param_change else "{}",
                 ),
             )
             if order_intents:
@@ -2638,3 +2692,160 @@ class StateStore:
                 datetime.now(UTC).isoformat(),
             ),
         )
+
+    def get_active_stage7_params(self, *, settings: object, now_utc: datetime) -> Stage7Params:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT version, params_json FROM stage7_params_active WHERE key = 'active'"
+            ).fetchone()
+            if row is not None:
+                payload = json.loads(str(row["params_json"]))
+                return Stage7Params.from_dict(payload)
+
+            defaults = Stage7Params(
+                universe_size=int(settings.stage7_universe_size),
+                score_weights={
+                    key: Decimal(str(value))
+                    for key, value in (
+                        settings.stage7_score_weights
+                        or {
+                            "liquidity": 0.5,
+                            "spread": 0.3,
+                            "volatility": 0.2,
+                        }
+                    ).items()
+                },
+                order_offset_bps=int(Decimal(str(settings.stage7_order_offset_bps))),
+                turnover_cap_try=Decimal(str(settings.notional_cap_try_per_cycle)),
+                max_orders_per_cycle=int(settings.max_orders_per_cycle),
+                max_spread_bps=int(Decimal(str(settings.stage7_max_spread_bps))),
+                cash_target_try=Decimal(str(settings.try_cash_target)),
+                min_quote_volume_try=Decimal(str(settings.stage7_min_quote_volume_try)),
+                version=1,
+                updated_at=now_utc,
+            )
+            conn.execute(
+                """
+                INSERT INTO stage7_params_active(key, version, params_json, ts)
+                VALUES(?, ?, ?, ?)
+                """,
+                (
+                    "active",
+                    defaults.version,
+                    json.dumps(defaults.to_dict(), sort_keys=True),
+                    defaults.updated_at.isoformat(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO stage7_params_checkpoints(
+                    version, ts, params_json, is_good
+                ) VALUES (?, ?, ?, 1)
+                """,
+                (
+                    defaults.version,
+                    defaults.updated_at.isoformat(),
+                    json.dumps(defaults.to_dict(), sort_keys=True),
+                ),
+            )
+            return defaults
+
+    def set_active_stage7_params(self, params: Stage7Params, change: ParamChange) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage7_params_active(key, version, params_json, ts)
+                VALUES('active', ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    version=excluded.version,
+                    params_json=excluded.params_json,
+                    ts=excluded.ts
+                """,
+                (
+                    params.version,
+                    json.dumps(params.to_dict(), sort_keys=True),
+                    params.updated_at.isoformat(),
+                ),
+            )
+            self._record_stage7_param_change_with_conn(conn=conn, change=change)
+
+    def record_stage7_param_change(self, change: ParamChange) -> None:
+        with self._connect() as conn:
+            self._record_stage7_param_change_with_conn(conn=conn, change=change)
+
+    def _record_stage7_param_change_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        change: ParamChange,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO stage7_param_changes(
+                change_id, ts, from_version, to_version,
+                change_json, outcome, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                change.change_id,
+                ensure_utc(change.ts).isoformat(),
+                change.from_version,
+                change.to_version,
+                json.dumps(change.to_dict(), sort_keys=True),
+                change.outcome,
+                change.reason,
+            ),
+        )
+
+    def mark_checkpoint(self, version: int, is_good: bool) -> None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT params_json, ts
+                FROM stage7_params_active
+                WHERE key = 'active' AND version = ?
+                """,
+                (version,),
+            ).fetchone()
+            if row is None:
+                return
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO stage7_params_checkpoints(version, ts, params_json, is_good)
+                VALUES (?, ?, ?, ?)
+                """,
+                (version, str(row["ts"]), str(row["params_json"]), 1 if is_good else 0),
+            )
+
+    def get_last_good_stage7_params_checkpoint(self) -> Stage7Params | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT params_json
+                FROM stage7_params_checkpoints
+                WHERE is_good = 1
+                ORDER BY version DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        return Stage7Params.from_dict(json.loads(str(row["params_json"])))
+
+    def get_previous_good_stage7_params_checkpoint(
+        self, *, before_version: int
+    ) -> Stage7Params | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT params_json
+                FROM stage7_params_checkpoints
+                WHERE is_good = 1 AND version < ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (before_version,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Stage7Params.from_dict(json.loads(str(row["params_json"])))
