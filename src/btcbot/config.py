@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     stage7_loss_guardrail_mode: str = Field(
         default="reduce_risk_only", alias="STAGE7_LOSS_GUARDRAIL_MODE"
     )
+    stage7_sim_reject_prob_bps: Decimal = Field(
+        default=Decimal("0"), alias="STAGE7_SIM_REJECT_PROB_BPS"
+    )
 
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"

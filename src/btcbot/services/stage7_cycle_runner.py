@@ -14,6 +14,7 @@ from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.exposure_tracker import ExposureTracker
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.oms_service import OMSService, Stage7MarketSimulator
 from btcbot.services.order_builder_service import OrderBuilderService
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
@@ -160,7 +161,6 @@ class Stage7CycleRunner:
             )
             symbols_needed = sorted(
                 {normalize_symbol(symbol) for symbol in universe_result.selected_symbols}
-                | {normalize_symbol(action.symbol) for action in lifecycle_actions}
             )
             mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
             rules_symbols_fallback: set[str] = set()
@@ -234,6 +234,8 @@ class Stage7CycleRunner:
             actions: list[dict[str, object]] = []
             simulated_count = 0
             slippage_try = Decimal("0")
+            oms_orders = []
+            oms_events = []
 
             if final_mode != Mode.OBSERVE_ONLY:
                 filtered_actions: list[LifecycleAction] = []
@@ -277,30 +279,42 @@ class Stage7CycleRunner:
                         continue
                     filtered_actions.append(action)
 
-                simulated = ledger_service.simulate_dry_run_fills(
+                oms_service = OMSService()
+                planned_intents = [intent for intent in order_intents if not intent.skipped]
+                oms_orders, oms_events = oms_service.process_intents(
                     cycle_id=cycle_id,
-                    actions=filtered_actions,
-                    mark_prices=mark_prices,
-                    slippage_bps=settings.stage7_slippage_bps,
-                    fees_bps=settings.stage7_fees_bps,
-                    ts=now,
+                    now_utc=now,
+                    intents=planned_intents,
+                    market_sim=Stage7MarketSimulator(mark_prices),
+                    state_store=state_store,
+                    settings=settings,
+                    cancel_requests=[],
                 )
-                ingest = ledger_service.append_simulated_fills(simulated)
-                simulated_count = ingest.events_inserted
-                for fill in simulated:
-                    slippage_try += (
-                        fill.applied_price - fill.baseline_price
-                    ).copy_abs() * fill.event.qty
-                actions = [
-                    {
-                        "symbol": fill.event.symbol,
-                        "side": fill.event.side,
-                        "qty": str(fill.event.qty),
-                        "status": "submitted",
-                        "reason": "dry_run_fill_simulated",
-                    }
-                    for fill in simulated
-                ] + skipped_actions
+                simulated_count = len(oms_events)
+                actions = (
+                    [
+                        {
+                            "symbol": normalize_symbol(action.symbol),
+                            "side": action.side,
+                            "qty": str(action.qty),
+                            "status": "submitted",
+                            "reason": "dry_run_fill_simulated",
+                        }
+                        for action in filtered_actions
+                    ]
+                    + [
+                        {
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "qty": str(order.qty),
+                            "status": order.status.value,
+                            "reason": "dry_run_oms",
+                            "client_order_id": order.client_order_id,
+                        }
+                        for order in oms_orders
+                    ]
+                    + skipped_actions
+                )
             else:
                 actions = [{"status": "skipped", "reason": "observe_only"}]
 
@@ -332,6 +346,24 @@ class Stage7CycleRunner:
                     "order_intents_planned": planned_count,
                     "order_intents_skipped": skipped_count,
                     "rules_stats": rules_stats,
+                    "events_total": len(oms_events),
+                    "oms_summary": {
+                        "orders_total": len(oms_orders),
+                        "orders_submitted": sum(
+                            1 for o in oms_orders if o.status.value == "SUBMITTED"
+                        ),
+                        "orders_acked": sum(1 for o in oms_orders if o.status.value == "ACKED"),
+                        "orders_partially_filled": sum(
+                            1 for o in oms_orders if o.status.value == "PARTIALLY_FILLED"
+                        ),
+                        "orders_filled": sum(1 for o in oms_orders if o.status.value == "FILLED"),
+                        "orders_rejected": sum(
+                            1 for o in oms_orders if o.status.value == "REJECTED"
+                        ),
+                        "orders_canceled": sum(
+                            1 for o in oms_orders if o.status.value == "CANCELED"
+                        ),
+                    },
                 },
                 mode_payload=mode_payload,
                 order_decisions=actions,
