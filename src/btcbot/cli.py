@@ -913,11 +913,10 @@ def run_doctor(
         for action in report.actions:
             print(f"doctor: ACTION - {action}")
 
-    if not report.ok:
-        return 1
+    if report.ok:
+        print("doctor: OK")
 
-    print("doctor: OK")
-    return 0
+    return 0 if report.ok else 1
 
 
 if __name__ == "__main__":
