@@ -72,6 +72,34 @@ def test_state_store_init_is_idempotent(tmp_path) -> None:
     StateStore(db_path=db_path)
 
 
+def test_stage7_schema_init_twice_is_idempotent(tmp_path) -> None:
+    db_path = str(tmp_path / "state_stage7.db")
+    first = StateStore(db_path=db_path)
+    second = StateStore(db_path=db_path)
+
+    with first._connect() as conn:
+        names_first = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    with second._connect() as conn:
+        names_second = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+    required = {
+        "stage7_cycle_trace",
+        "stage7_ledger_metrics",
+        "stage7_run_metrics",
+        "stage7_param_changes",
+        "stage7_params_checkpoints",
+        "stage7_params_active",
+    }
+    assert required.issubset(names_first)
+    assert names_first == names_second
+
+
 def test_attach_action_metadata_persists_intent_identity(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     action_id = store.record_action("c1", "would_place_order", "hash-1")

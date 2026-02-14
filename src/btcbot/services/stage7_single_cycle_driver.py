@@ -67,7 +67,7 @@ class Stage7SingleCycleDriver:
                 run_id=f"bt-seed-{seed}",
                 stage4_result=0,
                 enable_adaptation=not disable_adaptation,
-                use_active_params=freeze_params,
+                use_active_params=True,
             )
 
             cycle_count += 1

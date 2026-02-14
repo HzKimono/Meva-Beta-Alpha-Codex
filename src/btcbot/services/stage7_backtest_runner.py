@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
 from btcbot.services.market_data_replay import MarketDataReplay
+from btcbot.services.parity import compute_run_fingerprint
 from btcbot.services.stage7_single_cycle_driver import (
     BacktestSummary as DriverBacktestSummary,
 )
@@ -21,6 +24,8 @@ class BacktestSummary:
     db_path: str
     started_at: str
     ended_at: str
+    param_changes: int = 0
+    params_checkpoints: int = 0
     final_fingerprint: str | None = None
 
 
@@ -47,4 +52,29 @@ class Stage7BacktestRunner:
             disable_adaptation=disable_adaptation,
             pair_info_snapshot=pair_info_snapshot,
         )
-        return BacktestSummary(**summary.__dict__)
+        param_changes, params_checkpoints = _read_adaptation_counts(out_db_path)
+        final_fingerprint = compute_run_fingerprint(
+            out_db_path,
+            datetime.fromisoformat(summary.started_at),
+            datetime.fromisoformat(summary.ended_at),
+            include_adaptation=not disable_adaptation,
+        )
+        return BacktestSummary(
+            cycles_run=summary.cycles_run,
+            seed=summary.seed,
+            db_path=summary.db_path,
+            started_at=summary.started_at,
+            ended_at=summary.ended_at,
+            param_changes=param_changes,
+            params_checkpoints=params_checkpoints,
+            final_fingerprint=final_fingerprint,
+        )
+
+
+def _read_adaptation_counts(db_path: Path) -> tuple[int, int]:
+    with sqlite3.connect(str(db_path)) as conn:
+        param_changes = int(conn.execute("SELECT COUNT(*) FROM stage7_param_changes").fetchone()[0])
+        checkpoints = int(
+            conn.execute("SELECT COUNT(*) FROM stage7_params_checkpoints").fetchone()[0]
+        )
+    return param_changes, checkpoints

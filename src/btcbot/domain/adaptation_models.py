@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal, cast
 
 
 @dataclass(frozen=True)
@@ -35,11 +36,16 @@ class Stage7Params:
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> Stage7Params:
+        score_weights_raw = payload.get("score_weights")
+        score_weights_map: Mapping[object, object]
+        if isinstance(score_weights_raw, Mapping):
+            score_weights_map = score_weights_raw
+        else:
+            score_weights_map = {}
         return cls(
             universe_size=int(payload["universe_size"]),
             score_weights={
-                str(key): Decimal(str(value))
-                for key, value in dict(payload.get("score_weights") or {}).items()
+                str(key): Decimal(str(value)) for key, value in score_weights_map.items()
             },
             order_offset_bps=int(payload["order_offset_bps"]),
             turnover_cap_try=Decimal(str(payload["turnover_cap_try"])),
@@ -79,6 +85,27 @@ class ParamChange:
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> ParamChange:
+        changes_raw = payload.get("changes")
+        changes_map: Mapping[object, object]
+        if isinstance(changes_raw, Mapping):
+            changes_map = changes_raw
+        else:
+            changes_map = {}
+
+        metrics_raw = payload.get("metrics_window")
+        metrics_map: Mapping[object, object]
+        if isinstance(metrics_raw, Mapping):
+            metrics_map = metrics_raw
+        else:
+            metrics_map = {}
+
+        notes_raw = payload.get("notes")
+        notes_list: list[Any]
+        if isinstance(notes_raw, list):
+            notes_list = notes_raw
+        else:
+            notes_list = []
+
         return cls(
             change_id=str(payload["change_id"]),
             ts=datetime.fromisoformat(str(payload["ts"])),
@@ -86,13 +113,14 @@ class ParamChange:
             to_version=int(payload["to_version"]),
             changes={
                 str(field): {str(k): str(v) for k, v in values.items()}
-                for field, values in dict(payload.get("changes") or {}).items()
+                for field, values in changes_map.items()
+                if isinstance(values, Mapping)
             },
             reason=str(payload["reason"]),
-            metrics_window={
-                str(key): str(value)
-                for key, value in dict(payload.get("metrics_window") or {}).items()
-            },
-            outcome=str(payload["outcome"]),
-            notes=[str(item) for item in list(payload.get("notes") or [])],
+            metrics_window={str(key): str(value) for key, value in metrics_map.items()},
+            outcome=cast(
+                Literal["APPLIED", "REJECTED", "ROLLED_BACK"],
+                str(payload["outcome"]),
+            ),
+            notes=[str(item) for item in notes_list],
         )

@@ -105,8 +105,7 @@ def test_seed_apply_and_rollback_marking(tmp_path) -> None:
     rejected = svc.evaluate_and_apply(
         state_store=store, settings=settings, now_utc=now + timedelta(seconds=10)
     )
-    assert rejected is not None
-    assert rejected.outcome == "REJECTED"
+    assert rejected is None
 
     store.save_stage7_run_metrics("cy", _metric("2024-01-01T00:01:01+00:00", drawdown=True))
     rolled = svc.evaluate_and_apply(
@@ -144,3 +143,58 @@ def test_seed_apply_and_rollback_marking(tmp_path) -> None:
 
     payload = json.loads(str(rollback_change["change_json"]))
     assert payload["outcome"] == "ROLLED_BACK"
+
+
+def test_idempotent_adaptation_does_not_repeat_same_change(tmp_path) -> None:
+    db = tmp_path / "adapt_idem.db"
+    store = StateStore(str(db))
+    settings = Settings(
+        STATE_DB_PATH=str(db),
+        STAGE7_ENABLED=True,
+        DRY_RUN=True,
+        STAGE7_UNIVERSE_SIZE=50,
+        NOTIONAL_CAP_TRY_PER_CYCLE="1000",
+    )
+    svc = AdaptationService()
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+
+    store.get_active_stage7_params(settings=settings, now_utc=now)
+    for i in range(3):
+        store.save_stage7_run_metrics(
+            f"c{i}",
+            _metric(
+                f"2024-01-01T00:00:0{i}+00:00",
+                throttled=False,
+                reject=False,
+                drawdown=False,
+            )
+            | {"quality_flags": {"missing_mark_price": True}},
+        )
+
+    first = svc.evaluate_and_apply(state_store=store, settings=settings, now_utc=now)
+    assert first is not None
+    assert first.outcome == "APPLIED"
+
+    for i in range(3, 6):
+        store.save_stage7_run_metrics(
+            f"c{i}",
+            _metric(
+                f"2024-01-01T00:00:{i:02d}+00:00",
+                throttled=False,
+                reject=False,
+                drawdown=False,
+            ),
+        )
+
+    second = svc.evaluate_and_apply(
+        state_store=store,
+        settings=settings,
+        now_utc=now + timedelta(seconds=60),
+    )
+    assert second is None
+
+    with sqlite3.connect(str(db)) as conn:
+        applied_count = conn.execute(
+            "SELECT COUNT(*) FROM stage7_param_changes WHERE outcome='APPLIED'"
+        ).fetchone()[0]
+    assert int(applied_count) == 1

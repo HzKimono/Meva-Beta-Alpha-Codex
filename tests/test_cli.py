@@ -866,3 +866,65 @@ def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> No
     assert cli.main() == 0
     assert captured["data_path"] == "./data"
     assert captured["out_db"] == "./out.db"
+
+
+def test_main_stage7_backtest_passes_include_adaptation(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "Settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+
+    def _fake_run_stage7_backtest(settings, **kwargs):
+        del settings
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_stage7_backtest", _fake_run_stage7_backtest)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "btcbot",
+            "stage7-backtest",
+            "--dataset",
+            "./data",
+            "--out",
+            "./out.db",
+            "--start",
+            "2024-01-01T00:00:00Z",
+            "--end",
+            "2024-01-01T01:00:00Z",
+            "--include-adaptation",
+        ],
+    )
+
+    assert cli.main() == 0
+    assert captured["include_adaptation"] is True
+
+
+def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "Settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+
+    def _fake_run_cycle_stage7(settings, **kwargs):
+        del settings
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_cycle_stage7", _fake_run_cycle_stage7)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["btcbot", "stage7-run", "--dry-run", "--include-adaptation"],
+    )
+
+    assert cli.main() == 0
+    assert captured["include_adaptation"] is True

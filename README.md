@@ -146,6 +146,28 @@ To arm Stage 4 live writes, all of the following must be set:
 
 Canary recommendation: keep low limits (`MAX_OPEN_ORDERS`, `MAX_POSITION_NOTIONAL_TRY`) and start in dry-run first.
 
+## Stage 7 backtest/parity quick checks
+
+```powershell
+python -m btcbot.cli stage7-backtest --dataset .\data --out .\backtest.db --start 2024-01-01T00:00:00Z --end 2024-01-01T01:00:00Z --step-seconds 60 --seed 123 --include-adaptation
+python -m btcbot.cli stage7-parity --out-a .\run_a.db --out-b .\run_b.db --start 2024-01-01T00:00:00Z --end 2024-01-01T01:00:00Z --include-adaptation
+python -m btcbot.cli doctor --db .\backtest.db --dataset .\data
+```
+
+`stage7-run` requires `STAGE7_ENABLED=true` and `--dry-run`; no live trading side effects are introduced.
+
+SQLite inspection (PowerShell-friendly; avoids bash heredoc syntax):
+
+```powershell
+@'
+import sqlite3
+conn = sqlite3.connect(r".\backtest.db")
+for table in ("stage7_cycle_trace", "stage7_param_changes", "stage7_params_checkpoints"):
+    print(table, conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+conn.close()
+'@ | python
+```
+
 ## Changelog
 
 - ✅ Stage 3 acceptance achieved: strategy/risk/accounting pipeline integrated, deterministic safety gates enforced, and CI quality gates green.
