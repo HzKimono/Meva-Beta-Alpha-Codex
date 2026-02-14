@@ -412,7 +412,8 @@ python -m btcbot.cli stage7-backtest \
   --start 2024-01-01T00:00:00Z \
   --end 2024-01-01T01:00:00Z \
   --step-seconds 60 \
-  --seed 123
+  --seed 123 \
+  --include-adaptation
 ```
 
 Compare two runs (aliases `--out-a/--out-b` also supported):
@@ -421,8 +422,13 @@ python -m btcbot.cli stage7-parity \
   --out-a ./run_a.db \
   --out-b ./run_b.db \
   --start 2024-01-01T00:00:00Z \
-  --end 2024-01-01T01:00:00Z
+  --end 2024-01-01T01:00:00Z \
+  --include-adaptation
 ```
+
+`--include-adaptation` semantics differ by command:
+- `stage7-backtest` / `stage7-run`: enables adaptation evaluation and persistence during cycle execution.
+- `stage7-parity`: includes adaptation metadata in the fingerprint only; it does not execute adaptation logic.
 
 Export backtest rows (`stage7-backtest-report` is a compatibility alias):
 ```bash
@@ -441,6 +447,32 @@ python -m btcbot.cli stage7-parity --out-a .\run_a.db --out-b .\run_b.db --start
 python -m btcbot.cli stage7-backtest-report --db .\backtest.db --last 100 --format jsonl --out .\out.jsonl
 python -m btcbot.cli stage7-backtest-report --db .\backtest.db --last 100 --format csv --out .\out.csv
 python -m btcbot.cli stage7-db-count --db .\backtest.db
+python -m btcbot.cli doctor --db .\backtest.db --dataset .\data
+```
+
+### SQLite inspection (PowerShell-friendly)
+Use here-string piping instead of bash heredoc:
+
+```powershell
+@'
+import sqlite3
+conn = sqlite3.connect(r".\backtest.db")
+for table in ("stage7_cycle_trace", "stage7_param_changes", "stage7_params_checkpoints"):
+    count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    print(f"{table}: {count}")
+conn.close()
+'@ | python
+```
+
+```powershell
+@'
+import sqlite3
+conn = sqlite3.connect(r".\backtest.db")
+rows = conn.execute("SELECT cycle_id, active_param_version, param_change_json FROM stage7_cycle_trace ORDER BY ts DESC LIMIT 5").fetchall()
+for row in rows:
+    print(row)
+conn.close()
+'@ | python
 ```
 
 ### Fingerprint mismatches

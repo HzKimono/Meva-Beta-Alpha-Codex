@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -111,6 +112,8 @@ def test_stage7_db_count_reports_existing_and_missing_tables(capsys, tmp_path: P
     assert "stage7_ledger_metrics: 0" in lines
     assert "stage7_run_metrics: 1" in lines
     assert "stage7_param_changes: 0" in lines
+    assert "stage7_params_checkpoints: 0" in lines
+    assert "stage7_params_active: 0" in lines
 
 
 def test_main_stage7_backtest_report_alias(monkeypatch, tmp_path: Path) -> None:
@@ -174,3 +177,31 @@ def test_stage7_parity_invalid_quantize_returns_code_2(capsys) -> None:
 
     assert code == 2
     assert "--quantize-try must be a decimal" in capsys.readouterr().out
+
+
+def test_stage7_doctor_reports_missing_dataset(capsys) -> None:
+    settings = Settings()
+    code = cli.run_doctor(settings, db_path=None, dataset_path="./does-not-exist")
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "dataset path does not exist" in out
+
+
+def test_stage7_parity_missing_tables_does_not_crash(tmp_path: Path, capsys) -> None:
+    db_a = tmp_path / "a.db"
+    db_b = tmp_path / "b.db"
+    with sqlite3.connect(db_a) as conn:
+        conn.execute("CREATE TABLE unrelated_a (id INTEGER PRIMARY KEY)")
+    with sqlite3.connect(db_b) as conn:
+        conn.execute("CREATE TABLE unrelated_b (id INTEGER PRIMARY KEY)")
+
+    code = cli.run_stage7_parity(
+        db_a=str(db_a),
+        db_b=str(db_b),
+        start="2024-01-01T00:00:00Z",
+        end="2024-01-01T01:00:00Z",
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "missing Stage7 parity tables" in out

@@ -579,6 +579,38 @@ class Stage7CycleRunner:
                 param_change = adaptation_service.evaluate_and_apply(
                     state_store=state_store, settings=runtime, now_utc=now
                 )
+                eligible = param_change is not None
+                eval_reason = "no_metrics"
+                num_changes = 0
+                if param_change is not None:
+                    eval_reason = param_change.reason
+                    num_changes = len(param_change.changes)
+                logger.info(
+                    "stage7_adaptation_eval",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "eligible": eligible,
+                            "reason": eval_reason,
+                            "num_changes": num_changes,
+                        }
+                    },
+                )
+                if param_change is not None:
+                    for key, values in param_change.changes.items():
+                        logger.info(
+                            "stage7_param_change_applied",
+                            extra={
+                                "extra": {
+                                    "cycle_id": cycle_id,
+                                    "key": key,
+                                    "old": values.get("old"),
+                                    "new": values.get("new"),
+                                    "reason": param_change.reason,
+                                    "bounds": "applied",
+                                }
+                            },
+                        )
                 active_after_eval = state_store.get_active_stage7_params(
                     settings=runtime,
                     now_utc=now,

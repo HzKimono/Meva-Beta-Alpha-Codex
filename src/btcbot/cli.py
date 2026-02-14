@@ -25,7 +25,11 @@ from btcbot.services.exchange_factory import build_exchange_stage3
 from btcbot.services.execution_service import ExecutionService
 from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.market_data_service import MarketDataService
-from btcbot.services.parity import compare_fingerprints, compute_run_fingerprint
+from btcbot.services.parity import (
+    compare_fingerprints,
+    compute_run_fingerprint,
+    find_missing_stage7_parity_tables,
+)
 from btcbot.services.portfolio_service import PortfolioService
 from btcbot.services.risk_service import RiskService
 from btcbot.services.stage4_cycle_runner import (
@@ -70,6 +74,12 @@ def main() -> int:
 
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
     stage7_run_parser.add_argument("--dry-run", action="store_true", help="Required for stage7")
+    stage7_run_parser.add_argument(
+        "--include-adaptation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable adaptation evaluation and parameter persistence during this cycle",
+    )
 
     subparsers.add_parser("health", help="Check exchange connectivity")
 
@@ -109,6 +119,14 @@ def main() -> int:
         default=None,
         help="Optional JSON file with exchange pair metadata for replay parity",
     )
+    backtest_parser.add_argument(
+        "--include-adaptation",
+        action="store_true",
+        help=(
+            "Enable adaptation evaluation/persistence during backtest cycles. "
+            "By default backtests freeze params and disable adaptation."
+        ),
+    )
 
     parity_parser = subparsers.add_parser("stage7-parity", help="Compare two Stage 7 run DBs")
     parity_parser.add_argument("--db-a", "--out-a", dest="db_a", required=True)
@@ -124,7 +142,18 @@ def main() -> int:
     parity_parser.add_argument(
         "--include-adaptation",
         action="store_true",
-        help="Include active parameter/adaptation metadata in parity fingerprint",
+        help=(
+            "Include adaptation metadata tables/columns in parity fingerprint only "
+            "(does not run adaptation)."
+        ),
+    )
+
+    doctor_parser = subparsers.add_parser("doctor", help="Validate local config, env, and DB")
+    doctor_parser.add_argument("--db", default=None, help="Optional sqlite DB path to validate")
+    doctor_parser.add_argument(
+        "--dataset",
+        default=None,
+        help="Optional replay dataset folder path to validate for backtests",
     )
 
     backtest_export = subparsers.add_parser(
@@ -154,7 +183,11 @@ def main() -> int:
         return run_cycle_stage4(settings, force_dry_run=args.dry_run)
 
     if args.command == "stage7-run":
-        return run_cycle_stage7(settings, force_dry_run=args.dry_run)
+        return run_cycle_stage7(
+            settings,
+            force_dry_run=args.dry_run,
+            include_adaptation=args.include_adaptation,
+        )
 
     if args.command == "health":
         return run_health(settings)
@@ -181,6 +214,7 @@ def main() -> int:
             seed=args.seed,
             cycles=args.cycles,
             pair_info_json=args.pair_info_json,
+            include_adaptation=args.include_adaptation,
         )
 
     if args.command == "stage7-parity":
@@ -205,6 +239,9 @@ def main() -> int:
 
     if args.command == "stage7-db-count":
         return run_stage7_db_count(db_path=args.db)
+
+    if args.command == "doctor":
+        return run_doctor(settings=settings, db_path=args.db, dataset_path=args.dataset)
 
     return 1
 
@@ -388,7 +425,11 @@ def run_cycle_stage4(settings: Settings, force_dry_run: bool = False) -> int:
         return 1
 
 
-def run_cycle_stage7(settings: Settings, force_dry_run: bool = False) -> int:
+def run_cycle_stage7(
+    settings: Settings,
+    force_dry_run: bool = False,
+    include_adaptation: bool = True,
+) -> int:
     dry_run = force_dry_run or settings.dry_run
     if not dry_run:
         print("stage7-run requires --dry-run")
@@ -400,7 +441,10 @@ def run_cycle_stage7(settings: Settings, force_dry_run: bool = False) -> int:
     runner = Stage7CycleRunner()
     effective_settings = settings.model_copy(update={"dry_run": True})
     try:
-        return runner.run_one_cycle(effective_settings)
+        return runner.run_one_cycle(
+            effective_settings,
+            enable_adaptation=include_adaptation,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Stage 7 cycle failed",
@@ -531,6 +575,7 @@ def run_stage7_backtest(
     seed: int,
     cycles: int | None,
     pair_info_json: str | None,
+    include_adaptation: bool,
 ) -> int:
     replay = MarketDataReplay.from_folder(
         data_path=Path(data_path),
@@ -552,8 +597,8 @@ def run_stage7_backtest(
         cycles=cycles,
         out_db_path=Path(out_db),
         seed=seed,
-        freeze_params=True,
-        disable_adaptation=True,
+        freeze_params=not include_adaptation,
+        disable_adaptation=not include_adaptation,
         pair_info_snapshot=pair_info_snapshot,
     )
     print(json.dumps(summary.__dict__, sort_keys=True))
@@ -584,6 +629,19 @@ def run_stage7_parity(
     except ValueError as exc:
         print(str(exc))
         return 2
+    missing_a = find_missing_stage7_parity_tables(db_a)
+    missing_b = find_missing_stage7_parity_tables(db_b)
+    if missing_a or missing_b:
+        hint = (
+            "One or both DBs are missing Stage7 parity tables. "
+            "Generate DBs with stage7-backtest to compare full parity."
+        )
+        print(hint)
+        if missing_a:
+            print(f"db_a missing tables: {', '.join(missing_a)}")
+        if missing_b:
+            print(f"db_b missing tables: {', '.join(missing_b)}")
+
     f1 = compute_run_fingerprint(
         db_a,
         start_dt,
@@ -665,6 +723,8 @@ def run_stage7_db_count(*, db_path: str) -> int:
         "stage7_ledger_metrics",
         "stage7_run_metrics",
         "stage7_param_changes",
+        "stage7_params_checkpoints",
+        "stage7_params_active",
     ]
 
     with sqlite3.connect(db_path) as connection:
@@ -679,6 +739,41 @@ def run_stage7_db_count(*, db_path: str) -> int:
                 continue
             count = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
             print(f"{table_name}: {count}")
+    return 0
+
+
+def run_doctor(settings: Settings, *, db_path: str | None, dataset_path: str | None) -> int:
+    failures: list[str] = []
+
+    if not settings.dry_run and settings.live_trading:
+        if settings.btcturk_api_key is None:
+            failures.append("missing BTCTURK_API_KEY for live mode")
+        if settings.btcturk_api_secret is None:
+            failures.append("missing BTCTURK_API_SECRET for live mode")
+        if not settings.is_live_trading_enabled():
+            failures.append("LIVE_TRADING=true but LIVE_TRADING_ACK is not set correctly")
+
+    if dataset_path is not None and not Path(dataset_path).exists():
+        failures.append(f"dataset path does not exist: {dataset_path}")
+
+    if db_path is not None:
+        db_file = Path(db_path)
+        if not db_file.exists():
+            failures.append(f"db path does not exist: {db_path}")
+        else:
+            with sqlite3.connect(str(db_file)) as conn:
+                has_schema_version = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+                ).fetchone()
+                if has_schema_version is None:
+                    failures.append("schema_version table missing")
+
+    if failures:
+        for message in failures:
+            print(f"doctor: FAIL - {message}")
+        return 1
+
+    print("doctor: OK")
     return 0
 
 
