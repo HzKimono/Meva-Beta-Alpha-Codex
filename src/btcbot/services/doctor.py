@@ -20,6 +20,7 @@ class DoctorCheck:
     def __post_init__(self) -> None:
         normalized = self.status.strip().lower()
         status_map = {
+            "ok": "pass",
             "warning": "warn",
             "error": "fail",
         }
