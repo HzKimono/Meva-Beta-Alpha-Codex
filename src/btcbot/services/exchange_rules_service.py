@@ -146,14 +146,10 @@ class ExchangeRulesService:
                 if filter_type in {"LOT_SIZE", "MARKET_LOT_SIZE", "QUANTITY_FILTER"}:
                     lot_size = lot_size or _to_decimal(raw_filter.get("stepSize"))
                     min_qty = (
-                        min_qty
-                        if min_qty is not None
-                        else _to_decimal(raw_filter.get("minQty"))
+                        min_qty if min_qty is not None else _to_decimal(raw_filter.get("minQty"))
                     )
                     max_qty = (
-                        max_qty
-                        if max_qty is not None
-                        else _to_decimal(raw_filter.get("maxQty"))
+                        max_qty if max_qty is not None else _to_decimal(raw_filter.get("maxQty"))
                     )
 
         numerator_scale = _read_field(pair, "numerator_scale", "numeratorScale")

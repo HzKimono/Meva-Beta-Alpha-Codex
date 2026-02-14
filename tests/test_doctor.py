@@ -121,8 +121,7 @@ def test_doctor_exchange_rules_check_passes_with_usable_rules(patch_doctor_excha
     report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
 
     assert any(
-        check.category == "exchange_rules" and check.status == "pass"
-        for check in report.checks
+        check.category == "exchange_rules" and check.status == "pass" for check in report.checks
     )
 
 
