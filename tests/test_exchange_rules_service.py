@@ -138,3 +138,66 @@ def test_validate_notional_price_non_positive() -> None:
 
     assert ok is False
     assert reason == "price_non_positive"
+
+
+class DictFiltersExchangeClient:
+    def __init__(self) -> None:
+        self.exchange_info_calls = 0
+
+    def get_exchange_info(self) -> list[dict[str, object]]:
+        self.exchange_info_calls += 1
+        return [
+            {
+                "name": "BTCTRY",
+                "nameNormalized": "BTC_TRY",
+                "status": "TRADING",
+                "numeratorScale": 8,
+                "denominatorScale": 0,
+                "filters": [
+                    {
+                        "filterType": "PRICE_FILTER",
+                        "tickSize": "1",
+                        "minExchangeValue": "99.91",
+                    }
+                ],
+            },
+            {
+                "name": "ETHTRY",
+                "nameNormalized": "ETH_TRY",
+                "status": "TRADING",
+                "numeratorScale": 6,
+                "denominatorScale": 2,
+                "filters": [
+                    {
+                        "filterType": "PRICE_FILTER",
+                        "tickSize": "0.1",
+                        "minExchangeValue": "99.91",
+                    }
+                ],
+            },
+        ]
+
+
+def test_dict_payload_filters_are_parsed_and_lot_size_derived() -> None:
+    service = ExchangeRulesService(DictFiltersExchangeClient())
+
+    rules, status = service.get_symbol_rules_status("ETHTRY")
+
+    assert status == "ok"
+    assert rules is not None
+    assert rules.tick_size == Decimal("0.1")
+    assert rules.min_notional_try == Decimal("99.91")
+    assert rules.lot_size == Decimal("0.000001")
+    assert rules.price_precision == 2
+    assert rules.qty_precision == 6
+
+
+def test_dict_payload_aliasing_uses_same_cached_rules() -> None:
+    exchange = DictFiltersExchangeClient()
+    service = ExchangeRulesService(exchange)
+
+    a = service.get_rules("BTC_TRY")
+    b = service.get_rules("BTCTRY")
+
+    assert a == b
+    assert exchange.exchange_info_calls == 1

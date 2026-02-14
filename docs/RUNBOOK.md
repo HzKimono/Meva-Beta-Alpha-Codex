@@ -7,7 +7,7 @@ pytest -q
 ```
 
 ## 2) Doctor workflow
-Doctor validates paths, safety gates, and replay/backtest readiness.
+Doctor validates paths, safety gates, exchange rules usability for configured `SYMBOLS`, and replay/backtest readiness.
 
 - If `--dataset` is omitted: doctor reports **OK** and states dataset is optional.
 - If `--dataset` is provided and invalid: doctor reports **FAIL** and prints explicit ACTION lines.
@@ -20,6 +20,8 @@ python -m btcbot.cli doctor --db .\btcbot_state.db --json
 
 ## 3) Replay dataset options
 ### Option A: Initialize deterministic synthetic dataset
+Dataset bootstrap command: `python -m btcbot.cli replay-init --dataset .\data\replay --seed 123`.
+
 ```powershell
 python -m btcbot.cli replay-init --dataset .\data\replay --seed 123
 ```
