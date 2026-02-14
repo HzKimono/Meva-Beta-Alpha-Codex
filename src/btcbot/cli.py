@@ -21,6 +21,7 @@ from btcbot.domain.models import normalize_symbol
 from btcbot.logging_utils import setup_logging
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
 from btcbot.risk.policy import RiskPolicy
+from btcbot.services.doctor import run_health_checks
 from btcbot.services.exchange_factory import build_exchange_stage3
 from btcbot.services.execution_service import ExecutionService
 from btcbot.services.market_data_replay import MarketDataReplay
@@ -745,34 +746,18 @@ def run_stage7_db_count(*, db_path: str) -> int:
 
 
 def run_doctor(settings: Settings, *, db_path: str | None, dataset_path: str | None) -> int:
-    failures: list[str] = []
+    report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)
 
-    if not settings.dry_run and settings.live_trading:
-        if settings.btcturk_api_key is None:
-            failures.append("missing BTCTURK_API_KEY for live mode")
-        if settings.btcturk_api_secret is None:
-            failures.append("missing BTCTURK_API_SECRET for live mode")
-        if not settings.is_live_trading_enabled():
-            failures.append("LIVE_TRADING=true but LIVE_TRADING_ACK is not set correctly")
+    for message in report.warnings:
+        print(f"doctor: WARN - {message}")
+    for message in report.errors:
+        print(f"doctor: FAIL - {message}")
 
-    if dataset_path is not None and not Path(dataset_path).exists():
-        failures.append(f"dataset path does not exist: {dataset_path}")
-
-    if db_path is not None:
-        db_file = Path(db_path)
-        if not db_file.exists():
-            failures.append(f"db path does not exist: {db_path}")
-        else:
-            with sqlite3.connect(str(db_file)) as conn:
-                has_schema_version = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
-                ).fetchone()
-                if has_schema_version is None:
-                    failures.append("schema_version table missing")
-
-    if failures:
-        for message in failures:
-            print(f"doctor: FAIL - {message}")
+    if not report.ok:
+        print(
+            "doctor: ACTION - resolve FAIL items, then re-run `python -m btcbot.cli doctor` "
+            "before stage7-run/backtest"
+        )
         return 1
 
     print("doctor: OK")
