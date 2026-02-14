@@ -282,16 +282,26 @@ class Stage7CycleRunner:
                     filtered_actions.append(action)
 
                 oms_service = OMSService()
+                market_simulator = Stage7MarketSimulator(mark_prices)
+                reconciled_orders, reconciled_events = oms_service.reconcile_open_orders(
+                    cycle_id=cycle_id,
+                    now_utc=now,
+                    state_store=state_store,
+                    settings=settings,
+                    market_sim=market_simulator,
+                )
                 planned_intents = [intent for intent in order_intents if not intent.skipped]
                 oms_orders, oms_events = oms_service.process_intents(
                     cycle_id=cycle_id,
                     now_utc=now,
                     intents=planned_intents,
-                    market_sim=Stage7MarketSimulator(mark_prices),
+                    market_sim=market_simulator,
                     state_store=state_store,
                     settings=settings,
                     cancel_requests=[],
                 )
+                oms_orders = [*reconciled_orders, *oms_orders]
+                oms_events = [*reconciled_events, *oms_events]
                 simulated_count = len(oms_events)
                 actions = (
                     [
