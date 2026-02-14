@@ -7,7 +7,46 @@ import pytest
 
 from btcbot import cli
 from btcbot.config import Settings
-from btcbot.services.doctor import run_health_checks
+from btcbot.services.doctor import DoctorCheck, DoctorReport, run_health_checks
+
+
+def test_doctor_report_ok_true_when_all_checks_pass() -> None:
+    report = DoctorReport(
+        checks=[DoctorCheck("gates", "coherence", "pass", "ok")],
+        errors=["legacy error list should not affect ok"],
+        warnings=[],
+        actions=[],
+    )
+
+    assert report.ok
+
+
+def test_doctor_report_ok_true_when_warn_present() -> None:
+    report = DoctorReport(
+        checks=[
+            DoctorCheck("gates", "coherence", "pass", "ok"),
+            DoctorCheck("paths", "db", "warn", "warning only"),
+        ],
+        errors=[],
+        warnings=["warning only"],
+        actions=[],
+    )
+
+    assert report.ok
+
+
+def test_doctor_report_ok_false_when_any_check_fails() -> None:
+    report = DoctorReport(
+        checks=[
+            DoctorCheck("gates", "coherence", "pass", "ok"),
+            DoctorCheck("exchange_rules", "symbols", "fail", "broken"),
+        ],
+        errors=[],
+        warnings=[],
+        actions=[],
+    )
+
+    assert not report.ok
 
 
 def test_doctor_accepts_creatable_db_path(tmp_path: Path) -> None:
