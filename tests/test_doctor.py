@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,11 @@ import pytest
 from btcbot import cli
 from btcbot.config import Settings
 from btcbot.services.doctor import DoctorCheck, DoctorReport, run_health_checks
+
+
+def _debug_checks(report: DoctorReport) -> None:
+    rendered = [f"{check.category}/{check.name}:{check.status}" for check in report.checks]
+    print(f"doctor checks => {rendered}", file=sys.stderr)
 
 
 def test_doctor_report_ok_true_when_all_checks_pass() -> None:
@@ -56,6 +62,7 @@ def test_doctor_accepts_creatable_db_path(tmp_path: Path) -> None:
         dataset_path=None,
     )
 
+    _debug_checks(report)
     assert report.ok
     assert any("schema_version table missing" in warning for warning in report.warnings)
 
@@ -66,6 +73,7 @@ def test_doctor_fails_when_dataset_is_file(tmp_path: Path) -> None:
 
     report = run_health_checks(Settings(), db_path=None, dataset_path=str(dataset_file))
 
+    _debug_checks(report)
     assert not report.ok
     assert any("dataset path is not a directory" in error for error in report.errors)
 
@@ -109,10 +117,12 @@ def test_doctor_missing_dataset_fail_actions(capsys) -> None:
 def test_doctor_detects_stage7_gate_conflicts() -> None:
     settings = Settings(STAGE7_ENABLED=True, DRY_RUN=True, LIVE_TRADING=False)
     report = run_health_checks(settings, db_path=None, dataset_path=None)
+    _debug_checks(report)
     assert report.ok
 
     unsafe = Settings(STAGE7_ENABLED=False, DRY_RUN=True, LIVE_TRADING=True)
     unsafe_report = run_health_checks(unsafe, db_path=None, dataset_path=None)
+    _debug_checks(unsafe_report)
     assert not unsafe_report.ok
     assert any("LIVE_TRADING=true" in error for error in unsafe_report.errors)
 
@@ -159,6 +169,7 @@ def test_doctor_exchange_rules_check_passes_with_usable_rules(patch_doctor_excha
     )
     report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
 
+    _debug_checks(report)
     assert any(
         check.category == "exchange_rules" and check.status == "pass" for check in report.checks
     )
@@ -178,6 +189,7 @@ def test_doctor_exchange_rules_check_fails_for_invalid_rules(patch_doctor_exchan
     )
     report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
 
+    _debug_checks(report)
     assert not report.ok
     assert any("exchange rules unusable" in error for error in report.errors)
     assert any("exchangeinfo schema" in action.lower() for action in report.actions)

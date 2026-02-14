@@ -116,7 +116,15 @@ def run_health_checks(
             DoctorCheck("paths", "db_path", "warn", "db path not provided; skipping db write test")
         )
 
-    return DoctorReport(checks=checks, errors=errors, warnings=warnings, actions=actions)
+    report = DoctorReport(checks=checks, errors=errors, warnings=warnings, actions=actions)
+    derived_ok = all(check.status != "fail" for check in report.checks)
+    if report.ok != derived_ok:
+        summary = ", ".join(
+            f"{check.category}/{check.name}:{check.status}" for check in report.checks
+        )
+        raise RuntimeError(f"doctor report ok invariant violated: {summary}")
+
+    return report
 
 
 def _check_exchange_rules(
