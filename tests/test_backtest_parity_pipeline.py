@@ -7,6 +7,7 @@ from btcbot.config import Settings
 from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.parity import compute_run_fingerprint
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
+from btcbot.services.stage7_single_cycle_driver import Stage7SingleCycleDriver
 
 
 def _write_csv(path: Path, header: str, rows: list[str]) -> None:
@@ -46,7 +47,7 @@ def _dataset(root: Path) -> None:
 
 
 def _run_single_step_driver(settings: Settings, replay: MarketDataReplay, out_db: Path) -> None:
-    runner = Stage7BacktestRunner()
+    runner = Stage7SingleCycleDriver()
     runner.run(
         settings=settings,
         replay=replay,

@@ -181,6 +181,8 @@ def _parse_ts(raw: str, *, path: Path) -> datetime:
         token = token[:-1] + "+00:00"
     try:
         if token.isdigit():
+            if len(token) == 13:
+                return datetime.fromtimestamp(int(token) / 1000, tz=UTC)
             return datetime.fromtimestamp(int(token), tz=UTC)
         return _ensure_utc(datetime.fromisoformat(token))
     except Exception as exc:  # noqa: BLE001

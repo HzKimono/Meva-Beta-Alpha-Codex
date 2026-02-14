@@ -16,14 +16,22 @@ class ReplayExchangeClient(ExchangeClient):
         symbols: list[str],
         quote_asset: str = "TRY",
         balance_try: Decimal = Decimal("1000000"),
+        balances: dict[str, Decimal] | None = None,
     ) -> None:
         self._replay = replay
         self._symbols = sorted(set(symbols))
         self._quote_asset = quote_asset
-        self._balance_try = Decimal(str(balance_try))
+        base_balances = balances or {quote_asset: Decimal(str(balance_try))}
+        self._balances = {
+            str(asset).upper(): Decimal(str(amount)) for asset, amount in base_balances.items()
+        }
 
     def get_balances(self) -> list[Balance]:
-        return [Balance(asset=self._quote_asset, free=float(self._balance_try), locked=0.0)]
+        quant = Decimal("0.00000001")
+        return [
+            Balance(asset=asset, free=float(amount.quantize(quant)), locked=0.0)
+            for asset, amount in sorted(self._balances.items())
+        ]
 
     def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
         del limit
