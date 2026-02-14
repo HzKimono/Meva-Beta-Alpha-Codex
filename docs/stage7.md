@@ -434,6 +434,15 @@ Inspect Stage 7 table counts without external `sqlite3` binary:
 python -m btcbot.cli stage7-db-count --db ./backtest.db
 ```
 
+### Windows PowerShell Quickstart
+```powershell
+python -m btcbot.cli stage7-backtest --dataset .\data --out .\backtest.db --start 2024-01-01T00:00:00Z --end 2024-01-01T01:00:00Z --step-seconds 60 --seed 123
+python -m btcbot.cli stage7-parity --out-a .\run_a.db --out-b .\run_b.db --start 2024-01-01T00:00:00Z --end 2024-01-01T01:00:00Z
+python -m btcbot.cli stage7-backtest-report --db .\backtest.db --last 100 --format jsonl --out .\out.jsonl
+python -m btcbot.cli stage7-backtest-report --db .\backtest.db --last 100 --format csv --out .\out.csv
+python -m btcbot.cli stage7-db-count --db .\backtest.db
+```
+
 ### Fingerprint mismatches
 `stage7-parity` computes SHA-256 over deterministic per-cycle essentials:
 - timestamp + cycle id

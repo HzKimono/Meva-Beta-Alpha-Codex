@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from btcbot.config import Settings
+from btcbot.domain.models import PairInfo
 from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.stage7_single_cycle_driver import (
     BacktestSummary as DriverBacktestSummary,
@@ -34,6 +35,7 @@ class Stage7BacktestRunner:
         seed: int,
         freeze_params: bool = True,
         disable_adaptation: bool = True,
+        pair_info_snapshot: list[PairInfo | dict[str, object]] | None = None,
     ) -> BacktestSummary:
         summary: DriverBacktestSummary = Stage7SingleCycleDriver().run(
             settings=settings,
@@ -43,5 +45,6 @@ class Stage7BacktestRunner:
             seed=seed,
             freeze_params=freeze_params,
             disable_adaptation=disable_adaptation,
+            pair_info_snapshot=pair_info_snapshot,
         )
         return BacktestSummary(**summary.__dict__)

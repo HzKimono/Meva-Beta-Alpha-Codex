@@ -31,34 +31,51 @@ logger = logging.getLogger(__name__)
 class Stage7CycleRunner:
     command: str = "stage7-run"
 
-    def run_one_cycle(self, settings: Settings) -> int:
+    def run_one_cycle(
+        self,
+        settings: Settings,
+        *,
+        exchange: object | None = None,
+        state_store: StateStore | None = None,
+        now_utc: datetime | None = None,
+        cycle_id: str | None = None,
+        run_id: str | None = None,
+        stage4_result: int | None = None,
+        enable_adaptation: bool = True,
+        use_active_params: bool = True,
+    ) -> int:
         if not settings.dry_run:
             raise RuntimeError("stage7-run only supports --dry-run")
 
-        state_store = StateStore(db_path=settings.state_db_path)
-        exchange = build_exchange_stage4(settings, dry_run=True)
-        stage4 = Stage4CycleRunner(command=self.command)
-        result = stage4.run_one_cycle(settings)
-        now = datetime.now(UTC)
-        cycle_id = uuid4().hex
-        run_id = uuid4().hex
+        resolved_store = state_store or StateStore(db_path=settings.state_db_path)
+        resolved_exchange = exchange or build_exchange_stage4(settings, dry_run=True)
+        should_close_exchange = exchange is None
+
+        if stage4_result is None:
+            stage4 = Stage4CycleRunner(command=self.command)
+            stage4_result = stage4.run_one_cycle(settings)
+
+        resolved_now = now_utc or datetime.now(UTC)
+        resolved_cycle_id = cycle_id or uuid4().hex
+        resolved_run_id = run_id or uuid4().hex
         self.run_one_cycle_with_dependencies(
             settings=settings,
-            exchange=exchange,
-            state_store=state_store,
-            now_utc=now,
-            cycle_id=cycle_id,
-            run_id=run_id,
-            stage4_result=result,
-            enable_adaptation=True,
-            use_active_params=True,
+            exchange=resolved_exchange,
+            state_store=resolved_store,
+            now_utc=resolved_now,
+            cycle_id=resolved_cycle_id,
+            run_id=resolved_run_id,
+            stage4_result=stage4_result,
+            enable_adaptation=enable_adaptation,
+            use_active_params=use_active_params,
         )
 
-        close = getattr(exchange, "close", None)
-        if callable(close):
-            close()
+        if should_close_exchange:
+            close = getattr(resolved_exchange, "close", None)
+            if callable(close):
+                close()
 
-        return result
+        return stage4_result
 
     def run_one_cycle_with_dependencies(
         self,

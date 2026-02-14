@@ -7,6 +7,7 @@ from pathlib import Path
 
 from btcbot.adapters.replay_exchange import ReplayExchangeClient
 from btcbot.config import Settings
+from btcbot.domain.models import PairInfo
 from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.state_store import StateStore
@@ -33,6 +34,7 @@ class Stage7SingleCycleDriver:
         seed: int,
         freeze_params: bool = True,
         disable_adaptation: bool = True,
+        pair_info_snapshot: list[PairInfo | dict[str, object]] | None = None,
     ) -> BacktestSummary:
         effective_settings = settings.model_copy(
             update={
@@ -47,6 +49,7 @@ class Stage7SingleCycleDriver:
             replay=replay,
             symbols=effective_settings.symbols,
             balances={quote_asset: Decimal(str(effective_settings.dry_run_try_balance))},
+            pair_info_snapshot=pair_info_snapshot,
         )
         state_store = StateStore(db_path=str(out_db_path))
         runner = Stage7CycleRunner()
@@ -55,8 +58,8 @@ class Stage7SingleCycleDriver:
         while True:
             now_utc = replay.now().astimezone(UTC)
             cycle_id = f"bt:{now_utc.strftime('%Y%m%d%H%M%S')}:{cycle_count:06d}"
-            runner.run_one_cycle_with_dependencies(
-                settings=effective_settings,
+            runner.run_one_cycle(
+                effective_settings,
                 exchange=exchange,
                 state_store=state_store,
                 now_utc=now_utc,

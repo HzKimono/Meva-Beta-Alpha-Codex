@@ -142,3 +142,35 @@ def test_main_stage7_backtest_report_alias(monkeypatch, tmp_path: Path) -> None:
 
     assert cli.main() == 0
     assert captured["db_path"].endswith("in.db")
+
+
+def test_stage7_backtest_export_warns_when_last_is_implicit(capsys, tmp_path: Path) -> None:
+    settings = Settings(STATE_DB_PATH=str(tmp_path / "s7.db"))
+    store = StateStore(db_path=settings.state_db_path)
+    _seed_metrics(store)
+
+    out = tmp_path / "metrics.jsonl"
+    code = cli.run_stage7_backtest_export(
+        db_path=settings.state_db_path,
+        last=50,
+        export_format="jsonl",
+        out_path=str(out),
+        explicit_last=False,
+    )
+
+    assert code == 0
+    stderr = capsys.readouterr().err
+    assert "exporting last 50 rows" in stderr
+
+
+def test_stage7_parity_invalid_quantize_returns_code_2(capsys) -> None:
+    code = cli.run_stage7_parity(
+        db_a="a.db",
+        db_b="b.db",
+        start="2024-01-01T00:00:00Z",
+        end="2024-01-01T01:00:00Z",
+        quantize_try="not-a-decimal",
+    )
+
+    assert code == 2
+    assert "--quantize-try must be a decimal" in capsys.readouterr().out

@@ -17,6 +17,7 @@ class ReplayExchangeClient(ExchangeClient):
         quote_asset: str = "TRY",
         balance_try: Decimal = Decimal("1000000"),
         balances: dict[str, Decimal] | None = None,
+        pair_info_snapshot: list[PairInfo | dict[str, object]] | None = None,
     ) -> None:
         self._replay = replay
         self._symbols = sorted(set(symbols))
@@ -25,20 +26,30 @@ class ReplayExchangeClient(ExchangeClient):
         self._balances = {
             str(asset).upper(): Decimal(str(amount)) for asset, amount in base_balances.items()
         }
+        self._pair_info_snapshot = pair_info_snapshot
 
     def get_balances(self) -> list[Balance]:
-        quant = Decimal("0.00000001")
-        return [
-            Balance(asset=asset, free=float(amount.quantize(quant)), locked=0.0)
-            for asset, amount in sorted(self._balances.items())
-        ]
+        balances: list[Balance] = []
+        for asset, amount in sorted(self._balances.items()):
+            quant = Decimal("0.01") if asset == "TRY" else Decimal("0.00000001")
+            balances.append(Balance(asset=asset, free=float(amount.quantize(quant)), locked=0.0))
+        return balances
 
     def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
         del limit
-        bid, ask = self._replay.get_orderbook(symbol)
+        top = self._replay.get_orderbook(symbol)
+        if top is None:
+            raise KeyError(f"orderbook not found for {symbol}")
+        bid, ask = top
         return float(bid), float(ask)
 
     def get_exchange_info(self) -> list[PairInfo]:
+        if self._pair_info_snapshot is not None:
+            return [
+                item if isinstance(item, PairInfo) else PairInfo.model_validate(item)
+                for item in self._pair_info_snapshot
+            ]
+
         out: list[PairInfo] = []
         for symbol in self._symbols:
             out.append(
