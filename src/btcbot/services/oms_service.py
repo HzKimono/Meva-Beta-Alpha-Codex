@@ -185,6 +185,18 @@ class OMSService:
                 applied_orders.append(order)
                 continue
 
+            if order.status in _TERMINAL_STATUSES:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="DUPLICATE_IGNORED",
+                    payload={"key": idempotency_key, "reason": "terminal_order"},
+                    seq=seq,
+                )
+                applied_orders.append(order)
+                continue
+
             if not limiter.consume():
                 order, seq = self._append_event(
                     events_to_append=events_to_append,
@@ -234,18 +246,6 @@ class OMSService:
                     now_utc=now_utc,
                     event_type="DUPLICATE_IGNORED",
                     payload={"key": idempotency_key},
-                    seq=seq,
-                )
-                applied_orders.append(order)
-                continue
-
-            if order.status in _TERMINAL_STATUSES:
-                order, seq = self._append_event(
-                    events_to_append=events_to_append,
-                    order=order,
-                    now_utc=now_utc,
-                    event_type="DUPLICATE_IGNORED",
-                    payload={"key": idempotency_key, "reason": "terminal_order"},
                     seq=seq,
                 )
                 applied_orders.append(order)
@@ -329,7 +329,7 @@ class OMSService:
                     order=order,
                     now_utc=now_utc,
                     event_type="REJECTED",
-                    payload={"reason": "invalid_price_or_qty"},
+                    payload={"reason": "sim_reject"},
                     existing_event_types=existing_event_types,
                     seq=seq,
                 )
@@ -373,8 +373,9 @@ class OMSService:
                 events_to_append.append(filled_event)
             applied_orders.append(order)
 
-        state_store.upsert_stage7_orders(applied_orders)
-        state_store.append_stage7_order_events(events_to_append)
+        with state_store.transaction():
+            state_store.upsert_stage7_orders(applied_orders)
+            state_store.append_stage7_order_events(events_to_append)
         return applied_orders, events_to_append
 
     def reconcile_open_orders(

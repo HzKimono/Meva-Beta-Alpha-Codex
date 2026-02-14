@@ -60,13 +60,10 @@ def test_same_key_different_payload_conflict_is_isolated(tmp_path) -> None:
     oms = OMSService()
     now = datetime(2024, 1, 1, tzinfo=UTC)
 
-    oms.process_intents(
-        cycle_id="cycle-1",
-        now_utc=now,
-        intents=[_intent(cid="s7:c1:BTCTRY:BUY:deadbeef0002", price="100")],
-        market_sim=Stage7MarketSimulator({"BTCTRY": Decimal("100")}),
-        state_store=store,
-        settings=settings,
+    conflicting_intent = _intent(cid="s7:c1:BTCTRY:BUY:deadbeef0002", price="101")
+    store.try_register_idempotency_key(
+        f"submit:{conflicting_intent.client_order_id}",
+        "hash-a",
     )
 
     _, events = oms.process_intents(

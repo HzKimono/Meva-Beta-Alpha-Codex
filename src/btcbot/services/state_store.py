@@ -1471,13 +1471,7 @@ class StateStore:
         return row is not None
 
     def get_stage4_order_by_client_id(self, client_order_id: str):
-        """Load all Stage7 events for a client_order_id in deterministic order."""
-
-        """Load Stage7 orders that are not in terminal statuses."""
-
-        """Register idempotency key atomically, returning False for same-payload duplicates."""
-
-        """Append a single Stage7 order event with duplicate-id protection."""
+        """Load a Stage4 order by client_order_id."""
         from btcbot.domain.stage4 import Order as Stage4Order
 
         with self._connect() as conn:

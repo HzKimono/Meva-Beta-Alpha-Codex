@@ -12,7 +12,7 @@ from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.order_state import Stage7Order
 from btcbot.domain.risk_models import RiskDecision, RiskMode
 from btcbot.services import state_store as state_store_module
-from btcbot.services.state_store import StateStore
+from btcbot.services.state_store import IdempotencyConflictError, StateStore
 
 
 def test_risk_state_current_table_is_created_on_fresh_db(tmp_path) -> None:
@@ -505,3 +505,12 @@ def test_stage7_upsert_orders_conflict_on_client_order_id_keeps_original_order_i
     assert row["cycle_id"] == "cycle-2"
     assert row["qty"] == "2"
     assert row["status"] == Stage7OrderStatus.ACKED.value
+
+
+def test_stage7_idempotency_key_contract(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+
+    assert store.try_register_idempotency_key("k1", "h1") is True
+    assert store.try_register_idempotency_key("k1", "h1") is False
+    with pytest.raises(IdempotencyConflictError):
+        store.try_register_idempotency_key("k1", "h2")

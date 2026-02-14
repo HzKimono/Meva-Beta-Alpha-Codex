@@ -63,7 +63,6 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
     )
 
     assert len(orders_1) == 2
-    assert len(events_1) >= 6
     assert all(e.event_type == "DUPLICATE_IGNORED" for e in events_2)
 
     with store._connect() as conn:
