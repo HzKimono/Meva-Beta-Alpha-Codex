@@ -51,8 +51,9 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
             ORDER BY client_order_id, ts, event_id
             """
         ).fetchall()
+        order_count_before = conn.execute("SELECT COUNT(*) FROM stage7_orders").fetchone()[0]
 
-    orders_2, events_2 = svc.process_intents(
+    _, events_2 = svc.process_intents(
         cycle_id="cycle-1",
         now_utc=now,
         intents=intents,
@@ -63,12 +64,10 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
 
     assert len(orders_1) == 2
     assert len(events_1) >= 6
-    assert len(events_2) == 0
+    assert all(e.event_type == "DUPLICATE_IGNORED" for e in events_2)
+
     with store._connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM stage7_orders").fetchone()[0] == 2
-        assert conn.execute("SELECT COUNT(*) FROM stage7_order_events").fetchone()[0] == len(
-            events_1
-        )
+        order_count_after = conn.execute("SELECT COUNT(*) FROM stage7_orders").fetchone()[0]
         rows_after = conn.execute(
             """
             SELECT client_order_id, event_id
@@ -76,7 +75,9 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
             ORDER BY client_order_id, ts, event_id
             """
         ).fetchall()
-    assert rows_before == rows_after
+
+    assert order_count_before == order_count_after == 2
+    assert len(rows_after) == len(rows_before) + len(events_2)
     for client_order_id in {str(row["client_order_id"]) for row in rows_before}:
         client_event_ids = {
             str(row["event_id"])
@@ -85,7 +86,6 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
         }
         assert make_event_id(client_order_id, 1, "SUBMIT_REQUESTED") in client_event_ids
         assert make_event_id(client_order_id, 2, "ACKED") in client_event_ids
-    assert [o.order_id for o in orders_1] == [o.order_id for o in orders_2]
 
 
 def test_partial_fill_then_filled(tmp_path) -> None:

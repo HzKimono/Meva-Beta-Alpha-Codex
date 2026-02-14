@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from btcbot.config import Settings
@@ -15,14 +16,44 @@ from btcbot.domain.order_state import (
     make_intent_hash,
     make_order_id,
 )
-from btcbot.services.state_store import StateStore
+from btcbot.services.rate_limiter import TokenBucketRateLimiter
+from btcbot.services.retry import RetryAttempt, retry_with_backoff
+from btcbot.services.state_store import IdempotencyConflictError, StateStore
 
 _TERMINAL_STATUSES = {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
 
 
+class TransientOMSAdapterError(RuntimeError):
+    pass
+
+
+class NetworkTimeout(TransientOMSAdapterError):
+    pass
+
+
+class RateLimitError(TransientOMSAdapterError):
+    pass
+
+
+class TemporaryUnavailable(TransientOMSAdapterError):
+    pass
+
+
+class NonRetryableOMSAdapterError(RuntimeError):
+    pass
+
+
 class Stage7MarketSimulator:
-    def __init__(self, mark_prices_try: dict[str, Decimal]) -> None:
+    def __init__(
+        self,
+        mark_prices_try: dict[str, Decimal],
+        *,
+        transient_failures_by_client_order_id: dict[str, list[str]] | None = None,
+    ) -> None:
         self.mark_prices_try = {normalize_symbol(k): v for k, v in mark_prices_try.items()}
+        self._transient_failures_by_client_order_id = {
+            key: list(value) for key, value in (transient_failures_by_client_order_id or {}).items()
+        }
 
     def should_reject(self, intent: OrderIntent, settings: Settings) -> bool:
         if intent.qty <= 0 or intent.price_try <= 0:
@@ -32,6 +63,20 @@ class Stage7MarketSimulator:
             return False
         bucket = int(intent.client_order_id[-4:], 16) % 10000 if intent.client_order_id else 0
         return bucket < int(reject_bps)
+
+    def maybe_raise_submit_error(self, client_order_id: str) -> None:
+        queue = self._transient_failures_by_client_order_id.get(client_order_id)
+        if not queue:
+            return
+        token = queue.pop(0).strip().upper()
+        if token == "RATE_LIMIT":
+            raise RateLimitError("simulated rate limit")
+        if token == "TIMEOUT":
+            raise NetworkTimeout("simulated timeout")
+        if token == "UNAVAILABLE":
+            raise TemporaryUnavailable("simulated service unavailable")
+        if token == "NON_RETRYABLE":
+            raise NonRetryableOMSAdapterError("simulated non-retryable failure")
 
     def fill_slices(self, intent: OrderIntent, settings: Settings) -> list[tuple[Decimal, Decimal]]:
         symbol = normalize_symbol(intent.symbol)
@@ -53,6 +98,17 @@ class Stage7MarketSimulator:
 
 
 class OMSService:
+    def __init__(
+        self,
+        *,
+        rate_limiter: TokenBucketRateLimiter | None = None,
+        jitter_seed: int = 7,
+        sleep_fn: Callable[[float], None] | None = None,
+    ) -> None:
+        self._rate_limiter = rate_limiter
+        self._jitter_seed = jitter_seed
+        self._sleep_fn = sleep_fn or (lambda _: None)
+
     def process_intents(
         self,
         *,
@@ -67,6 +123,11 @@ class OMSService:
         applied_orders: list[Stage7Order] = []
         events_to_append: list[OrderEvent] = []
         cancel_set = set(cancel_requests or [])
+
+        limiter = self._rate_limiter or TokenBucketRateLimiter(
+            rate_per_sec=float(settings.stage7_rate_limit_rps),
+            burst=settings.stage7_rate_limit_burst,
+        )
 
         for intent in sorted(intents, key=lambda item: item.client_order_id):
             if intent.skipped:
@@ -94,8 +155,19 @@ class OMSService:
                 last_update=now_utc.astimezone(UTC),
                 intent_hash=make_intent_hash(intent.to_dict()),
             )
+            idempotency_key = f"submit:{intent.client_order_id}"
 
-            if order.status in _TERMINAL_STATUSES:
+            if intent.qty <= 0 or intent.price_try <= 0 or intent.notional_try <= 0:
+                order, rejected_event, seq = self._transition_once(
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="REJECTED",
+                    payload={"reason": "invalid_price_or_qty"},
+                    existing_event_types=existing_event_types,
+                    seq=seq,
+                )
+                if rejected_event is not None:
+                    events_to_append.append(rejected_event)
                 applied_orders.append(order)
                 continue
 
@@ -112,6 +184,132 @@ class OMSService:
                     events_to_append.append(new_event)
                 applied_orders.append(order)
                 continue
+
+            if not limiter.consume():
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="THROTTLED",
+                    payload={
+                        "next_eligible_ts": (
+                            now_utc.astimezone(UTC)
+                            + timedelta(seconds=limiter.seconds_until_available())
+                        ).isoformat()
+                    },
+                    seq=seq,
+                )
+                applied_orders.append(order)
+                continue
+
+            payload_hash = make_intent_hash(intent.to_dict())
+            try:
+                registered = state_store.try_register_idempotency_key(idempotency_key, payload_hash)
+            except IdempotencyConflictError:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="IDEMPOTENCY_CONFLICT",
+                    payload={"key": idempotency_key},
+                    seq=seq,
+                )
+                order, rejected_event, seq = self._transition_once(
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="REJECTED",
+                    payload={"reason": "idempotency_conflict", "key": idempotency_key},
+                    existing_event_types=existing_event_types,
+                    seq=seq,
+                )
+                if rejected_event is not None:
+                    events_to_append.append(rejected_event)
+                applied_orders.append(order)
+                continue
+
+            if not registered:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="DUPLICATE_IGNORED",
+                    payload={"key": idempotency_key},
+                    seq=seq,
+                )
+                applied_orders.append(order)
+                continue
+
+            if order.status in _TERMINAL_STATUSES:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="DUPLICATE_IGNORED",
+                    payload={"key": idempotency_key, "reason": "terminal_order"},
+                    seq=seq,
+                )
+                applied_orders.append(order)
+                continue
+
+            retry_attempts: list[RetryAttempt] = []
+
+            def _submit_adapter(client_order_id: str = intent.client_order_id) -> None:
+                market_sim.maybe_raise_submit_error(client_order_id)
+
+            def _on_retry(
+                attempt: RetryAttempt, *, attempts: list[RetryAttempt] = retry_attempts
+            ) -> None:
+                attempts.append(attempt)
+
+            try:
+                retry_with_backoff(
+                    _submit_adapter,
+                    max_attempts=settings.stage7_retry_max_attempts,
+                    base_delay_ms=settings.stage7_retry_base_delay_ms,
+                    max_delay_ms=settings.stage7_retry_max_delay_ms,
+                    jitter_seed=self._jitter_seed,
+                    retry_on_exceptions=(NetworkTimeout, RateLimitError, TemporaryUnavailable),
+                    sleep_fn=self._sleep_fn,
+                    on_retry=_on_retry,
+                )
+            except (NetworkTimeout, RateLimitError, TemporaryUnavailable):
+                for retry_attempt in retry_attempts:
+                    order, seq = self._append_event(
+                        events_to_append=events_to_append,
+                        order=order,
+                        now_utc=now_utc,
+                        event_type="RETRY_SCHEDULED",
+                        payload={
+                            "attempt": retry_attempt.attempt,
+                            "delay_ms": retry_attempt.delay_ms,
+                            "error_type": retry_attempt.error_type,
+                        },
+                        seq=seq,
+                    )
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="RETRY_GIVEUP",
+                    payload={"reason": "transient_failure_exhausted"},
+                    seq=seq,
+                )
+                applied_orders.append(order)
+                continue
+
+            for retry_attempt in retry_attempts:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="RETRY_SCHEDULED",
+                    payload={
+                        "attempt": retry_attempt.attempt,
+                        "delay_ms": retry_attempt.delay_ms,
+                        "error_type": retry_attempt.error_type,
+                    },
+                    seq=seq,
+                )
 
             for event_type in ("SUBMIT_REQUESTED", "ACKED"):
                 order, new_event, seq = self._transition_once(
@@ -173,12 +371,70 @@ class OMSService:
             )
             if filled_event is not None:
                 events_to_append.append(filled_event)
-
             applied_orders.append(order)
 
         state_store.upsert_stage7_orders(applied_orders)
         state_store.append_stage7_order_events(events_to_append)
         return applied_orders, events_to_append
+
+    def reconcile_open_orders(
+        self,
+        *,
+        cycle_id: str,
+        now_utc: datetime,
+        state_store: StateStore,
+        settings: Settings,
+        market_sim: Stage7MarketSimulator,
+    ) -> tuple[list[Stage7Order], list[OrderEvent]]:
+        intents: list[OrderIntent] = []
+        for order in state_store.load_non_terminal_orders():
+            intents.append(
+                OrderIntent(
+                    cycle_id=cycle_id,
+                    symbol=order.symbol,
+                    side=order.side,
+                    order_type=order.order_type,
+                    price_try=order.price_try,
+                    qty=order.qty,
+                    notional_try=order.price_try * order.qty,
+                    client_order_id=order.client_order_id,
+                    reason="reconcile",
+                    constraints_applied={},
+                )
+            )
+        return self.process_intents(
+            cycle_id=cycle_id,
+            now_utc=now_utc,
+            intents=intents,
+            market_sim=market_sim,
+            state_store=state_store,
+            settings=settings,
+            cancel_requests=[],
+        )
+
+    def _append_event(
+        self,
+        *,
+        events_to_append: list[OrderEvent],
+        order: Stage7Order,
+        now_utc: datetime,
+        event_type: str,
+        payload: dict[str, object],
+        seq: int,
+    ) -> tuple[Stage7Order, int]:
+        next_seq = seq + 1
+        events_to_append.append(
+            OrderEvent(
+                event_id=make_event_id(order.client_order_id, next_seq, event_type),
+                ts=now_utc.astimezone(UTC),
+                client_order_id=order.client_order_id,
+                order_id=order.order_id,
+                event_type=event_type,
+                payload=payload,
+                cycle_id=order.cycle_id,
+            )
+        )
+        return replace(order, last_update=now_utc.astimezone(UTC)), next_seq
 
     def _transition_once(
         self,
@@ -204,6 +460,31 @@ class OMSService:
                 "REJECTED": OrderStatus.REJECTED,
                 "CANCELED": OrderStatus.CANCELED,
             }.get(event_type, order.status)
+
+        allowed_transitions: dict[OrderStatus, set[OrderStatus]] = {
+            OrderStatus.PLANNED: {
+                OrderStatus.SUBMITTED,
+                OrderStatus.CANCELED,
+                OrderStatus.REJECTED,
+            },
+            OrderStatus.SUBMITTED: {OrderStatus.ACKED, OrderStatus.CANCELED, OrderStatus.REJECTED},
+            OrderStatus.ACKED: {
+                OrderStatus.PARTIALLY_FILLED,
+                OrderStatus.FILLED,
+                OrderStatus.CANCELED,
+                OrderStatus.REJECTED,
+            },
+            OrderStatus.PARTIALLY_FILLED: {
+                OrderStatus.PARTIALLY_FILLED,
+                OrderStatus.FILLED,
+                OrderStatus.CANCELED,
+            },
+            OrderStatus.FILLED: set(),
+            OrderStatus.CANCELED: set(),
+            OrderStatus.REJECTED: set(),
+        }
+        if status != order.status and status not in allowed_transitions[order.status]:
+            return order, None, seq
 
         new_filled_qty = order.filled_qty + fill_qty
         avg_fill = order.avg_fill_price_try
