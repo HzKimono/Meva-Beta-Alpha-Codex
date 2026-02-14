@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import logging
+import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -75,8 +76,20 @@ def main() -> int:
     alerts_parser.add_argument("--last", type=int, default=50)
 
     backtest_parser = subparsers.add_parser("stage7-backtest", help="Run Stage 7 replay backtest")
-    backtest_parser.add_argument("--data", required=True)
-    backtest_parser.add_argument("--out-db", required=True)
+    backtest_parser.add_argument(
+        "--data",
+        "--dataset",
+        dest="data",
+        required=True,
+        help="Path to replay dataset folder (alias: --dataset)",
+    )
+    backtest_parser.add_argument(
+        "--out-db",
+        "--out",
+        dest="out_db",
+        required=True,
+        help="Output sqlite DB path (alias: --out)",
+    )
     backtest_parser.add_argument("--start", required=True)
     backtest_parser.add_argument("--end", required=True)
     backtest_parser.add_argument("--step-seconds", type=int, default=60)
@@ -84,18 +97,27 @@ def main() -> int:
     backtest_parser.add_argument("--cycles", type=int, default=None)
 
     parity_parser = subparsers.add_parser("stage7-parity", help="Compare two Stage 7 run DBs")
-    parity_parser.add_argument("--db-a", required=True)
-    parity_parser.add_argument("--db-b", required=True)
+    parity_parser.add_argument("--db-a", "--out-a", dest="db_a", required=True)
+    parity_parser.add_argument("--db-b", "--out-b", dest="db_b", required=True)
+    parity_parser.add_argument("--data", "--dataset", dest="dataset")
     parity_parser.add_argument("--start", required=True)
     parity_parser.add_argument("--end", required=True)
 
     backtest_export = subparsers.add_parser(
-        "stage7-backtest-export", help="Export backtest rows from a Stage 7 DB"
+        "stage7-backtest-export",
+        aliases=["stage7-backtest-report"],
+        help="Export backtest rows from a Stage 7 DB",
     )
     backtest_export.add_argument("--db", required=True)
     backtest_export.add_argument("--out", required=True)
     backtest_export.add_argument("--last", type=int, default=50)
     backtest_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+
+    backtest_count = subparsers.add_parser(
+        "stage7-db-count",
+        help="Print row counts for Stage 7 tables in a sqlite DB",
+    )
+    backtest_count.add_argument("--db", required=True)
 
     args = parser.parse_args()
     settings = Settings()
@@ -142,15 +164,19 @@ def main() -> int:
             db_b=args.db_b,
             start=args.start,
             end=args.end,
+            dataset=args.dataset,
         )
 
-    if args.command == "stage7-backtest-export":
+    if args.command in {"stage7-backtest-export", "stage7-backtest-report"}:
         return run_stage7_backtest_export(
             db_path=args.db,
             last=args.last,
             export_format=args.format,
             out_path=args.out,
         )
+
+    if args.command == "stage7-db-count":
+        return run_stage7_db_count(db_path=args.db)
 
     return 1
 
@@ -498,7 +524,16 @@ def run_stage7_backtest(
     return 0
 
 
-def run_stage7_parity(*, db_a: str, db_b: str, start: str, end: str) -> int:
+def run_stage7_parity(
+    *, db_a: str, db_b: str, start: str, end: str, dataset: str | None = None
+) -> int:
+    if dataset:
+        print(
+            "stage7-parity compares two DBs. To generate DBs from a dataset "
+            "use stage7-backtest, or use stage7-parity-run (if implemented)."
+        )
+        return 2
+
     start_dt = _parse_iso(start)
     end_dt = _parse_iso(end)
     f1 = compute_run_fingerprint(db_a, start_dt, end_dt)
@@ -526,6 +561,29 @@ def run_stage7_backtest_export(
         for row in rows:
             normalized = {key: _csv_safe_value(value) for key, value in row.items()}
             writer.writerow(normalized)
+    return 0
+
+
+def run_stage7_db_count(*, db_path: str) -> int:
+    tracked_tables = [
+        "stage7_cycle_trace",
+        "stage7_ledger_metrics",
+        "stage7_run_metrics",
+        "stage7_param_changes",
+    ]
+
+    with sqlite3.connect(db_path) as connection:
+        cursor = connection.cursor()
+        for table_name in tracked_tables:
+            exists = cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+            if exists is None:
+                print(f"{table_name}: n/a")
+                continue
+            count = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            print(f"{table_name}: {count}")
     return 0
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -828,3 +829,40 @@ def test_run_cycle_stage4_policy_block_records_audit(tmp_path, capsys) -> None:
     assert '"blocked_by_policy": 1' in row["counts_json"]
     assert "policy_block:kill_switch" in row["decisions_json"]
     assert row["envelope_json"] is not None
+
+
+def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "Settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+
+    def _fake_run_stage7_backtest(settings, **kwargs):
+        del settings
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_stage7_backtest", _fake_run_stage7_backtest)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "btcbot",
+            "stage7-backtest",
+            "--dataset",
+            "./data",
+            "--out",
+            "./out.db",
+            "--start",
+            "2024-01-01T00:00:00Z",
+            "--end",
+            "2024-01-01T01:00:00Z",
+        ],
+    )
+
+    assert cli.main() == 0
+    assert captured["data_path"] == "./data"
+    assert captured["out_db"] == "./out.db"
