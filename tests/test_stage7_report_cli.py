@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 from btcbot import cli
@@ -80,3 +81,96 @@ def test_stage7_alerts_all_false_only_header(capsys, tmp_path: Path) -> None:
     lines = capsys.readouterr().out.strip().splitlines()
 
     assert lines == ["cycle_id ts alerts"]
+
+
+def test_stage7_parity_dataset_message(capsys) -> None:
+    code = cli.run_stage7_parity(
+        db_a="a.db",
+        db_b="b.db",
+        start="2024-01-01T00:00:00Z",
+        end="2024-01-01T01:00:00Z",
+        dataset="./data",
+    )
+
+    assert code == 2
+    out = capsys.readouterr().out.strip()
+    assert "stage7-parity compares two DBs" in out
+    assert "stage7-backtest" in out
+
+
+def test_stage7_db_count_reports_existing_and_missing_tables(capsys, tmp_path: Path) -> None:
+    settings = Settings(STATE_DB_PATH=str(tmp_path / "s7.db"))
+    store = StateStore(db_path=settings.state_db_path)
+    _seed_metrics(store)
+
+    code = cli.run_stage7_db_count(db_path=settings.state_db_path)
+
+    assert code == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert "stage7_cycle_trace: 0" in lines
+    assert "stage7_ledger_metrics: 0" in lines
+    assert "stage7_run_metrics: 1" in lines
+    assert "stage7_param_changes: 0" in lines
+
+
+def test_main_stage7_backtest_report_alias(monkeypatch, tmp_path: Path) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "Settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+
+    def _fake_export(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_stage7_backtest_export", _fake_export)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "btcbot",
+            "stage7-backtest-report",
+            "--db",
+            str(tmp_path / "in.db"),
+            "--out",
+            str(tmp_path / "out.jsonl"),
+        ],
+    )
+
+    assert cli.main() == 0
+    assert captured["db_path"].endswith("in.db")
+
+
+def test_stage7_backtest_export_warns_when_last_is_implicit(capsys, tmp_path: Path) -> None:
+    settings = Settings(STATE_DB_PATH=str(tmp_path / "s7.db"))
+    store = StateStore(db_path=settings.state_db_path)
+    _seed_metrics(store)
+
+    out = tmp_path / "metrics.jsonl"
+    code = cli.run_stage7_backtest_export(
+        db_path=settings.state_db_path,
+        last=50,
+        export_format="jsonl",
+        out_path=str(out),
+        explicit_last=False,
+    )
+
+    assert code == 0
+    stderr = capsys.readouterr().err
+    assert "exporting last 50 rows" in stderr
+
+
+def test_stage7_parity_invalid_quantize_returns_code_2(capsys) -> None:
+    code = cli.run_stage7_parity(
+        db_a="a.db",
+        db_b="b.db",
+        start="2024-01-01T00:00:00Z",
+        end="2024-01-01T01:00:00Z",
+        quantize_try="not-a-decimal",
+    )
+
+    assert code == 2
+    assert "--quantize-try must be a decimal" in capsys.readouterr().out

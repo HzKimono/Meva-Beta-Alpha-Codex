@@ -4,8 +4,10 @@ import argparse
 import csv
 import json
 import logging
+import sqlite3
+import sys
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
 
@@ -49,7 +51,15 @@ LIVE_TRADING_NOT_ARMED_MESSAGE = policy_block_message(PolicyBlockReason.LIVE_NOT
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="btcbot")
+    parser = argparse.ArgumentParser(
+        prog="btcbot",
+        epilog=(
+            "PowerShell quickstart: stage7-backtest --dataset ./data --out ./backtest.db ... | "
+            "stage7-parity --out-a ./a.db --out-b ./b.db ... | "
+            "stage7-backtest-report --db ./backtest.db --out out.jsonl | "
+            "stage7-db-count --db ./backtest.db"
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run one decision cycle")
@@ -75,27 +85,63 @@ def main() -> int:
     alerts_parser.add_argument("--last", type=int, default=50)
 
     backtest_parser = subparsers.add_parser("stage7-backtest", help="Run Stage 7 replay backtest")
-    backtest_parser.add_argument("--data", required=True)
-    backtest_parser.add_argument("--out-db", required=True)
+    backtest_parser.add_argument(
+        "--data",
+        "--dataset",
+        dest="data",
+        required=True,
+        help="Path to replay dataset folder (alias: --dataset)",
+    )
+    backtest_parser.add_argument(
+        "--out-db",
+        "--out",
+        dest="out_db",
+        required=True,
+        help="Output sqlite DB path (alias: --out)",
+    )
     backtest_parser.add_argument("--start", required=True)
     backtest_parser.add_argument("--end", required=True)
     backtest_parser.add_argument("--step-seconds", type=int, default=60)
     backtest_parser.add_argument("--seed", type=int, default=123)
     backtest_parser.add_argument("--cycles", type=int, default=None)
+    backtest_parser.add_argument(
+        "--pair-info-json",
+        default=None,
+        help="Optional JSON file with exchange pair metadata for replay parity",
+    )
 
     parity_parser = subparsers.add_parser("stage7-parity", help="Compare two Stage 7 run DBs")
-    parity_parser.add_argument("--db-a", required=True)
-    parity_parser.add_argument("--db-b", required=True)
+    parity_parser.add_argument("--db-a", "--out-a", dest="db_a", required=True)
+    parity_parser.add_argument("--db-b", "--out-b", dest="db_b", required=True)
+    parity_parser.add_argument("--data", "--dataset", dest="dataset")
     parity_parser.add_argument("--start", required=True)
     parity_parser.add_argument("--end", required=True)
+    parity_parser.add_argument(
+        "--quantize-try",
+        default=None,
+        help="Optional TRY quantization step for fingerprint metrics (e.g. 0.01)",
+    )
+    parity_parser.add_argument(
+        "--include-adaptation",
+        action="store_true",
+        help="Include active parameter/adaptation metadata in parity fingerprint",
+    )
 
     backtest_export = subparsers.add_parser(
-        "stage7-backtest-export", help="Export backtest rows from a Stage 7 DB"
+        "stage7-backtest-export",
+        aliases=["stage7-backtest-report"],
+        help="Export backtest rows from a Stage 7 DB",
     )
     backtest_export.add_argument("--db", required=True)
     backtest_export.add_argument("--out", required=True)
     backtest_export.add_argument("--last", type=int, default=50)
     backtest_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+
+    backtest_count = subparsers.add_parser(
+        "stage7-db-count",
+        help="Print row counts for Stage 7 tables in a sqlite DB",
+    )
+    backtest_count.add_argument("--db", required=True)
 
     args = parser.parse_args()
     settings = Settings()
@@ -134,6 +180,7 @@ def main() -> int:
             step_seconds=args.step_seconds,
             seed=args.seed,
             cycles=args.cycles,
+            pair_info_json=args.pair_info_json,
         )
 
     if args.command == "stage7-parity":
@@ -142,15 +189,22 @@ def main() -> int:
             db_b=args.db_b,
             start=args.start,
             end=args.end,
+            dataset=args.dataset,
+            quantize_try=args.quantize_try,
+            include_adaptation=args.include_adaptation,
         )
 
-    if args.command == "stage7-backtest-export":
+    if args.command in {"stage7-backtest-export", "stage7-backtest-report"}:
         return run_stage7_backtest_export(
             db_path=args.db,
             last=args.last,
             export_format=args.format,
             out_path=args.out,
+            explicit_last=_argument_was_provided("--last"),
         )
+
+    if args.command == "stage7-db-count":
+        return run_stage7_db_count(db_path=args.db)
 
     return 1
 
@@ -476,6 +530,7 @@ def run_stage7_backtest(
     step_seconds: int,
     seed: int,
     cycles: int | None,
+    pair_info_json: str | None,
 ) -> int:
     replay = MarketDataReplay.from_folder(
         data_path=Path(data_path),
@@ -484,6 +539,12 @@ def run_stage7_backtest(
         step_seconds=step_seconds,
         seed=seed,
     )
+    try:
+        pair_info_snapshot = _load_pair_info_snapshot(pair_info_json)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+
     runner = Stage7BacktestRunner()
     summary = runner.run(
         settings=settings,
@@ -493,24 +554,61 @@ def run_stage7_backtest(
         seed=seed,
         freeze_params=True,
         disable_adaptation=True,
+        pair_info_snapshot=pair_info_snapshot,
     )
     print(json.dumps(summary.__dict__, sort_keys=True))
     return 0
 
 
-def run_stage7_parity(*, db_a: str, db_b: str, start: str, end: str) -> int:
+def run_stage7_parity(
+    *,
+    db_a: str,
+    db_b: str,
+    start: str,
+    end: str,
+    dataset: str | None = None,
+    quantize_try: str | None = None,
+    include_adaptation: bool = False,
+) -> int:
+    if dataset:
+        print(
+            "stage7-parity compares two DBs. To generate DBs from a dataset "
+            "use stage7-backtest, or use stage7-parity-run (if implemented)."
+        )
+        return 2
+
     start_dt = _parse_iso(start)
     end_dt = _parse_iso(end)
-    f1 = compute_run_fingerprint(db_a, start_dt, end_dt)
-    f2 = compute_run_fingerprint(db_b, start_dt, end_dt)
+    try:
+        quantize = _parse_optional_quantize(quantize_try)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    f1 = compute_run_fingerprint(
+        db_a,
+        start_dt,
+        end_dt,
+        quantize_try=quantize,
+        include_adaptation=include_adaptation,
+    )
+    f2 = compute_run_fingerprint(
+        db_b,
+        start_dt,
+        end_dt,
+        quantize_try=quantize,
+        include_adaptation=include_adaptation,
+    )
     ok = compare_fingerprints(f1, f2)
     print(json.dumps({"fingerprint_a": f1, "fingerprint_b": f2, "match": ok}, sort_keys=True))
     return 0 if ok else 1
 
 
 def run_stage7_backtest_export(
-    *, db_path: str, last: int, export_format: str, out_path: str
+    *, db_path: str, last: int, export_format: str, out_path: str, explicit_last: bool = True
 ) -> int:
+    if not explicit_last:
+        print("exporting last 50 rows", file=sys.stderr)
+
     store = StateStore(db_path=db_path)
     rows = store.fetch_stage7_cycles_for_export(limit=last)
     if export_format == "jsonl":
@@ -526,6 +624,61 @@ def run_stage7_backtest_export(
         for row in rows:
             normalized = {key: _csv_safe_value(value) for key, value in row.items()}
             writer.writerow(normalized)
+    return 0
+
+
+def _argument_was_provided(flag: str) -> bool:
+    argv = getattr(sys, "argv", [])
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv[1:])
+
+
+def _load_pair_info_snapshot(path: str | None) -> list[dict[str, object]] | None:
+    if not path:
+        return None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"pair info file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("--pair-info-json must contain valid JSON") from exc
+
+    if not isinstance(payload, list):
+        raise ValueError("--pair-info-json must be a JSON array")
+    return [dict(item) for item in payload if isinstance(item, dict)]
+
+
+def _parse_optional_quantize(raw: str | None) -> Decimal | None:
+    if raw is None:
+        return None
+    try:
+        quant = Decimal(str(raw))
+    except InvalidOperation as exc:
+        raise ValueError("--quantize-try must be a decimal step, e.g. 0.01") from exc
+    if quant <= 0:
+        raise ValueError("--quantize-try must be > 0")
+    return quant
+
+
+def run_stage7_db_count(*, db_path: str) -> int:
+    tracked_tables = [
+        "stage7_cycle_trace",
+        "stage7_ledger_metrics",
+        "stage7_run_metrics",
+        "stage7_param_changes",
+    ]
+
+    with sqlite3.connect(db_path) as connection:
+        cursor = connection.cursor()
+        for table_name in tracked_tables:
+            exists = cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+            if exists is None:
+                print(f"{table_name}: n/a")
+                continue
+            count = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            print(f"{table_name}: {count}")
     return 0
 
 

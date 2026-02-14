@@ -404,29 +404,43 @@ Schema is strict and deterministic (invalid/missing required headers fail fast).
 - Params are frozen by default and adaptation is disabled by default (`freeze_params=True`, `disable_adaptation=True`).
 
 ### CLI
-Run replay backtest:
+Run replay backtest (PowerShell-friendly aliases supported):
 ```bash
 python -m btcbot.cli stage7-backtest \
-  --data ./data \
-  --out-db ./backtest.db \
+  --dataset ./data \
+  --out ./backtest.db \
   --start 2024-01-01T00:00:00Z \
   --end 2024-01-01T01:00:00Z \
   --step-seconds 60 \
   --seed 123
 ```
 
-Compare two runs:
+Compare two runs (aliases `--out-a/--out-b` also supported):
 ```bash
 python -m btcbot.cli stage7-parity \
-  --db-a ./run_a.db \
-  --db-b ./run_b.db \
+  --out-a ./run_a.db \
+  --out-b ./run_b.db \
   --start 2024-01-01T00:00:00Z \
   --end 2024-01-01T01:00:00Z
 ```
 
-Export backtest rows:
+Export backtest rows (`stage7-backtest-report` is a compatibility alias):
 ```bash
-python -m btcbot.cli stage7-backtest-export --db ./backtest.db --last 100 --format jsonl --out out.jsonl
+python -m btcbot.cli stage7-backtest-report --db ./backtest.db --last 100 --format jsonl --out out.jsonl
+```
+
+Inspect Stage 7 table counts without external `sqlite3` binary:
+```bash
+python -m btcbot.cli stage7-db-count --db ./backtest.db
+```
+
+### Windows PowerShell Quickstart
+```powershell
+python -m btcbot.cli stage7-backtest --dataset .\data --out .\backtest.db --start 2024-01-01T00:00:00Z --end 2024-01-01T01:00:00Z --step-seconds 60 --seed 123
+python -m btcbot.cli stage7-parity --out-a .\run_a.db --out-b .\run_b.db --start 2024-01-01T00:00:00Z --end 2024-01-01T01:00:00Z
+python -m btcbot.cli stage7-backtest-report --db .\backtest.db --last 100 --format jsonl --out .\out.jsonl
+python -m btcbot.cli stage7-backtest-report --db .\backtest.db --last 100 --format csv --out .\out.csv
+python -m btcbot.cli stage7-db-count --db .\backtest.db
 ```
 
 ### Fingerprint mismatches

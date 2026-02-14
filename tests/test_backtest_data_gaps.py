@@ -4,8 +4,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from btcbot.services.market_data_replay import MarketDataReplay
 
 
@@ -57,7 +55,7 @@ def test_data_gaps_use_deterministic_carry_forward(tmp_path: Path) -> None:
     assert stats and stats[0]["pairSymbol"] == "BTCTRY"
 
 
-def test_orderbook_gap_without_prior_snapshot_raises_keyerror(tmp_path: Path) -> None:
+def test_orderbook_gap_without_prior_snapshot_returns_none(tmp_path: Path) -> None:
     data = tmp_path / "data"
     _write_csv(
         data / "candles" / "BTCTRY.csv",
@@ -78,8 +76,7 @@ def test_orderbook_gap_without_prior_snapshot_raises_keyerror(tmp_path: Path) ->
         seed=9,
     )
 
-    with pytest.raises(KeyError, match="orderbook not found"):
-        replay.get_orderbook("BTCTRY")
+    assert replay.get_orderbook("BTCTRY") is None
 
 
 def test_replay_parses_millisecond_epoch_timestamps(tmp_path: Path) -> None:
@@ -101,6 +98,31 @@ def test_replay_parses_millisecond_epoch_timestamps(tmp_path: Path) -> None:
         end_ts=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
         step_seconds=60,
         seed=5,
+    )
+
+    candles = replay.get_candles("BTCTRY", limit=1)
+    assert candles and candles[0].ts == datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+
+
+def test_replay_parses_second_epoch_timestamps(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _write_csv(
+        data / "candles" / "BTCTRY.csv",
+        "ts,open,high,low,close,volume",
+        ["1704067200,100,101,99,100,10"],
+    )
+    _write_csv(
+        data / "orderbook" / "BTCTRY.csv",
+        "ts,best_bid,best_ask",
+        ["1704067200,99.9,100.1"],
+    )
+
+    replay = MarketDataReplay.from_folder(
+        data_path=data,
+        start_ts=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        end_ts=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        step_seconds=60,
+        seed=3,
     )
 
     candles = replay.get_candles("BTCTRY", limit=1)
