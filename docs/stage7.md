@@ -337,3 +337,40 @@ Computed deterministically per cycle:
 - `missing_data` when missing mark prices are observed
 - `throttled` when throttling events are observed
 - `retry_excess` when retry count exceeds `STAGE7_RETRY_ALERT_THRESHOLD`
+
+## PR-9 Parameter Adaptation
+
+Stage7 now supports deterministic parameter adaptation for dry-run cycles only.
+
+- Adaptable knobs: universe size, score weights, order offset bps, turnover cap TRY, max orders/cycle, max spread bps, cash target TRY, min quote volume TRY.
+- Strict bounds are enforced before any proposal can be applied:
+  - universe size `[5, 50]`
+  - score weights each `[0,1]`, deterministically normalized to sum `1`
+  - order offset bps `[0,50]`
+  - turnover cap TRY `[0, NOTIONAL_CAP_TRY_PER_CYCLE]`
+  - max orders/cycle `[1,20]`
+  - max spread bps `[10,500]`
+  - cash target TRY `[0, TRY_CASH_MAX]`
+- Apply conditions:
+  - only in `NORMAL` mode
+  - rejected when breach flags are present
+  - rejected in `OBSERVE_ONLY` and `REDUCE_RISK_ONLY`
+- Rollback triggers:
+  - drawdown breach
+  - reject spike
+  - persistent throttling window
+  - optional consecutive net PnL floor breach
+- Audit persistence:
+  - `stage7_params_active`
+  - `stage7_param_changes`
+  - `stage7_params_checkpoints`
+  - plus `stage7_cycle_trace.active_param_version` and `stage7_cycle_trace.param_change_json`
+
+Example inspection queries:
+
+```sql
+SELECT * FROM stage7_params_active;
+SELECT * FROM stage7_param_changes ORDER BY ts DESC LIMIT 20;
+SELECT * FROM stage7_params_checkpoints ORDER BY version DESC;
+SELECT cycle_id, active_param_version, param_change_json FROM stage7_cycle_trace ORDER BY ts DESC LIMIT 20;
+```
