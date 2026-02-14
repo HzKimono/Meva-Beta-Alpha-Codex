@@ -72,6 +72,11 @@ class FakeExchangeStage4:
         return list(self.fills)
 
 
+class MissingRulesService:
+    def get_rules(self, symbol: str):
+        raise ValueError(f"No usable exchange rules for symbol={symbol} status=missing")
+
+
 @pytest.fixture
 def store(tmp_path) -> StateStore:
     return StateStore(str(tmp_path / "stage4.sqlite"))
@@ -432,3 +437,48 @@ def test_submit_idempotency_persists_single_row(store: StateStore) -> None:
 
     assert row is not None
     assert row["c"] == 1
+
+
+def test_execution_rejects_and_continues_when_rules_missing(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False),
+        rules_service=MissingRulesService(),
+    )
+    actions = [
+        LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("1000"),
+            qty=Decimal("1"),
+            reason="test",
+            client_order_id="cid-missing-rules",
+        ),
+        LifecycleAction(
+            action_type=LifecycleActionType.CANCEL,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("1000"),
+            qty=Decimal("1"),
+            reason="cancel",
+            client_order_id="cid-cancel-after-rules",
+            exchange_order_id="ex-cancel-1",
+        ),
+    ]
+
+    report = svc.execute_with_report(actions)
+
+    assert report.rejected == 1
+    assert report.canceled == 1
+    rejected_order = store.get_stage4_order_by_client_id("cid-missing-rules")
+    assert rejected_order is not None
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT last_error FROM stage4_orders WHERE client_order_id=?",
+            ("cid-missing-rules",),
+        ).fetchone()
+    assert row is not None
+    assert row["last_error"] == "missing_exchange_rules"

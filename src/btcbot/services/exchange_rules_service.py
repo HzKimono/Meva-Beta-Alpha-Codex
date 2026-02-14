@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
@@ -17,6 +18,16 @@ def _norm_symbol(s: str) -> str:
 
 
 def _pair_symbol_candidates(pair: object) -> list[str]:
+    if isinstance(pair, Mapping):
+        candidates = [
+            pair.get("pairSymbol"),
+            pair.get("symbol"),
+            pair.get("name"),
+            pair.get("nameNormalized"),
+            pair.get("name_normalized"),
+        ]
+        return [candidate for candidate in candidates if isinstance(candidate, str) and candidate]
+
     candidates = [
         getattr(pair, "pair_symbol", None),
         getattr(pair, "symbol", None),
@@ -27,10 +38,32 @@ def _pair_symbol_candidates(pair: object) -> list[str]:
     return [candidate for candidate in candidates if isinstance(candidate, str) and candidate]
 
 
-def _attr(pair: object, snake: str, camel: str) -> object:
-    if hasattr(pair, snake):
-        return getattr(pair, snake)
-    return getattr(pair, camel, None)
+def _read_field(pair: object, *names: str) -> object:
+    if isinstance(pair, Mapping):
+        for name in names:
+            if name in pair:
+                return pair[name]
+        return None
+    for name in names:
+        if hasattr(pair, name):
+            return getattr(pair, name)
+    return None
+
+
+def _to_decimal(value: object) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _infer_precision(value: Decimal | None, default: int = 8) -> int:
+    if value is None or value <= 0:
+        return default
+    exponent = value.normalize().as_tuple().exponent
+    return max(0, -int(exponent))
 
 
 @dataclass(frozen=True)
@@ -92,6 +125,57 @@ class ExchangeRulesService:
     def _is_valid_rules(rules: SymbolRules) -> bool:
         return rules.tick_size > 0 and rules.lot_size > 0 and rules.min_notional_try > 0
 
+    def _extract_rules(self, pair: object) -> SymbolRules:
+        tick_size = _to_decimal(_read_field(pair, "tick_size", "tickSize"))
+        lot_size = _to_decimal(_read_field(pair, "step_size", "stepSize"))
+        min_notional_try = _to_decimal(_read_field(pair, "min_total_amount", "minTotalAmount"))
+        min_qty = _to_decimal(_read_field(pair, "min_quantity", "minQuantity", "minQty"))
+        max_qty = _to_decimal(_read_field(pair, "max_quantity", "maxQuantity", "maxQty"))
+
+        filters = _read_field(pair, "filters")
+        if isinstance(filters, list):
+            for raw_filter in filters:
+                if not isinstance(raw_filter, Mapping):
+                    continue
+                filter_type = str(raw_filter.get("filterType") or "").upper()
+                if filter_type == "PRICE_FILTER":
+                    tick_size = tick_size or _to_decimal(raw_filter.get("tickSize"))
+                    min_notional_try = min_notional_try or _to_decimal(
+                        raw_filter.get("minExchangeValue")
+                    )
+                if filter_type in {"LOT_SIZE", "MARKET_LOT_SIZE", "QUANTITY_FILTER"}:
+                    lot_size = lot_size or _to_decimal(raw_filter.get("stepSize"))
+                    min_qty = (
+                        min_qty if min_qty is not None else _to_decimal(raw_filter.get("minQty"))
+                    )
+                    max_qty = (
+                        max_qty if max_qty is not None else _to_decimal(raw_filter.get("maxQty"))
+                    )
+
+        numerator_scale = _read_field(pair, "numerator_scale", "numeratorScale")
+        denominator_scale = _read_field(pair, "denominator_scale", "denominatorScale")
+        if lot_size in {None, Decimal("0")} and isinstance(numerator_scale, int):
+            lot_size = Decimal("1").scaleb(-numerator_scale)
+
+        price_precision = (
+            int(denominator_scale)
+            if isinstance(denominator_scale, int)
+            else _infer_precision(tick_size)
+        )
+        qty_precision = (
+            int(numerator_scale) if isinstance(numerator_scale, int) else _infer_precision(lot_size)
+        )
+
+        return SymbolRules(
+            tick_size=tick_size or Decimal("0"),
+            lot_size=lot_size or Decimal("0"),
+            min_notional_try=min_notional_try or Decimal("0"),
+            min_qty=min_qty,
+            max_qty=max_qty,
+            price_precision=price_precision,
+            qty_precision=qty_precision,
+        )
+
     def get_symbol_rules_status(self, symbol: str) -> tuple[SymbolRules | None, str]:
         key = _norm_symbol(symbol)
         now = datetime.now(UTC)
@@ -120,25 +204,7 @@ class ExchangeRulesService:
             )
             return fallback, "fallback"
 
-        converted = SymbolRules(
-            tick_size=Decimal(str(_attr(match, "tick_size", "tickSize") or Decimal("0"))),
-            lot_size=Decimal(str(_attr(match, "step_size", "stepSize") or Decimal("0"))),
-            min_notional_try=Decimal(
-                str(_attr(match, "min_total_amount", "minTotalAmount") or Decimal("0"))
-            ),
-            min_qty=(
-                Decimal(str(_attr(match, "min_quantity", "minQuantity")))
-                if _attr(match, "min_quantity", "minQuantity") is not None
-                else None
-            ),
-            max_qty=(
-                Decimal(str(_attr(match, "max_quantity", "maxQuantity")))
-                if _attr(match, "max_quantity", "maxQuantity") is not None
-                else None
-            ),
-            price_precision=int(_attr(match, "denominator_scale", "denominatorScale") or 8),
-            qty_precision=int(_attr(match, "numerator_scale", "numeratorScale") or 8),
-        )
+        converted = self._extract_rules(match)
         if not self._is_valid_rules(converted):
             require_metadata = bool(getattr(self.settings, "stage7_rules_require_metadata", True))
             if require_metadata:

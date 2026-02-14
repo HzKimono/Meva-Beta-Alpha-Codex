@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from btcbot import cli
 from btcbot.config import Settings
-from btcbot.services.doctor import run_health_checks
+from btcbot.services.doctor import DoctorCheck, DoctorReport, run_health_checks
 
 
 def test_doctor_accepts_creatable_db_path(tmp_path: Path) -> None:
@@ -74,3 +76,87 @@ def test_doctor_detects_stage7_gate_conflicts() -> None:
     unsafe_report = run_health_checks(unsafe, db_path=None, dataset_path=None)
     assert not unsafe_report.ok
     assert any("LIVE_TRADING=true" in error for error in unsafe_report.errors)
+
+
+class _DoctorExchange:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def get_exchange_info(self):
+        return self._rows
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.fixture
+def patch_doctor_exchange(monkeypatch):
+    def _apply(rows):
+        monkeypatch.setattr(
+            "btcbot.services.doctor.build_exchange_stage4",
+            lambda settings, dry_run: _DoctorExchange(rows),
+        )
+
+    return _apply
+
+
+def test_doctor_exchange_rules_check_passes_with_usable_rules(patch_doctor_exchange) -> None:
+    patch_doctor_exchange(
+        [
+            {
+                "name": "BTCTRY",
+                "nameNormalized": "BTC_TRY",
+                "numeratorScale": 8,
+                "denominatorScale": 2,
+                "filters": [
+                    {
+                        "filterType": "PRICE_FILTER",
+                        "tickSize": "1",
+                        "minExchangeValue": "99.91",
+                    }
+                ],
+            }
+        ]
+    )
+    report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
+
+    assert any(
+        check.category == "exchange_rules" and check.status == "pass" for check in report.checks
+    )
+
+
+def test_doctor_exchange_rules_check_fails_for_invalid_rules(patch_doctor_exchange) -> None:
+    patch_doctor_exchange(
+        [
+            {
+                "name": "BTCTRY",
+                "nameNormalized": "BTC_TRY",
+                "numeratorScale": 8,
+                "denominatorScale": 2,
+                "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0"}],
+            }
+        ]
+    )
+    report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
+
+    assert not report.ok
+    assert any("exchange rules unusable" in error for error in report.errors)
+    assert any("exchangeinfo schema" in action.lower() for action in report.actions)
+
+
+def test_doctor_report_ok_depends_on_fail_checks_only() -> None:
+    warn_only = DoctorReport(
+        checks=[DoctorCheck("x", "warn_case", "warn", "w")],
+        errors=["legacy error text"],
+        warnings=["w"],
+        actions=[],
+    )
+    fail_present = DoctorReport(
+        checks=[DoctorCheck("x", "fail_case", "fail", "f")],
+        errors=[],
+        warnings=[],
+        actions=[],
+    )
+
+    assert warn_only.ok
+    assert not fail_present.ok
