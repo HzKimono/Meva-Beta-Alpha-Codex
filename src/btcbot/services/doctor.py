@@ -3,18 +3,21 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from btcbot.config import Settings
 from btcbot.replay.validate import DatasetValidationReport, validate_replay_dataset
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 
+DoctorStatus = Literal["pass", "warn", "fail"]
+
 
 @dataclass(frozen=True)
 class DoctorCheck:
     category: str
     name: str
-    status: str
+    status: DoctorStatus
     message: str
 
 
@@ -27,7 +30,7 @@ class DoctorReport:
 
     @property
     def ok(self) -> bool:
-        return not self.errors
+        return all(check.status != "fail" for check in self.checks)
 
 
 def run_health_checks(

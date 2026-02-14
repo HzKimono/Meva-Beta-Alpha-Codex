@@ -7,7 +7,7 @@ import pytest
 
 from btcbot import cli
 from btcbot.config import Settings
-from btcbot.services.doctor import run_health_checks
+from btcbot.services.doctor import DoctorCheck, DoctorReport, run_health_checks
 
 
 def test_doctor_accepts_creatable_db_path(tmp_path: Path) -> None:
@@ -142,3 +142,21 @@ def test_doctor_exchange_rules_check_fails_for_invalid_rules(patch_doctor_exchan
     assert not report.ok
     assert any("exchange rules unusable" in error for error in report.errors)
     assert any("exchangeinfo schema" in action.lower() for action in report.actions)
+
+
+def test_doctor_report_ok_depends_on_fail_checks_only() -> None:
+    warn_only = DoctorReport(
+        checks=[DoctorCheck("x", "warn_case", "warn", "w")],
+        errors=["legacy error text"],
+        warnings=["w"],
+        actions=[],
+    )
+    fail_present = DoctorReport(
+        checks=[DoctorCheck("x", "fail_case", "fail", "f")],
+        errors=[],
+        warnings=[],
+        actions=[],
+    )
+
+    assert warn_only.ok
+    assert not fail_present.ok
