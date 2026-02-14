@@ -19,9 +19,11 @@ from btcbot.adapters.btcturk_http import (
 from btcbot.config import Settings
 from btcbot.domain.models import normalize_symbol
 from btcbot.logging_utils import setup_logging
+from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_replay_dataset
+from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
 from btcbot.risk.policy import RiskPolicy
-from btcbot.services.doctor import run_health_checks
+from btcbot.services.doctor import DoctorReport, run_health_checks
 from btcbot.services.exchange_factory import build_exchange_stage3
 from btcbot.services.execution_service import ExecutionService
 from btcbot.services.market_data_replay import MarketDataReplay
@@ -59,7 +61,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="btcbot",
         epilog=(
-            "PowerShell quickstart: stage7-backtest --dataset ./data --out ./backtest.db ... | "
+            "PowerShell quickstart: stage7-backtest --dataset ./data/replay "
+            "--out ./backtest.db ... | "
             "stage7-parity --out-a ./a.db --out-b ./b.db ... | "
             "stage7-backtest-report --db ./backtest.db --out out.jsonl | "
             "stage7-db-count --db ./backtest.db"
@@ -100,8 +103,12 @@ def main() -> int:
         "--data",
         "--dataset",
         dest="data",
-        required=True,
-        help="Path to replay dataset folder (alias: --dataset)",
+        required=False,
+        default=None,
+        help=(
+            "Path to replay dataset folder (alias: --dataset). "
+            "Defaults to env BTCTBOT_REPLAY_DATASET or ./data/replay if it exists"
+        ),
     )
     backtest_parser.add_argument(
         "--out-db",
@@ -157,6 +164,42 @@ def main() -> int:
         "--dataset",
         default=None,
         help="Optional replay dataset folder path to validate for backtests",
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help="Print machine-readable JSON report"
+    )
+
+    replay_init_parser = subparsers.add_parser(
+        "replay-init", help="Initialize replay dataset structure"
+    )
+    replay_init_parser.add_argument("--dataset", required=True, help="Replay dataset folder path")
+    replay_init_parser.add_argument(
+        "--seed", type=int, default=123, help="Deterministic seed for synthetic sample"
+    )
+    replay_init_parser.add_argument(
+        "--no-synthetic",
+        action="store_true",
+        help="Only create folder/schema docs; do not write synthetic sample files",
+    )
+
+    replay_capture_parser = subparsers.add_parser(
+        "replay-capture",
+        help="Capture replay dataset from BTCTurk public endpoints",
+    )
+    replay_capture_parser.add_argument(
+        "--dataset", required=True, help="Replay dataset folder path"
+    )
+    replay_capture_parser.add_argument(
+        "--symbols", required=True, help="Comma-separated symbols e.g. BTCTRY,ETHTRY"
+    )
+    replay_capture_parser.add_argument(
+        "--seconds", type=int, default=300, help="Capture duration in seconds"
+    )
+    replay_capture_parser.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=1,
+        help="Delay between capture polls in seconds",
     )
 
     backtest_export = subparsers.add_parser(
@@ -244,7 +287,27 @@ def main() -> int:
         return run_stage7_db_count(db_path=args.db)
 
     if args.command == "doctor":
-        return run_doctor(settings=settings, db_path=args.db, dataset_path=args.dataset)
+        return run_doctor(
+            settings=settings,
+            db_path=args.db,
+            dataset_path=args.dataset,
+            json_output=args.json,
+        )
+
+    if args.command == "replay-init":
+        return run_replay_init(
+            dataset_path=args.dataset,
+            seed=args.seed,
+            write_synthetic=not args.no_synthetic,
+        )
+
+    if args.command == "replay-capture":
+        return run_replay_capture(
+            dataset_path=args.dataset,
+            symbols_csv=args.symbols,
+            seconds=args.seconds,
+            interval_seconds=args.interval_seconds,
+        )
 
     return 1
 
@@ -567,10 +630,29 @@ def _parse_iso(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _resolve_dataset_path(dataset: str | None) -> Path | None:
+    if dataset:
+        return Path(dataset)
+    env_dataset = _read_replay_dataset_env()
+    if env_dataset:
+        return Path(env_dataset)
+    default_path = Path("data") / "replay"
+    if default_path.exists():
+        return default_path
+    return None
+
+
+def _read_replay_dataset_env() -> str | None:
+    import os
+
+    raw = os.getenv("BTCTBOT_REPLAY_DATASET")
+    return raw.strip() if raw and raw.strip() else None
+
+
 def run_stage7_backtest(
     settings: Settings,
     *,
-    data_path: str,
+    data_path: str | None,
     out_db: str,
     start: str,
     end: str,
@@ -580,8 +662,26 @@ def run_stage7_backtest(
     pair_info_json: str | None,
     include_adaptation: bool,
 ) -> int:
+    resolved_dataset = _resolve_dataset_path(data_path)
+    if resolved_dataset is None:
+        print(
+            "stage7-backtest: dataset not found. ACTION: Run "
+            r"`python -m btcbot.cli replay-init --dataset .\data\replay`"
+        )
+        print(r"stage7-backtest: or set env BTCTBOT_REPLAY_DATASET, or pass --dataset explicitly.")
+        return 2
+
+    contract = validate_replay_dataset(resolved_dataset)
+    if not contract.ok:
+        print(f"stage7-backtest: dataset validation failed: {resolved_dataset}")
+        for issue in contract.issues:
+            if issue.level == "error":
+                print(f"stage7-backtest: FAIL - {issue.message}")
+        print(r"stage7-backtest: ACTION - python -m btcbot.cli replay-init --dataset .\data\replay")
+        return 2
+
     replay = MarketDataReplay.from_folder(
-        data_path=Path(data_path),
+        data_path=resolved_dataset,
         start_ts=_parse_iso(start),
         end_ts=_parse_iso(end),
         step_seconds=step_seconds,
@@ -745,19 +845,75 @@ def run_stage7_db_count(*, db_path: str) -> int:
     return 0
 
 
-def run_doctor(settings: Settings, *, db_path: str | None, dataset_path: str | None) -> int:
+def run_replay_init(*, dataset_path: str, seed: int, write_synthetic: bool) -> int:
+    init_replay_dataset(dataset_path=Path(dataset_path), seed=seed, write_synthetic=write_synthetic)
+    report = validate_replay_dataset(Path(dataset_path))
+    if report.ok:
+        print(f"replay-init: OK - initialized dataset at {dataset_path}")
+        return 0
+    print(f"replay-init: FAIL - dataset at {dataset_path} failed validation")
+    for issue in report.issues:
+        print(f"replay-init: {issue.level.upper()} - {issue.message}")
+    return 1
+
+
+def run_replay_capture(
+    *, dataset_path: str, symbols_csv: str, seconds: int, interval_seconds: int
+) -> int:
+    symbols = [token.strip().upper() for token in symbols_csv.split(",") if token.strip()]
+    if not symbols:
+        print("replay-capture: --symbols must include at least one symbol")
+        return 2
+
+    capture_replay_dataset(
+        ReplayCaptureConfig(
+            dataset=Path(dataset_path),
+            symbols=symbols,
+            seconds=seconds,
+            interval_seconds=interval_seconds,
+        )
+    )
+    print(f"replay-capture: OK - captured {len(symbols)} symbol(s) into {dataset_path}")
+    return 0
+
+
+def _doctor_report_json(report: DoctorReport) -> str:
+    payload = {
+        "status": "ok" if report.ok else "fail",
+        "checks": [check.__dict__ for check in report.checks],
+        "warnings": report.warnings,
+        "errors": report.errors,
+        "actions": report.actions,
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def run_doctor(
+    settings: Settings,
+    *,
+    db_path: str | None,
+    dataset_path: str | None,
+    json_output: bool = False,
+) -> int:
     report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)
+
+    if json_output:
+        print(_doctor_report_json(report))
+        return 0 if report.ok else 1
+
+    for check in report.checks:
+        print(f"doctor: {check.status.upper()} [{check.category}] {check.name} - {check.message}")
 
     for message in report.warnings:
         print(f"doctor: WARN - {message}")
     for message in report.errors:
         print(f"doctor: FAIL - {message}")
 
+    if report.actions:
+        for action in report.actions:
+            print(f"doctor: ACTION - {action}")
+
     if not report.ok:
-        print(
-            "doctor: ACTION - resolve FAIL items, then re-run `python -m btcbot.cli doctor` "
-            "before stage7-run/backtest"
-        )
         return 1
 
     print("doctor: OK")
