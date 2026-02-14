@@ -175,7 +175,9 @@ def test_doctor_exchange_rules_check_passes_with_usable_rules(patch_doctor_excha
     )
 
 
-def test_doctor_exchange_rules_check_fails_for_invalid_rules(patch_doctor_exchange) -> None:
+def test_doctor_exchange_rules_check_warns_for_invalid_rules_in_non_blocking_mode(
+    patch_doctor_exchange,
+) -> None:
     patch_doctor_exchange(
         [
             {
@@ -188,6 +190,36 @@ def test_doctor_exchange_rules_check_fails_for_invalid_rules(patch_doctor_exchan
         ]
     )
     report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
+
+    _debug_checks(report)
+    assert report.ok
+    assert any("exchange rules unusable" in warning for warning in report.warnings)
+    assert any("exchangeinfo schema" in action.lower() for action in report.actions)
+
+
+def test_doctor_exchange_rules_check_fails_for_invalid_rules_in_blocking_mode(
+    patch_doctor_exchange,
+) -> None:
+    patch_doctor_exchange(
+        [
+            {
+                "name": "BTCTRY",
+                "nameNormalized": "BTC_TRY",
+                "numeratorScale": 8,
+                "denominatorScale": 2,
+                "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0"}],
+            }
+        ]
+    )
+    settings = Settings(SYMBOLS=["BTC_TRY"])
+    settings.stage7_enabled = True
+    settings.live_trading = True
+
+    report = run_health_checks(
+        settings,
+        db_path=None,
+        dataset_path=None,
+    )
 
     _debug_checks(report)
     assert not report.ok

@@ -142,6 +142,12 @@ def _check_exchange_rules(
         settings=settings,
     )
     allow_fallback = not bool(getattr(settings, "stage7_rules_require_metadata", True))
+    require_metadata = bool(getattr(settings, "stage7_rules_require_metadata", False))
+    blocking = bool(getattr(settings, "live_trading", False)) and bool(
+        getattr(settings, "stage7_enabled", False)
+    )
+    if hasattr(settings, "stage7_rules_require_metadata"):
+        blocking = blocking and require_metadata
     bad_symbols: list[tuple[str, str]] = []
 
     get_info = getattr(base_client, "get_exchange_info", None)
@@ -179,8 +185,14 @@ def _check_exchange_rules(
     if bad_symbols:
         for symbol, status in bad_symbols:
             message = f"exchange rules unusable for symbol={symbol} status={status}"
-            checks.append(DoctorCheck("exchange_rules", f"rules_{symbol.lower()}", "fail", message))
-            errors.append(message)
+            check_status = "fail" if blocking else "warn"
+            checks.append(
+                DoctorCheck("exchange_rules", f"rules_{symbol.lower()}", check_status, message)
+            )
+            if blocking:
+                errors.append(message)
+            else:
+                warnings.append(message)
         actions.extend(
             [
                 "Verify BTCTurk /api/v2/server/exchangeinfo schema and symbol names.",
