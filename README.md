@@ -44,6 +44,8 @@ If any live gate is not satisfied, execution remains blocked.
 
 ## Setup
 
+**Python 3.12+ required** (project metadata: `requires-python = ">=3.12"`).
+
 ### Linux/macOS
 
 ```bash
@@ -82,18 +84,22 @@ Copy-Item .env.example .env -Force
 
 # 4) Stage 3 acceptance commands
 python -m pytest -q
-btcbot health
-btcbot run --dry-run
+python -m btcbot.cli health
+python -m btcbot.cli run --dry-run
 ```
 
 ## Common commands
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -e ".[dev]"
-btcbot health
-btcbot run --dry-run
-btcbot stage4-run --dry-run
+ruff format --check .
+ruff check .
 python -m pytest -q
+python -m btcbot.cli health
+python -m btcbot.cli run --dry-run
 ```
 
 ## Quality gates (CI/local)
@@ -134,7 +140,7 @@ Stage 4 modules are available for controlled live trading lifecycle/accounting/r
 Run Stage 4 directly via the dedicated subcommand:
 
 ```bash
-btcbot stage4-run --dry-run
+python -m btcbot.cli stage4-run --dry-run
 ```
 
 To arm Stage 4 live writes, all of the following must be set:

@@ -185,7 +185,12 @@ def test_run_cycle_returns_two_on_configuration_error(monkeypatch) -> None:
     monkeypatch.setattr(cli, "PortfolioService", BrokenPortfolioService)
 
     settings = Settings(
-        DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND"
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
     )
 
     assert cli.run_cycle(settings, force_dry_run=False) == 2

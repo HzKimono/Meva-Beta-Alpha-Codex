@@ -46,6 +46,7 @@ class SweepService:
             return []
 
         intents_by_symbol: dict[str, OrderIntent] = {}
+        warned_symbols: set[str] = set()
         used_notional = Decimal("0")
 
         per_symbol_budget = (excess / Decimal(str(len(sorted_symbols)))).quantize(
@@ -63,6 +64,7 @@ class SweepService:
                 budget=min(per_symbol_budget, remaining),
                 best_bids=best_bids,
                 symbol_rules=symbol_rules,
+                warned_symbols=warned_symbols,
             )
             if intent is None:
                 continue
@@ -86,6 +88,7 @@ class SweepService:
                 budget=chunk_budget,
                 best_bids=best_bids,
                 symbol_rules=symbol_rules,
+                warned_symbols=warned_symbols,
             )
             if intent is None:
                 if round_robin_index >= len(sorted_symbols) * 4:
@@ -127,13 +130,16 @@ class SweepService:
         budget: Decimal,
         best_bids: dict[str, float],
         symbol_rules: dict[str, SymbolInfo],
+        warned_symbols: set[str],
     ) -> OrderIntent | None:
         bid = best_bids.get(symbol)
         if bid is None or bid <= 0:
-            logger.warning(
-                "Skipping symbol due to missing or non-positive bid",
-                extra={"extra": {"symbol": symbol, "bid": bid}},
-            )
+            if symbol not in warned_symbols:
+                warned_symbols.add(symbol)
+                logger.warning(
+                    "Skipping symbol due to missing or non-positive bid",
+                    extra={"extra": {"symbol": symbol, "bid": bid}},
+                )
             return None
 
         rule = symbol_rules.get(symbol)

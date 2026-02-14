@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -24,6 +24,7 @@ btcbot = "btcbot.cli:main"
 dev = [
   "pytest>=8.3.0",
   "ruff==0.14.11",
+  "mypy>=1.10.0",
 ]
 
 [tool.setuptools]
