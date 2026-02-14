@@ -17,6 +17,18 @@ class DoctorCheck:
     status: str
     message: str
 
+    def __post_init__(self) -> None:
+        normalized = self.status.strip().lower()
+        status_map = {
+            "warning": "warn",
+            "error": "fail",
+        }
+        normalized = status_map.get(normalized, normalized)
+        if normalized not in {"pass", "warn", "fail"}:
+            msg = f"invalid doctor check status: {self.status}"
+            raise ValueError(msg)
+        object.__setattr__(self, "status", normalized)
+
 
 @dataclass(frozen=True)
 class DoctorReport:
@@ -27,7 +39,7 @@ class DoctorReport:
 
     @property
     def ok(self) -> bool:
-        return not self.errors
+        return all(check.status != "fail" for check in self.checks)
 
 
 def run_health_checks(
