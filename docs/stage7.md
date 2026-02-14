@@ -310,3 +310,30 @@ PR-7 hardens the Stage 7 OMS for restart safety and deterministic reliability be
   - transition guards
 
 Stage 7 safety gates are unchanged: `STAGE7_ENABLED` requires `DRY_RUN=true` and `LIVE_TRADING=false`.
+
+## PR-8 Monitoring / Observability
+
+Stage 7 now persists per-cycle run metrics in `stage7_run_metrics` for queryable reporting and export.
+
+### Metrics glossary
+- `net_pnl_try`: net PnL after fees/slippage.
+- `turnover_try`: total traded notional across the cycle.
+- `max_drawdown_pct`: max observed drawdown ratio for the simulated equity path.
+
+### Storage
+- Trace: `stage7_cycle_trace`
+- Ledger summary: `stage7_ledger_metrics`
+- Observability run metrics + alerts: `stage7_run_metrics`
+
+### CLI hooks
+- `btcbot stage7-report --last N`
+- `btcbot stage7-export --last N --format jsonl|csv --out <path>`
+- `btcbot stage7-alerts --last N`
+
+### Alert flags
+Computed deterministically per cycle:
+- `drawdown_breach` when `max_drawdown_pct >= STAGE7_MAX_DRAWDOWN_PCT`
+- `reject_spike` when `oms_rejected_count >= STAGE7_REJECT_SPIKE_THRESHOLD`
+- `missing_data` when missing mark prices are observed
+- `throttled` when throttling events are observed
+- `retry_excess` when retry count exceeds `STAGE7_RETRY_ALERT_THRESHOLD`

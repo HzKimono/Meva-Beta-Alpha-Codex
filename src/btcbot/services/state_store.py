@@ -382,6 +382,45 @@ class StateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS stage7_run_metrics (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                mode_base TEXT NOT NULL,
+                mode_final TEXT NOT NULL,
+                universe_size INTEGER NOT NULL,
+                intents_planned_count INTEGER NOT NULL,
+                intents_skipped_count INTEGER NOT NULL,
+                oms_submitted_count INTEGER NOT NULL,
+                oms_filled_count INTEGER NOT NULL,
+                oms_rejected_count INTEGER NOT NULL,
+                oms_canceled_count INTEGER NOT NULL,
+                events_appended INTEGER NOT NULL,
+                events_ignored INTEGER NOT NULL,
+                equity_try TEXT NOT NULL,
+                gross_pnl_try TEXT NOT NULL,
+                net_pnl_try TEXT NOT NULL,
+                fees_try TEXT NOT NULL,
+                slippage_try TEXT NOT NULL,
+                max_drawdown_pct TEXT NOT NULL,
+                turnover_try TEXT NOT NULL,
+                latency_ms_total INTEGER NOT NULL,
+                selection_ms INTEGER NOT NULL,
+                planning_ms INTEGER NOT NULL,
+                intents_ms INTEGER NOT NULL,
+                oms_ms INTEGER NOT NULL,
+                ledger_ms INTEGER NOT NULL,
+                persist_ms INTEGER NOT NULL,
+                quality_flags_json TEXT NOT NULL,
+                alert_flags_json TEXT NOT NULL,
+                run_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_run_metrics_ts ON stage7_run_metrics(ts)"
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS stage7_order_intents (
                 client_order_id TEXT PRIMARY KEY,
                 cycle_id TEXT NOT NULL,
@@ -468,6 +507,144 @@ class StateStore:
             "ON stage7_risk_decisions(decided_at)"
         )
 
+    def save_stage7_run_metrics(self, cycle_id: str, metrics_dict: dict[str, object]) -> None:
+        with self._connect() as conn:
+            self._save_stage7_run_metrics_with_conn(
+                conn=conn, cycle_id=cycle_id, metrics_dict=metrics_dict
+            )
+
+    def _save_stage7_run_metrics_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        cycle_id: str,
+        metrics_dict: dict[str, object],
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO stage7_run_metrics(
+                cycle_id, ts, mode_base, mode_final, universe_size,
+                intents_planned_count, intents_skipped_count,
+                oms_submitted_count, oms_filled_count, oms_rejected_count, oms_canceled_count,
+                events_appended, events_ignored,
+                equity_try, gross_pnl_try, net_pnl_try, fees_try, slippage_try,
+                max_drawdown_pct, turnover_try,
+                latency_ms_total, selection_ms, planning_ms, intents_ms,
+                oms_ms, ledger_ms, persist_ms,
+                quality_flags_json, alert_flags_json, run_id
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            ON CONFLICT(cycle_id) DO UPDATE SET
+                ts=excluded.ts,
+                mode_base=excluded.mode_base,
+                mode_final=excluded.mode_final,
+                universe_size=excluded.universe_size,
+                intents_planned_count=excluded.intents_planned_count,
+                intents_skipped_count=excluded.intents_skipped_count,
+                oms_submitted_count=excluded.oms_submitted_count,
+                oms_filled_count=excluded.oms_filled_count,
+                oms_rejected_count=excluded.oms_rejected_count,
+                oms_canceled_count=excluded.oms_canceled_count,
+                events_appended=excluded.events_appended,
+                events_ignored=excluded.events_ignored,
+                equity_try=excluded.equity_try,
+                gross_pnl_try=excluded.gross_pnl_try,
+                net_pnl_try=excluded.net_pnl_try,
+                fees_try=excluded.fees_try,
+                slippage_try=excluded.slippage_try,
+                max_drawdown_pct=excluded.max_drawdown_pct,
+                turnover_try=excluded.turnover_try,
+                latency_ms_total=excluded.latency_ms_total,
+                selection_ms=excluded.selection_ms,
+                planning_ms=excluded.planning_ms,
+                intents_ms=excluded.intents_ms,
+                oms_ms=excluded.oms_ms,
+                ledger_ms=excluded.ledger_ms,
+                persist_ms=excluded.persist_ms,
+                quality_flags_json=excluded.quality_flags_json,
+                alert_flags_json=excluded.alert_flags_json,
+                run_id=excluded.run_id
+            """,
+            (
+                cycle_id,
+                str(metrics_dict["ts"]),
+                str(metrics_dict["mode_base"]),
+                str(metrics_dict["mode_final"]),
+                int(metrics_dict["universe_size"]),
+                int(metrics_dict["intents_planned_count"]),
+                int(metrics_dict["intents_skipped_count"]),
+                int(metrics_dict["oms_submitted_count"]),
+                int(metrics_dict["oms_filled_count"]),
+                int(metrics_dict["oms_rejected_count"]),
+                int(metrics_dict["oms_canceled_count"]),
+                int(metrics_dict["events_appended"]),
+                int(metrics_dict["events_ignored"]),
+                str(metrics_dict["equity_try"]),
+                str(metrics_dict["gross_pnl_try"]),
+                str(metrics_dict["net_pnl_try"]),
+                str(metrics_dict["fees_try"]),
+                str(metrics_dict["slippage_try"]),
+                str(metrics_dict["max_drawdown_pct"]),
+                str(metrics_dict["turnover_try"]),
+                int(metrics_dict["latency_ms_total"]),
+                int(metrics_dict["selection_ms"]),
+                int(metrics_dict["planning_ms"]),
+                int(metrics_dict["intents_ms"]),
+                int(metrics_dict["oms_ms"]),
+                int(metrics_dict["ledger_ms"]),
+                int(metrics_dict["persist_ms"]),
+                json.dumps(metrics_dict["quality_flags"], sort_keys=True),
+                json.dumps(metrics_dict["alert_flags"], sort_keys=True),
+                str(metrics_dict.get("run_id") or ""),
+            ),
+        )
+
+    def fetch_stage7_run_metrics(
+        self, limit: int, order_desc: bool = True
+    ) -> list[dict[str, object]]:
+        order_sql = "DESC" if order_desc else "ASC"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM stage7_run_metrics
+                ORDER BY ts {order_sql}
+                LIMIT ?
+                """,
+                (max(0, int(limit)),),
+            ).fetchall()
+        payload: list[dict[str, object]] = []
+        for row in rows:
+            item = {key: row[key] for key in row.keys()}
+            item["quality_flags"] = json.loads(str(item.pop("quality_flags_json")))
+            item["alert_flags"] = json.loads(str(item.pop("alert_flags_json")))
+            payload.append(item)
+        return payload
+
+    def fetch_stage7_cycles_for_export(self, limit: int) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.*, c.intents_summary_json, c.mode_json
+                FROM stage7_run_metrics m
+                LEFT JOIN stage7_cycle_trace c ON c.cycle_id = m.cycle_id
+                ORDER BY m.ts DESC
+                LIMIT ?
+                """,
+                (max(0, int(limit)),),
+            ).fetchall()
+        exports: list[dict[str, object]] = []
+        for row in rows:
+            record = {key: row[key] for key in row.keys()}
+            record["quality_flags"] = json.loads(str(record.pop("quality_flags_json")))
+            record["alert_flags"] = json.loads(str(record.pop("alert_flags_json")))
+            record["intents_summary"] = json.loads(str(record.get("intents_summary_json") or "{}"))
+            record["mode_payload"] = json.loads(str(record.get("mode_json") or "{}"))
+            exports.append(record)
+        return exports
+
     def save_stage7_cycle(
         self,
         *,
@@ -483,6 +660,7 @@ class StateStore:
         order_intents: list[OrderIntent] | None = None,
         order_intents_trace: list[dict[str, object]] | None = None,
         risk_decision: Stage7RiskDecision | None = None,
+        run_metrics: dict[str, object] | None = None,
     ) -> None:
         with self.transaction() as conn:
             derived_trace = (
@@ -553,6 +731,12 @@ class StateStore:
                     conn=conn,
                     cycle_id=cycle_id,
                     decision=risk_decision,
+                )
+            if run_metrics is not None:
+                self._save_stage7_run_metrics_with_conn(
+                    conn=conn,
+                    cycle_id=cycle_id,
+                    metrics_dict=run_metrics,
                 )
             conn.execute(
                 """
