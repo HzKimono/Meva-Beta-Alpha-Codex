@@ -732,8 +732,7 @@ class StateStore:
                         price_try, qty, filled_qty, avg_fill_price_try,
                         status, intent_hash, last_update
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(order_id) DO UPDATE SET
-                        client_order_id=excluded.client_order_id,
+                    ON CONFLICT(client_order_id) DO UPDATE SET
                         cycle_id=excluded.cycle_id,
                         symbol=excluded.symbol,
                         side=excluded.side,
@@ -792,6 +791,7 @@ class StateStore:
         return AppendResult(attempted=attempted, inserted=inserted, ignored=attempted - inserted)
 
     def append_stage7_order_event(self, event: OrderEvent) -> bool:
+        """Append a single Stage7 order event with duplicate-event protection."""
         with self.transaction() as conn:
             cur = conn.execute(
                 """
@@ -812,6 +812,7 @@ class StateStore:
         return bool(cur.rowcount)
 
     def try_register_idempotency_key(self, key: str, payload_hash: str) -> bool:
+        """Register an idempotency key atomically; return False for same-payload duplicates."""
         now_iso = ensure_utc(datetime.now(UTC)).isoformat()
         with self.transaction() as conn:
             row = conn.execute(
@@ -836,6 +837,7 @@ class StateStore:
             return True
 
     def load_non_terminal_orders(self) -> list[Stage7Order]:
+        """Load Stage7 orders whose status is not terminal."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -848,6 +850,7 @@ class StateStore:
         return [self._row_to_stage7_order(row) for row in rows]
 
     def load_order_events(self, client_order_id: str) -> list[OrderEvent]:
+        """Load Stage7 order events for one client order id in storage order."""
         return self.get_stage7_order_events_by_client_id(client_order_id)
 
     def get_stage7_order_by_client_id(self, client_order_id: str) -> Stage7Order | None:
@@ -1468,6 +1471,13 @@ class StateStore:
         return row is not None
 
     def get_stage4_order_by_client_id(self, client_order_id: str):
+        """Load all Stage7 events for a client_order_id in deterministic order."""
+
+        """Load Stage7 orders that are not in terminal statuses."""
+
+        """Register idempotency key atomically, returning False for same-payload duplicates."""
+
+        """Append a single Stage7 order event with duplicate-id protection."""
         from btcbot.domain.stage4 import Order as Stage4Order
 
         with self._connect() as conn:

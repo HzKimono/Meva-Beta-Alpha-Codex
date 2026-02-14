@@ -4,6 +4,9 @@ import random
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -13,7 +16,7 @@ class RetryAttempt:
     error_type: str
 
 
-def retry_with_backoff[T](
+def retry_with_backoff(  # noqa: UP047
     fn: Callable[[], T],
     *,
     max_attempts: int,
@@ -24,6 +27,7 @@ def retry_with_backoff[T](
     sleep_fn: Callable[[float], None] | None = None,
     on_retry: Callable[[RetryAttempt], None] | None = None,
 ) -> T:
+    """Run `fn` with deterministic exponential backoff on retryable exceptions."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
     if base_delay_ms < 0 or max_delay_ms < 0:

@@ -155,49 +155,19 @@ class OMSService:
                 last_update=now_utc.astimezone(UTC),
                 intent_hash=make_intent_hash(intent.to_dict()),
             )
-
             idempotency_key = f"submit:{intent.client_order_id}"
-            payload_hash = make_intent_hash(intent.to_dict())
-            try:
-                registered = state_store.try_register_idempotency_key(idempotency_key, payload_hash)
-            except IdempotencyConflictError:
-                _, conflict_event, seq = self._transition_once(
+
+            if intent.qty <= 0 or intent.price_try <= 0 or intent.notional_try <= 0:
+                order, rejected_event, seq = self._transition_once(
                     order=order,
                     now_utc=now_utc,
-                    event_type="IDEMPOTENCY_CONFLICT",
-                    payload={"key": idempotency_key},
+                    event_type="REJECTED",
+                    payload={"reason": "invalid_price_or_qty"},
                     existing_event_types=existing_event_types,
                     seq=seq,
                 )
-                if conflict_event is not None:
-                    events_to_append.append(conflict_event)
-                raise
-
-            if order.status in _TERMINAL_STATUSES:
-                _, duplicate_event, seq = self._transition_once(
-                    order=order,
-                    now_utc=now_utc,
-                    event_type="DUPLICATE_IGNORED",
-                    payload={"key": idempotency_key, "reason": "terminal_order"},
-                    existing_event_types=[],
-                    seq=seq,
-                )
-                if duplicate_event is not None:
-                    events_to_append.append(duplicate_event)
-                applied_orders.append(order)
-                continue
-
-            if not registered:
-                _, duplicate_event, seq = self._transition_once(
-                    order=order,
-                    now_utc=now_utc,
-                    event_type="DUPLICATE_IGNORED",
-                    payload={"key": idempotency_key},
-                    existing_event_types=[],
-                    seq=seq,
-                )
-                if duplicate_event is not None:
-                    events_to_append.append(duplicate_event)
+                if rejected_event is not None:
+                    events_to_append.append(rejected_event)
                 applied_orders.append(order)
                 continue
 
@@ -216,7 +186,8 @@ class OMSService:
                 continue
 
             if not limiter.consume():
-                order, throttled_event, seq = self._transition_once(
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
                     order=order,
                     now_utc=now_utc,
                     event_type="THROTTLED",
@@ -226,25 +197,67 @@ class OMSService:
                             + timedelta(seconds=limiter.seconds_until_available())
                         ).isoformat()
                     },
-                    existing_event_types=[],
                     seq=seq,
                 )
-                if throttled_event is not None:
-                    events_to_append.append(throttled_event)
                 applied_orders.append(order)
                 continue
 
-            submit_cid = intent.client_order_id
+            payload_hash = make_intent_hash(intent.to_dict())
+            try:
+                registered = state_store.try_register_idempotency_key(idempotency_key, payload_hash)
+            except IdempotencyConflictError:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="IDEMPOTENCY_CONFLICT",
+                    payload={"key": idempotency_key},
+                    seq=seq,
+                )
+                order, rejected_event, seq = self._transition_once(
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="REJECTED",
+                    payload={"reason": "idempotency_conflict", "key": idempotency_key},
+                    existing_event_types=existing_event_types,
+                    seq=seq,
+                )
+                if rejected_event is not None:
+                    events_to_append.append(rejected_event)
+                applied_orders.append(order)
+                continue
 
-            def _submit_adapter(client_order_id: str = submit_cid) -> None:
-                market_sim.maybe_raise_submit_error(client_order_id)
+            if not registered:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="DUPLICATE_IGNORED",
+                    payload={"key": idempotency_key},
+                    seq=seq,
+                )
+                applied_orders.append(order)
+                continue
+
+            if order.status in _TERMINAL_STATUSES:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="DUPLICATE_IGNORED",
+                    payload={"key": idempotency_key, "reason": "terminal_order"},
+                    seq=seq,
+                )
+                applied_orders.append(order)
+                continue
 
             retry_attempts: list[RetryAttempt] = []
 
+            def _submit_adapter(client_order_id: str = intent.client_order_id) -> None:
+                market_sim.maybe_raise_submit_error(client_order_id)
+
             def _on_retry(
-                attempt: RetryAttempt,
-                *,
-                attempts: list[RetryAttempt] = retry_attempts,
+                attempt: RetryAttempt, *, attempts: list[RetryAttempt] = retry_attempts
             ) -> None:
                 attempts.append(attempt)
 
@@ -259,53 +272,44 @@ class OMSService:
                     sleep_fn=self._sleep_fn,
                     on_retry=_on_retry,
                 )
-                for retry_attempt in retry_attempts:
-                    seq += 1
-                    events_to_append.append(
-                        OrderEvent(
-                            event_id=make_event_id(order.client_order_id, seq, "RETRY_SCHEDULED"),
-                            ts=now_utc.astimezone(UTC),
-                            client_order_id=order.client_order_id,
-                            order_id=order.order_id,
-                            event_type="RETRY_SCHEDULED",
-                            payload={
-                                "attempt": retry_attempt.attempt,
-                                "delay_ms": retry_attempt.delay_ms,
-                                "error_type": retry_attempt.error_type,
-                            },
-                            cycle_id=order.cycle_id,
-                        )
-                    )
             except (NetworkTimeout, RateLimitError, TemporaryUnavailable):
                 for retry_attempt in retry_attempts:
-                    seq += 1
-                    events_to_append.append(
-                        OrderEvent(
-                            event_id=make_event_id(order.client_order_id, seq, "RETRY_SCHEDULED"),
-                            ts=now_utc.astimezone(UTC),
-                            client_order_id=order.client_order_id,
-                            order_id=order.order_id,
-                            event_type="RETRY_SCHEDULED",
-                            payload={
-                                "attempt": retry_attempt.attempt,
-                                "delay_ms": retry_attempt.delay_ms,
-                                "error_type": retry_attempt.error_type,
-                            },
-                            cycle_id=order.cycle_id,
-                        )
+                    order, seq = self._append_event(
+                        events_to_append=events_to_append,
+                        order=order,
+                        now_utc=now_utc,
+                        event_type="RETRY_SCHEDULED",
+                        payload={
+                            "attempt": retry_attempt.attempt,
+                            "delay_ms": retry_attempt.delay_ms,
+                            "error_type": retry_attempt.error_type,
+                        },
+                        seq=seq,
                     )
-                order, giveup_event, seq = self._transition_once(
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
                     order=order,
                     now_utc=now_utc,
                     event_type="RETRY_GIVEUP",
                     payload={"reason": "transient_failure_exhausted"},
-                    existing_event_types=[],
                     seq=seq,
                 )
-                if giveup_event is not None:
-                    events_to_append.append(giveup_event)
                 applied_orders.append(order)
                 continue
+
+            for retry_attempt in retry_attempts:
+                order, seq = self._append_event(
+                    events_to_append=events_to_append,
+                    order=order,
+                    now_utc=now_utc,
+                    event_type="RETRY_SCHEDULED",
+                    payload={
+                        "attempt": retry_attempt.attempt,
+                        "delay_ms": retry_attempt.delay_ms,
+                        "error_type": retry_attempt.error_type,
+                    },
+                    seq=seq,
+                )
 
             for event_type in ("SUBMIT_REQUESTED", "ACKED"):
                 order, new_event, seq = self._transition_once(
@@ -367,7 +371,6 @@ class OMSService:
             )
             if filled_event is not None:
                 events_to_append.append(filled_event)
-
             applied_orders.append(order)
 
         state_store.upsert_stage7_orders(applied_orders)
@@ -408,6 +411,30 @@ class OMSService:
             settings=settings,
             cancel_requests=[],
         )
+
+    def _append_event(
+        self,
+        *,
+        events_to_append: list[OrderEvent],
+        order: Stage7Order,
+        now_utc: datetime,
+        event_type: str,
+        payload: dict[str, object],
+        seq: int,
+    ) -> tuple[Stage7Order, int]:
+        next_seq = seq + 1
+        events_to_append.append(
+            OrderEvent(
+                event_id=make_event_id(order.client_order_id, next_seq, event_type),
+                ts=now_utc.astimezone(UTC),
+                client_order_id=order.client_order_id,
+                order_id=order.order_id,
+                event_type=event_type,
+                payload=payload,
+                cycle_id=order.cycle_id,
+            )
+        )
+        return replace(order, last_update=now_utc.astimezone(UTC)), next_seq
 
     def _transition_once(
         self,

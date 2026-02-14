@@ -33,7 +33,7 @@ def _intent(cid: str) -> OrderIntent:
     )
 
 
-def test_burst_then_throttle_then_allowed(tmp_path) -> None:
+def test_burst_then_throttle_then_allowed_with_same_client_order_id(tmp_path) -> None:
     clock = FakeClock()
     limiter = TokenBucketRateLimiter(rate_per_sec=1.0, burst=1, time_source=clock.time)
     store = StateStore(db_path=str(tmp_path / "state.db"))
@@ -51,10 +51,12 @@ def test_burst_then_throttle_then_allowed(tmp_path) -> None:
         state_store=store,
         settings=settings,
     )
+
+    throttled_intent = _intent("s7:c1:BTCTRY:BUY:feed00000002")
     _, events_2 = oms.process_intents(
         cycle_id="cycle-1",
         now_utc=now,
-        intents=[_intent("s7:c1:BTCTRY:BUY:feed00000002")],
+        intents=[throttled_intent],
         market_sim=Stage7MarketSimulator({"BTCTRY": Decimal("100")}),
         state_store=store,
         settings=settings,
@@ -64,7 +66,7 @@ def test_burst_then_throttle_then_allowed(tmp_path) -> None:
     _, events_3 = oms.process_intents(
         cycle_id="cycle-1",
         now_utc=now,
-        intents=[_intent("s7:c1:BTCTRY:BUY:feed00000003")],
+        intents=[throttled_intent],
         market_sim=Stage7MarketSimulator({"BTCTRY": Decimal("100")}),
         state_store=store,
         settings=settings,
@@ -73,3 +75,4 @@ def test_burst_then_throttle_then_allowed(tmp_path) -> None:
     assert any(e.event_type == "SUBMIT_REQUESTED" for e in events_1)
     assert any(e.event_type == "THROTTLED" for e in events_2)
     assert any(e.event_type == "SUBMIT_REQUESTED" for e in events_3)
+    assert all(e.event_type != "DUPLICATE_IGNORED" for e in events_3)

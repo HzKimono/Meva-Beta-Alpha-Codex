@@ -8,6 +8,8 @@ from decimal import Decimal
 import pytest
 
 from btcbot.domain.models import Order, OrderSide, OrderStatus
+from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
+from btcbot.domain.order_state import Stage7Order
 from btcbot.domain.risk_models import RiskDecision, RiskMode
 from btcbot.services import state_store as state_store_module
 from btcbot.services.state_store import StateStore
@@ -445,3 +447,61 @@ def test_stage7_risk_reasons_json_is_stable_sorted(tmp_path) -> None:
 
     assert row is not None
     assert json.loads(row[0]) == {"a": 1, "z": 2}
+
+
+def test_stage7_upsert_orders_conflict_on_client_order_id_keeps_original_order_id(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+
+    first = Stage7Order(
+        order_id="order-A",
+        client_order_id="client-X",
+        cycle_id="cycle-1",
+        symbol="BTCTRY",
+        side="BUY",
+        order_type="LIMIT",
+        price_try=Decimal("100"),
+        qty=Decimal("1"),
+        filled_qty=Decimal("0"),
+        avg_fill_price_try=None,
+        status=Stage7OrderStatus.PLANNED,
+        last_update=now,
+        intent_hash="hash-a",
+    )
+    second = Stage7Order(
+        order_id="order-B",
+        client_order_id="client-X",
+        cycle_id="cycle-2",
+        symbol="BTCTRY",
+        side="BUY",
+        order_type="LIMIT",
+        price_try=Decimal("101"),
+        qty=Decimal("2"),
+        filled_qty=Decimal("1"),
+        avg_fill_price_try=Decimal("101"),
+        status=Stage7OrderStatus.ACKED,
+        last_update=now,
+        intent_hash="hash-b",
+    )
+
+    store.upsert_stage7_orders([first])
+    store.upsert_stage7_orders([second])
+
+    with store._connect() as conn:
+        row_count = conn.execute("SELECT COUNT(*) FROM stage7_orders").fetchone()[0]
+        row = conn.execute(
+            """
+            SELECT order_id, client_order_id, cycle_id, qty, status
+            FROM stage7_orders
+            WHERE client_order_id = ?
+            """,
+            ("client-X",),
+        ).fetchone()
+
+    assert row_count == 1
+    assert row is not None
+    assert row["order_id"] == "order-A"
+    assert row["client_order_id"] == "client-X"
+    assert row["cycle_id"] == "cycle-2"
+    assert row["qty"] == "2"
+    assert row["status"] == Stage7OrderStatus.ACKED.value

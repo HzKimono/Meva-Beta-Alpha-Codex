@@ -15,7 +15,6 @@ def test_reconcile_resumes_without_duplicates(tmp_path) -> None:
     now = datetime(2024, 1, 1, tzinfo=UTC)
     cid = "s7:c1:BTCTRY:BUY:abc000000001"
 
-    # simulate crash after SUBMITTED persisted
     partial_order = Stage7Order(
         order_id=make_order_id(cid),
         client_order_id=cid,
@@ -54,15 +53,16 @@ def test_reconcile_resumes_without_duplicates(tmp_path) -> None:
     )
 
     assert orders
-    order = orders[0]
-    assert order.status in {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED}
+    assert orders[0].status in {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED}
 
     with store._connect() as conn:
         rows = conn.execute(
-            "SELECT event_type FROM stage7_order_events WHERE client_order_id = ?",
+            "SELECT event_id, event_type FROM stage7_order_events WHERE client_order_id = ?",
             (cid,),
         ).fetchall()
+    event_ids = [str(row["event_id"]) for row in rows]
     event_types = [str(row["event_type"]) for row in rows]
+
+    assert len(event_ids) == len(set(event_ids))
     assert event_types.count("SUBMIT_REQUESTED") <= 1
-    assert len(event_types) == len(set((str(i), et) for i, et in enumerate(event_types)))
     assert len(events) >= 1
