@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 from btcbot.accounting.accounting_service import AccountingService
@@ -20,7 +21,9 @@ from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
 from btcbot.risk.policy import RiskPolicy
 from btcbot.services.exchange_factory import build_exchange_stage3
 from btcbot.services.execution_service import ExecutionService
+from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.market_data_service import MarketDataService
+from btcbot.services.parity import compare_fingerprints, compute_run_fingerprint
 from btcbot.services.portfolio_service import PortfolioService
 from btcbot.services.risk_service import RiskService
 from btcbot.services.stage4_cycle_runner import (
@@ -28,6 +31,7 @@ from btcbot.services.stage4_cycle_runner import (
     Stage4CycleRunner,
     Stage4ExchangeError,
 )
+from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.state_store import StateStore
 from btcbot.services.strategy_service import StrategyService
@@ -70,6 +74,29 @@ def main() -> int:
     alerts_parser = subparsers.add_parser("stage7-alerts", help="Print recent Stage 7 alert cycles")
     alerts_parser.add_argument("--last", type=int, default=50)
 
+    backtest_parser = subparsers.add_parser("stage7-backtest", help="Run Stage 7 replay backtest")
+    backtest_parser.add_argument("--data", required=True)
+    backtest_parser.add_argument("--out-db", required=True)
+    backtest_parser.add_argument("--start", required=True)
+    backtest_parser.add_argument("--end", required=True)
+    backtest_parser.add_argument("--step-seconds", type=int, default=60)
+    backtest_parser.add_argument("--seed", type=int, default=123)
+    backtest_parser.add_argument("--cycles", type=int, default=None)
+
+    parity_parser = subparsers.add_parser("stage7-parity", help="Compare two Stage 7 run DBs")
+    parity_parser.add_argument("--db-a", required=True)
+    parity_parser.add_argument("--db-b", required=True)
+    parity_parser.add_argument("--start", required=True)
+    parity_parser.add_argument("--end", required=True)
+
+    backtest_export = subparsers.add_parser(
+        "stage7-backtest-export", help="Export backtest rows from a Stage 7 DB"
+    )
+    backtest_export.add_argument("--db", required=True)
+    backtest_export.add_argument("--out", required=True)
+    backtest_export.add_argument("--last", type=int, default=50)
+    backtest_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+
     args = parser.parse_args()
     settings = Settings()
     setup_logging(settings.log_level)
@@ -96,6 +123,34 @@ def main() -> int:
 
     if args.command == "stage7-alerts":
         return run_stage7_alerts(settings, last=args.last)
+
+    if args.command == "stage7-backtest":
+        return run_stage7_backtest(
+            settings,
+            data_path=args.data,
+            out_db=args.out_db,
+            start=args.start,
+            end=args.end,
+            step_seconds=args.step_seconds,
+            seed=args.seed,
+            cycles=args.cycles,
+        )
+
+    if args.command == "stage7-parity":
+        return run_stage7_parity(
+            db_a=args.db_a,
+            db_b=args.db_b,
+            start=args.start,
+            end=args.end,
+        )
+
+    if args.command == "stage7-backtest-export":
+        return run_stage7_backtest_export(
+            db_path=args.db,
+            last=args.last,
+            export_format=args.format,
+            out_path=args.out,
+        )
 
     return 1
 
@@ -400,6 +455,77 @@ def run_stage7_alerts(settings: Settings, last: int) -> int:
         if any(normalized_alerts.values()):
             active = ",".join(sorted(name for name, value in normalized_alerts.items() if value))
             print(f"{row['cycle_id']} {row['ts']} {active}")
+    return 0
+
+
+def _parse_iso(value: str) -> datetime:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def run_stage7_backtest(
+    settings: Settings,
+    *,
+    data_path: str,
+    out_db: str,
+    start: str,
+    end: str,
+    step_seconds: int,
+    seed: int,
+    cycles: int | None,
+) -> int:
+    replay = MarketDataReplay.from_folder(
+        data_path=Path(data_path),
+        start_ts=_parse_iso(start),
+        end_ts=_parse_iso(end),
+        step_seconds=step_seconds,
+        seed=seed,
+    )
+    runner = Stage7BacktestRunner()
+    summary = runner.run(
+        settings=settings,
+        replay=replay,
+        cycles=cycles,
+        out_db_path=Path(out_db),
+        seed=seed,
+        freeze_params=True,
+        disable_adaptation=True,
+    )
+    print(json.dumps(summary.__dict__, sort_keys=True))
+    return 0
+
+
+def run_stage7_parity(*, db_a: str, db_b: str, start: str, end: str) -> int:
+    start_dt = _parse_iso(start)
+    end_dt = _parse_iso(end)
+    f1 = compute_run_fingerprint(db_a, start_dt, end_dt)
+    f2 = compute_run_fingerprint(db_b, start_dt, end_dt)
+    ok = compare_fingerprints(f1, f2)
+    print(json.dumps({"fingerprint_a": f1, "fingerprint_b": f2, "match": ok}, sort_keys=True))
+    return 0 if ok else 1
+
+
+def run_stage7_backtest_export(
+    *, db_path: str, last: int, export_format: str, out_path: str
+) -> int:
+    store = StateStore(db_path=db_path)
+    rows = store.fetch_stage7_cycles_for_export(limit=last)
+    if export_format == "jsonl":
+        with open(out_path, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+        return 0
+
+    fieldnames = sorted({key for row in rows for key in row.keys()})
+    with open(out_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            normalized = {key: _csv_safe_value(value) for key, value in row.items()}
+            writer.writerow(normalized)
     return 0
 
 
