@@ -5,7 +5,7 @@ from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.services.market_data_replay import MarketDataReplay
-from btcbot.services.parity import compute_run_fingerprint
+from btcbot.services.parity import compare_fingerprints, compute_run_fingerprint
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 
 
@@ -93,3 +93,13 @@ def test_replay_different_seed_still_deterministic_for_same_data(tmp_path: Path)
     f2 = _run_once(dataset, tmp_path / "b.db", seed=999)
 
     assert f1 == f2
+
+
+def test_backtest_same_seed_reports_parity_match(tmp_path: Path) -> None:
+    dataset = tmp_path / "data"
+    _build_dataset(dataset)
+
+    f1 = _run_once(dataset, tmp_path / "a.db", seed=42)
+    f2 = _run_once(dataset, tmp_path / "b.db", seed=42)
+
+    assert compare_fingerprints(f1, f2)

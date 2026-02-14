@@ -9,6 +9,7 @@ from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.parity import compute_run_fingerprint
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_single_cycle_driver import Stage7SingleCycleDriver
+from btcbot.services.state_store import StateStore
 
 
 def _write_csv(path: Path, header: str, rows: list[str]) -> None:
@@ -208,3 +209,44 @@ def test_parity_fingerprint_missing_stage7_tables_is_deterministic(tmp_path: Pat
     assert isinstance(f1, str)
     assert len(f1) == 64
     assert f1 == f2
+
+
+def test_backtest_repeated_run_same_db_does_not_duplicate_cycles(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _dataset(data)
+    settings = Settings(
+        STAGE7_ENABLED=True,
+        DRY_RUN=True,
+        SYMBOLS='["BTCTRY","ETHTRY"]',
+        STAGE7_UNIVERSE_WHITELIST='["BTCTRY","ETHTRY"]',
+    )
+    out_db = tmp_path / "same.db"
+
+    def _run_once() -> None:
+        replay = MarketDataReplay.from_folder(
+            data_path=data,
+            start_ts=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_ts=datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+            step_seconds=60,
+            seed=123,
+        )
+        Stage7BacktestRunner().run(
+            settings=settings,
+            replay=replay,
+            cycles=None,
+            out_db_path=out_db,
+            seed=123,
+            freeze_params=False,
+            disable_adaptation=False,
+        )
+
+    _run_once()
+    _run_once()
+
+    with StateStore(db_path=str(out_db))._connect() as conn:
+        cycle_count = conn.execute("SELECT COUNT(*) FROM stage7_cycle_trace").fetchone()[0]
+        unique_cycle_count = conn.execute(
+            "SELECT COUNT(DISTINCT cycle_id) FROM stage7_cycle_trace"
+        ).fetchone()[0]
+
+    assert int(cycle_count) == int(unique_cycle_count)

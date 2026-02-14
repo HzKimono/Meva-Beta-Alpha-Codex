@@ -156,18 +156,12 @@ class AdaptationService:
         )
         latest = recent[0]
         if str(latest.get("mode_final")) != Mode.NORMAL.value:
-            rejected = replace(change, outcome="REJECTED", reason="mode_not_normal")
-            state_store.record_stage7_param_change(rejected)
-            return rejected
+            return None
         flags = dict(latest.get("alert_flags") or {})
         if any(bool(flags.get(name)) for name in ("drawdown_breach", "reject_spike", "throttled")):
-            rejected = replace(change, outcome="REJECTED", reason="recent_breach_flags")
-            state_store.record_stage7_param_change(rejected)
-            return rejected
+            return None
         if not change.changes:
-            rejected = replace(change, outcome="REJECTED", reason="no_bounded_change")
-            state_store.record_stage7_param_change(rejected)
-            return rejected
+            return None
 
         applied = replace(change, outcome="APPLIED", ts=now_utc)
         state_store.set_active_stage7_params(replace(candidate, updated_at=now_utc), applied)

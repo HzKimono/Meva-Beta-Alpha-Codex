@@ -416,6 +416,8 @@ python -m btcbot.cli stage7-backtest \
   --include-adaptation
 ```
 
+You can explicitly disable adaptation with `--no-include-adaptation` (default).
+
 Compare two runs (aliases `--out-a/--out-b` also supported):
 ```bash
 python -m btcbot.cli stage7-parity \
@@ -425,6 +427,8 @@ python -m btcbot.cli stage7-parity \
   --end 2024-01-01T01:00:00Z \
   --include-adaptation
 ```
+
+You can explicitly exclude adaptation metadata with `--no-include-adaptation` (default).
 
 `--include-adaptation` semantics differ by command:
 - `stage7-backtest` / `stage7-run`: enables adaptation evaluation and persistence during cycle execution.

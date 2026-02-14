@@ -121,7 +121,8 @@ def main() -> int:
     )
     backtest_parser.add_argument(
         "--include-adaptation",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help=(
             "Enable adaptation evaluation/persistence during backtest cycles. "
             "By default backtests freeze params and disable adaptation."
@@ -141,7 +142,8 @@ def main() -> int:
     )
     parity_parser.add_argument(
         "--include-adaptation",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help=(
             "Include adaptation metadata tables/columns in parity fingerprint only "
             "(does not run adaptation)."

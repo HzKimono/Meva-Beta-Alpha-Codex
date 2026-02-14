@@ -154,6 +154,8 @@ python -m btcbot.cli stage7-parity --out-a .\run_a.db --out-b .\run_b.db --start
 python -m btcbot.cli doctor --db .\backtest.db --dataset .\data
 ```
 
+`stage7-run` requires `STAGE7_ENABLED=true` and `--dry-run`; no live trading side effects are introduced.
+
 SQLite inspection (PowerShell-friendly; avoids bash heredoc syntax):
 
 ```powershell
