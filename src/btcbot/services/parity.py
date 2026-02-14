@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
@@ -37,9 +38,12 @@ def compute_run_fingerprint(db_path: str | Path, from_ts: datetime, to_ts: datet
 
     canonical: list[dict[str, object]] = []
     for row in rows:
-        intents_summary = json.loads(str(row["intents_summary_json"]))
-        mode_payload = json.loads(str(row["mode_json"]))
-        universe = sorted(set(json.loads(str(row["selected_universe_json"]))))
+        intents_summary_raw = row["intents_summary_json"] or "{}"
+        mode_payload_raw = row["mode_json"] or "{}"
+        universe_raw = row["selected_universe_json"] or "[]"
+        intents_summary = json.loads(str(intents_summary_raw))
+        mode_payload = json.loads(str(mode_payload_raw))
+        universe = sorted(set(json.loads(str(universe_raw))))
         oms_summary = dict(intents_summary.get("oms_summary") or {})
         canonical.append(
             {
@@ -48,10 +52,10 @@ def compute_run_fingerprint(db_path: str | Path, from_ts: datetime, to_ts: datet
                 "base_mode": mode_payload.get("base_mode"),
                 "final_mode": mode_payload.get("final_mode"),
                 "selected_universe": universe,
-                "net_pnl_try": str(row["net_pnl_try"]),
-                "fees_try": str(row["fees_try"]),
-                "slippage_try": str(row["slippage_try"]),
-                "turnover_try": str(row["turnover_try"]),
+                "net_pnl_try": _quantized_try(row["net_pnl_try"]),
+                "fees_try": _quantized_try(row["fees_try"]),
+                "slippage_try": _quantized_try(row["slippage_try"]),
+                "turnover_try": _quantized_try(row["turnover_try"]),
                 "intents_count": int(intents_summary.get("order_intents_total", 0)),
                 "filled_count": int(oms_summary.get("orders_filled", 0)),
                 "rejected_count": int(oms_summary.get("orders_rejected", 0)),
@@ -70,3 +74,10 @@ def _iso(value: datetime) -> str:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC).isoformat()
     return value.astimezone(UTC).isoformat()
+
+
+def _quantized_try(value: object) -> str:
+    try:
+        return str(Decimal(str(value)).quantize(Decimal("0.01")))
+    except (InvalidOperation, ValueError):
+        return str(value)

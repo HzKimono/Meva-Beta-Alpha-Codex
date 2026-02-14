@@ -35,31 +35,67 @@ class Stage7CycleRunner:
         if not settings.dry_run:
             raise RuntimeError("stage7-run only supports --dry-run")
 
+        state_store = StateStore(db_path=settings.state_db_path)
+        exchange = build_exchange_stage4(settings, dry_run=True)
+        stage4 = Stage4CycleRunner(command=self.command)
+        result = stage4.run_one_cycle(settings)
+        now = datetime.now(UTC)
         cycle_id = uuid4().hex
         run_id = uuid4().hex
-        now = datetime.now(UTC)
+        self.run_one_cycle_with_dependencies(
+            settings=settings,
+            exchange=exchange,
+            state_store=state_store,
+            now_utc=now,
+            cycle_id=cycle_id,
+            run_id=run_id,
+            stage4_result=result,
+            enable_adaptation=True,
+            use_active_params=True,
+        )
+
+        close = getattr(exchange, "close", None)
+        if callable(close):
+            close()
+
+        return result
+
+    def run_one_cycle_with_dependencies(
+        self,
+        *,
+        settings: Settings,
+        exchange: object,
+        state_store: StateStore,
+        now_utc: datetime,
+        cycle_id: str,
+        run_id: str,
+        stage4_result: int = 0,
+        enable_adaptation: bool = True,
+        use_active_params: bool = True,
+    ) -> int:
+        now = now_utc.astimezone(UTC)
         collector = MetricsCollector()
         collector.set("run_id", run_id)
         collector.set("ts", now.isoformat())
-        state_store = StateStore(db_path=settings.state_db_path)
-        stage4 = Stage4CycleRunner(command=self.command)
-        result = stage4.run_one_cycle(settings)
 
         adaptation_service = AdaptationService()
-        active_params = state_store.get_active_stage7_params(settings=settings, now_utc=now)
-
+        stage4 = Stage4CycleRunner(command=self.command)
         runtime = settings.model_copy(deep=True)
-        runtime.stage7_universe_size = active_params.universe_size
-        runtime.stage7_score_weights = {k: float(v) for k, v in active_params.score_weights.items()}
-        runtime.stage7_max_spread_bps = Decimal(str(active_params.max_spread_bps))
-        runtime.notional_cap_try_per_cycle = active_params.turnover_cap_try
-        runtime.max_orders_per_cycle = active_params.max_orders_per_cycle
-        runtime.try_cash_target = active_params.cash_target_try
-        runtime.stage7_order_offset_bps = Decimal(str(active_params.order_offset_bps))
-        runtime.stage7_min_quote_volume_try = active_params.min_quote_volume_try
+        active_params = None
+        if use_active_params:
+            active_params = state_store.get_active_stage7_params(settings=settings, now_utc=now)
+            runtime.stage7_universe_size = active_params.universe_size
+            runtime.stage7_score_weights = {
+                k: float(v) for k, v in active_params.score_weights.items()
+            }
+            runtime.stage7_max_spread_bps = Decimal(str(active_params.max_spread_bps))
+            runtime.notional_cap_try_per_cycle = active_params.turnover_cap_try
+            runtime.max_orders_per_cycle = active_params.max_orders_per_cycle
+            runtime.try_cash_target = active_params.cash_target_try
+            runtime.stage7_order_offset_bps = Decimal(str(active_params.order_offset_bps))
+            runtime.stage7_min_quote_volume_try = active_params.min_quote_volume_try
 
         ledger_service = LedgerService(state_store=state_store, logger=logger)
-        exchange = build_exchange_stage4(settings, dry_run=True)
         universe_service = UniverseSelectionService()
         policy_service = PortfolioPolicyService()
         order_builder = OrderBuilderService()
@@ -502,7 +538,9 @@ class Stage7CycleRunner:
                         "max_drawdown": snapshot.max_drawdown,
                     },
                     risk_decision=stage7_risk_decision,
-                    active_param_version=active_params.version,
+                    active_param_version=(
+                        active_params.version if active_params is not None else 0
+                    ),
                 )
             finally:
                 collector.stop_timer("persist")
@@ -520,23 +558,20 @@ class Stage7CycleRunner:
                 "cycle_total_ms": int(finalized.get("cycle_total_ms", 0)),
             }
             state_store.save_stage7_run_metrics(cycle_id, run_metrics)
-            param_change = adaptation_service.evaluate_and_apply(
-                state_store=state_store, settings=runtime, now_utc=now
-            )
-            active_after_eval = state_store.get_active_stage7_params(
-                settings=runtime,
-                now_utc=now,
-            )
-            state_store.update_stage7_cycle_adaptation_metadata(
-                cycle_id=cycle_id,
-                active_param_version=active_after_eval.version,
-                param_change=param_change,
-            )
+            if enable_adaptation:
+                param_change = adaptation_service.evaluate_and_apply(
+                    state_store=state_store, settings=runtime, now_utc=now
+                )
+                active_after_eval = state_store.get_active_stage7_params(
+                    settings=runtime,
+                    now_utc=now,
+                )
+                state_store.update_stage7_cycle_adaptation_metadata(
+                    cycle_id=cycle_id,
+                    active_param_version=active_after_eval.version,
+                    param_change=param_change,
+                )
             state_store.set_last_stage7_cycle_id(cycle_id)
 
         logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})
-        close = getattr(exchange, "close", None)
-        if callable(close):
-            close()
-
-        return result
+        return stage4_result
