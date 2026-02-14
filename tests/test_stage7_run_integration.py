@@ -95,6 +95,7 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     try:
         cycle = conn.execute("SELECT * FROM stage7_cycle_trace").fetchone()
         metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
+        run_metrics = conn.execute("SELECT * FROM stage7_run_metrics").fetchone()
         intents = conn.execute("SELECT * FROM stage7_order_intents").fetchall()
         oms_orders = conn.execute("SELECT * FROM stage7_orders").fetchall()
         oms_events = conn.execute("SELECT * FROM stage7_order_events").fetchall()
@@ -103,6 +104,7 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
 
     assert cycle is not None
     assert metrics is not None
+    assert run_metrics is not None
     selected_universe = json.loads(str(cycle["selected_universe_json"]))
     assert selected_universe
     universe_scores = json.loads(str(cycle["universe_scores_json"]))
@@ -122,6 +124,12 @@ def test_stage7_run_dry_run_persists_trace_and_metrics(monkeypatch, tmp_path) ->
     assert intents
     assert oms_orders
     assert oms_events
+    assert int(run_metrics["latency_ms_total"]) >= 0
+    assert int(run_metrics["selection_ms"]) >= 0
+    assert int(run_metrics["planning_ms"]) >= 0
+    alerts = json.loads(str(run_metrics["alert_flags_json"]))
+    assert "drawdown_breach" in alerts
+    assert "reject_spike" in alerts
 
 
 def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
@@ -373,10 +381,12 @@ def test_stage7_universe_selection_does_not_change_ledger_metrics_shape(
     conn.row_factory = sqlite3.Row
     try:
         metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
+        run_metrics = conn.execute("SELECT * FROM stage7_run_metrics").fetchone()
     finally:
         conn.close()
 
     assert metrics is not None
+    assert run_metrics is not None
     for key in [
         "gross_pnl_try",
         "realized_pnl_try",

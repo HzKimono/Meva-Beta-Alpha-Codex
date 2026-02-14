@@ -10,10 +10,12 @@ from btcbot.domain.anomalies import combine_modes
 from btcbot.domain.models import Balance, normalize_symbol
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
+from btcbot.logging_context import with_cycle_context
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.exposure_tracker import ExposureTracker
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.metrics_collector import MetricsCollector
 from btcbot.services.oms_service import OMSService, Stage7MarketSimulator
 from btcbot.services.order_builder_service import OrderBuilderService
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
@@ -33,7 +35,17 @@ class Stage7CycleRunner:
             raise RuntimeError("stage7-run only supports --dry-run")
 
         cycle_id = uuid4().hex
+        run_id = uuid4().hex
         now = datetime.now(UTC)
+        collector = MetricsCollector()
+        collector.set("run_id", run_id)
+        collector.set("ts", now.isoformat())
+        collector.set("selection", 0)
+        collector.set("planning", 0)
+        collector.set("intents", 0)
+        collector.set("oms", 0)
+        collector.set("ledger", 0)
+        collector.set("persist", 0)
         state_store = StateStore(db_path=settings.state_db_path)
         stage4 = Stage4CycleRunner(command=self.command)
         result = stage4.run_one_cycle(settings)
@@ -70,7 +82,12 @@ class Stage7CycleRunner:
             settings=settings,
         )
 
+        ctx = with_cycle_context(cycle_id=cycle_id, run_id=run_id)
+        ctx.__enter__()
         try:
+            logger.info(
+                "stage7_cycle_start", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}}
+            )
             bootstrap_symbols = sorted({normalize_symbol(symbol) for symbol in settings.symbols})
             bootstrap_marks, _ = stage4.resolve_mark_prices(exchange, bootstrap_symbols)
             get_balances = getattr(base_client, "get_balances", None)
@@ -339,6 +356,67 @@ class Stage7CycleRunner:
 
             planned_count = sum(1 for intent in order_intents if not intent.skipped)
             skipped_count = sum(1 for intent in order_intents if intent.skipped)
+            oms_submitted = sum(
+                1
+                for o in oms_orders
+                if o.status.value in {"SUBMITTED", "ACKED", "PARTIALLY_FILLED", "FILLED"}
+            )
+            oms_filled = sum(1 for o in oms_orders if o.status.value == "FILLED")
+            oms_rejected = sum(1 for o in oms_orders if o.status.value == "REJECTED")
+            oms_canceled = sum(1 for o in oms_orders if o.status.value == "CANCELED")
+            missing_mark_price_count = sum(
+                1 for action in actions if action.get("reason") == "missing_mark_price"
+            )
+            throttled_events = sum(
+                1 for event in oms_events if "THROTTL" in event.event_type.upper()
+            )
+            retry_count = max(0, settings.stage7_retry_max_attempts - 1)
+            quality_flags = {
+                "stale_data": data_age_sec > settings.stage7_max_data_age_sec,
+                "missing_mark_price": missing_mark_price_count,
+                "spread_spike": int(spread_bps >= Decimal(str(settings.stage7_spread_spike_bps))),
+                "throttled": throttled_events > 0,
+                "retry_count": retry_count,
+            }
+            alert_flags = {
+                "drawdown_breach": snapshot.max_drawdown >= settings.stage7_max_drawdown_pct,
+                "reject_spike": oms_rejected >= settings.stage7_reject_spike_threshold,
+                "missing_data": missing_mark_price_count > 0,
+                "throttled": throttled_events > 0,
+                "retry_excess": retry_count >= settings.stage7_retry_alert_threshold,
+            }
+            finalized = collector.finalize()
+            run_metrics = {
+                "ts": now.isoformat(),
+                "run_id": run_id,
+                "mode_base": base_mode.value,
+                "mode_final": final_mode.value,
+                "universe_size": len(universe_result.selected_symbols),
+                "intents_planned_count": planned_count,
+                "intents_skipped_count": skipped_count,
+                "oms_submitted_count": oms_submitted,
+                "oms_filled_count": oms_filled,
+                "oms_rejected_count": oms_rejected,
+                "oms_canceled_count": oms_canceled,
+                "events_appended": len(oms_events),
+                "events_ignored": 0,
+                "equity_try": snapshot.equity_try,
+                "gross_pnl_try": snapshot.gross_pnl_try,
+                "net_pnl_try": snapshot.net_pnl_try,
+                "fees_try": snapshot.fees_try,
+                "slippage_try": snapshot.slippage_try,
+                "max_drawdown_pct": snapshot.max_drawdown,
+                "turnover_try": snapshot.turnover_try,
+                "latency_ms_total": int(finalized.get("latency_ms_total", 0)),
+                "selection_ms": int(finalized.get("selection_ms", 0)),
+                "planning_ms": int(finalized.get("planning_ms", 0)),
+                "intents_ms": int(finalized.get("intents_ms", 0)),
+                "oms_ms": int(finalized.get("oms_ms", 0)),
+                "ledger_ms": int(finalized.get("ledger_ms", 0)),
+                "persist_ms": int(finalized.get("persist_ms", 0)),
+                "quality_flags": quality_flags,
+                "alert_flags": alert_flags,
+            }
             state_store.save_stage7_cycle(
                 cycle_id=cycle_id,
                 ts=now,
@@ -403,8 +481,13 @@ class Stage7CycleRunner:
                     "max_drawdown": snapshot.max_drawdown,
                 },
                 risk_decision=stage7_risk_decision,
+                run_metrics=run_metrics,
             )
         finally:
+            logger.info(
+                "stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}}
+            )
+            ctx.__exit__(None, None, None)
             close = getattr(exchange, "close", None)
             if callable(close):
                 close()

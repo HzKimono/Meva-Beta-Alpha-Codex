@@ -107,7 +107,7 @@ class Settings(BaseSettings):
         alias="STAGE7_RULES_INVALID_METADATA_POLICY",
     )
     stage7_max_drawdown_pct: Decimal = Field(
-        default=Decimal("0.20"), alias="STAGE7_MAX_DRAWDOWN_PCT"
+        default=Decimal("0.25"), alias="STAGE7_MAX_DRAWDOWN_PCT"
     )
     stage7_max_daily_loss_try: Decimal = Field(
         default=Decimal("500"), alias="STAGE7_MAX_DAILY_LOSS_TRY"
@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     stage7_retry_base_delay_ms: int = Field(default=100, alias="STAGE7_RETRY_BASE_DELAY_MS")
     stage7_retry_max_delay_ms: int = Field(default=1_000, alias="STAGE7_RETRY_MAX_DELAY_MS")
 
+    stage7_reject_spike_threshold: int = Field(
+        default=3, alias="STAGE7_REJECT_SPIKE_THRESHOLD"
+    )
+    stage7_retry_alert_threshold: int = Field(
+        default=5, alias="STAGE7_RETRY_ALERT_THRESHOLD"
+    )
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
     )
@@ -411,6 +417,8 @@ class Settings(BaseSettings):
         "stage7_retry_base_delay_ms",
         "stage7_retry_max_delay_ms",
         "stage7_rate_limit_burst",
+        "stage7_reject_spike_threshold",
+        "stage7_retry_alert_threshold",
     )
     def validate_stage7_risk_non_negative_int(cls, value: int) -> int:
         if value < 0:
