@@ -161,7 +161,6 @@ class Stage7CycleRunner:
             )
             symbols_needed = sorted(
                 {normalize_symbol(symbol) for symbol in universe_result.selected_symbols}
-                | {normalize_symbol(action.symbol) for action in lifecycle_actions}
             )
             mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
             rules_symbols_fallback: set[str] = set()
