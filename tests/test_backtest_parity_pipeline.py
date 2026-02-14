@@ -193,3 +193,18 @@ def test_backtest_runner_calls_stage7_cycle_runner_run_one_cycle(
     )
 
     assert calls == ["called"]
+
+
+def test_parity_fingerprint_missing_stage7_tables_is_deterministic(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing_tables.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+
+    start = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    end = datetime(2024, 1, 1, 0, 1, tzinfo=UTC)
+    f1 = compute_run_fingerprint(db_path, start, end)
+    f2 = compute_run_fingerprint(db_path, start, end)
+
+    assert isinstance(f1, str)
+    assert len(f1) == 64
+    assert f1 == f2

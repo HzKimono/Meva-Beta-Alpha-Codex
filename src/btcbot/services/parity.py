@@ -7,6 +7,20 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+_REQUIRED_PARITY_TABLES = ("stage7_cycle_trace", "stage7_ledger_metrics")
+
+
+def find_missing_stage7_parity_tables(db_path: str | Path) -> list[str]:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        existing = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    finally:
+        conn.close()
+    return [name for name in _REQUIRED_PARITY_TABLES if name not in existing]
+
 
 def compute_run_fingerprint(
     db_path: str | Path,
@@ -18,6 +32,18 @@ def compute_run_fingerprint(
 ) -> str:
     start = _iso(from_ts)
     end = _iso(to_ts)
+    missing = find_missing_stage7_parity_tables(db_path)
+    if missing:
+        payload = {
+            "version": 1,
+            "missing_tables": sorted(missing),
+            "rows": [],
+            "include_adaptation": include_adaptation,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
