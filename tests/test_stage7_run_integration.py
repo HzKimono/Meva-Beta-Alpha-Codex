@@ -197,11 +197,7 @@ def test_stage7_run_respects_reduce_risk_mode(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
-        lambda settings, dry_run: _Exchange(),
-    )
-    monkeypatch.setattr(
-        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
-        _selected_btc_universe,
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
@@ -329,11 +325,7 @@ def test_stage7_run_skips_open_order_with_missing_mark_price(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
-        lambda settings, dry_run: _Exchange(),
-    )
-    monkeypatch.setattr(
-        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
-        _selected_btc_universe,
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
@@ -473,7 +465,7 @@ def test_stage7_policy_skip_symbol(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
-        lambda settings, dry_run: _Exchange(),
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
@@ -578,7 +570,7 @@ def test_stage7_policy_observe_only_cycle(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
-        lambda settings, dry_run: _Exchange(),
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
@@ -672,7 +664,7 @@ def test_intents_summary_counts_correct(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
-        lambda settings, dry_run: _Exchange(),
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
@@ -746,7 +738,7 @@ def test_stage7_lifecycle_symbols_included_in_rules_coverage(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
-        lambda settings, dry_run: _Exchange(),
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
     )
     monkeypatch.setattr(
         "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",

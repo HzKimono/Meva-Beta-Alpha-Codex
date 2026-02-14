@@ -2808,7 +2808,7 @@ class StateStore:
 
     def set_stage7_checkpoint_goodness(self, version: int, is_good: bool) -> None:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE stage7_params_checkpoints
                 SET is_good = ?
@@ -2816,6 +2816,16 @@ class StateStore:
                 """,
                 (1 if is_good else 0, version),
             )
+            if cursor.rowcount == 0:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO stage7_params_checkpoints(
+                        version, ts, params_json, is_good
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (version, datetime.now(UTC).isoformat(), "{}", 1 if is_good else 0),
+                )
 
     def update_stage7_cycle_adaptation_metadata(
         self,
