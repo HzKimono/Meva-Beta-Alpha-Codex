@@ -14,6 +14,8 @@ from btcbot.domain.intent import Intent
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType, ensure_utc
 from btcbot.domain.models import Order, OrderStatus, normalize_symbol
 from btcbot.domain.order_intent import OrderIntent
+from btcbot.domain.order_state import OrderEvent, Stage7Order
+from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
@@ -397,6 +399,46 @@ class StateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS stage7_orders (
+                order_id TEXT PRIMARY KEY,
+                client_order_id TEXT UNIQUE NOT NULL,
+                cycle_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                price_try TEXT NOT NULL,
+                qty TEXT NOT NULL,
+                filled_qty TEXT NOT NULL,
+                avg_fill_price_try TEXT,
+                status TEXT NOT NULL,
+                intent_hash TEXT NOT NULL,
+                last_update TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_orders_client_order_id "
+            "ON stage7_orders(client_order_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_order_events (
+                event_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                cycle_id TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_order_events_client_ts "
+            "ON stage7_order_events(client_order_id, ts)"
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS stage7_risk_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cycle_id TEXT,
@@ -664,6 +706,126 @@ class StateStore:
         now = datetime.now(UTC)
         with self.transaction() as conn:
             self._save_stage7_order_intents(conn=conn, cycle_id=cycle_id, ts=now, intents=intents)
+
+    def upsert_stage7_orders(self, orders: list[Stage7Order]) -> None:
+        if not orders:
+            return
+        with self.transaction() as conn:
+            for order in orders:
+                conn.execute(
+                    """
+                    INSERT INTO stage7_orders(
+                        order_id, client_order_id, cycle_id, symbol, side, order_type,
+                        price_try, qty, filled_qty, avg_fill_price_try,
+                        status, intent_hash, last_update
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(order_id) DO UPDATE SET
+                        client_order_id=excluded.client_order_id,
+                        cycle_id=excluded.cycle_id,
+                        symbol=excluded.symbol,
+                        side=excluded.side,
+                        order_type=excluded.order_type,
+                        price_try=excluded.price_try,
+                        qty=excluded.qty,
+                        filled_qty=excluded.filled_qty,
+                        avg_fill_price_try=excluded.avg_fill_price_try,
+                        status=excluded.status,
+                        intent_hash=excluded.intent_hash,
+                        last_update=excluded.last_update
+                    """,
+                    (
+                        order.order_id,
+                        order.client_order_id,
+                        order.cycle_id,
+                        order.symbol,
+                        order.side,
+                        order.order_type,
+                        str(order.price_try),
+                        str(order.qty),
+                        str(order.filled_qty),
+                        str(order.avg_fill_price_try)
+                        if order.avg_fill_price_try is not None
+                        else None,
+                        order.status.value,
+                        order.intent_hash,
+                        ensure_utc(order.last_update).isoformat(),
+                    ),
+                )
+
+    def append_stage7_order_events(self, events: list[OrderEvent]) -> AppendResult:
+        if not events:
+            return AppendResult(attempted=0, inserted=0, ignored=0)
+        inserted = 0
+        with self.transaction() as conn:
+            for event in events:
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO stage7_order_events(
+                        event_id, ts, cycle_id, order_id, client_order_id, event_type, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        ensure_utc(event.ts).isoformat(),
+                        event.cycle_id,
+                        event.order_id,
+                        event.client_order_id,
+                        event.event_type,
+                        event.payload_json(),
+                    ),
+                )
+                inserted += int(cur.rowcount > 0)
+        attempted = len(events)
+        return AppendResult(attempted=attempted, inserted=inserted, ignored=attempted - inserted)
+
+    def get_stage7_order_by_client_id(self, client_order_id: str) -> Stage7Order | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage7_orders WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        avg_fill = row["avg_fill_price_try"]
+        return Stage7Order(
+            order_id=str(row["order_id"]),
+            client_order_id=str(row["client_order_id"]),
+            cycle_id=str(row["cycle_id"]),
+            symbol=str(row["symbol"]),
+            side=str(row["side"]),
+            order_type=str(row["order_type"]),
+            price_try=Decimal(str(row["price_try"])),
+            qty=Decimal(str(row["qty"])),
+            filled_qty=Decimal(str(row["filled_qty"])),
+            avg_fill_price_try=Decimal(str(avg_fill)) if avg_fill is not None else None,
+            status=Stage7OrderStatus(str(row["status"])),
+            last_update=datetime.fromisoformat(str(row["last_update"])),
+            intent_hash=str(row["intent_hash"]),
+        )
+
+    def get_stage7_order_events_by_client_id(self, client_order_id: str) -> list[OrderEvent]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM stage7_order_events
+                WHERE client_order_id = ?
+                ORDER BY ts, event_id
+                """,
+                (client_order_id,),
+            ).fetchall()
+        return [
+            OrderEvent(
+                event_id=str(row["event_id"]),
+                ts=datetime.fromisoformat(str(row["ts"])),
+                client_order_id=str(row["client_order_id"]),
+                order_id=str(row["order_id"]),
+                event_type=str(row["event_type"]),
+                payload=json.loads(str(row["payload_json"])),
+                cycle_id=str(row["cycle_id"]),
+            )
+            for row in rows
+        ]
 
     def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(

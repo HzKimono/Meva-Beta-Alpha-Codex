@@ -225,3 +225,45 @@ Stage 7 now computes a dedicated **risk decision before universe selection** and
 - `STAGE7_LOSS_GUARDRAIL_MODE` (`reduce_risk_only|observe_only`)
 
 Stage 7 remains **DRY-RUN ONLY**.
+
+## PR-6 OMS / Execution v1 (DRY-RUN state machine)
+
+PR-6 adds a deterministic, idempotent OMS state machine for Stage 7 intents. Stage 7 remains **DRY-RUN ONLY**: no private endpoint calls and no real order placement.
+
+### OMS lifecycle
+For each non-skipped `OrderIntent`, OMS transitions through dry-run states:
+- `PLANNED -> SUBMITTED -> ACKED -> (PARTIALLY_FILLED)? -> (FILLED | REJECTED | CANCELED)`
+
+Reject simulation rules in v1:
+- skipped intents do not enter OMS.
+- `qty <= 0` or `price <= 0` => `REJECTED`.
+
+### Deterministic identity
+- `order_id = s7o:<short_hash(client_order_id)>`
+- `event_id = s7e:<short_hash(client_order_id:seq:event_type)>`
+
+All quantity/price values use Decimal and persisted as strings.
+
+### Persistence
+New table: `stage7_orders`
+- deterministic order identity and current status snapshot.
+- includes `filled_qty`, `avg_fill_price_try`, `intent_hash`, `last_update`.
+
+New table: `stage7_order_events` (append-only)
+- deterministic `event_id` primary key for idempotent replay safety.
+- payload stored as stable sorted JSON.
+
+Indexes:
+- `stage7_orders(client_order_id)`
+- `stage7_order_events(client_order_id, ts)`
+
+### Idempotency / dedupe
+- `client_order_id` is unique in `stage7_orders`.
+- Re-running the same cycle with the same intents does not duplicate orders/events.
+- State transitions are emitted exactly once per `client_order_id` transition.
+
+### Runner integration
+- In `OBSERVE_ONLY`, OMS processing is skipped.
+- Otherwise, Stage 7 processes planned intents through OMS and stores:
+  - `oms_summary` counts by status
+  - `events_total`
