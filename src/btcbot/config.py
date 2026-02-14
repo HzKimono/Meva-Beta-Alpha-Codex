@@ -129,12 +129,8 @@ class Settings(BaseSettings):
     stage7_retry_base_delay_ms: int = Field(default=100, alias="STAGE7_RETRY_BASE_DELAY_MS")
     stage7_retry_max_delay_ms: int = Field(default=1_000, alias="STAGE7_RETRY_MAX_DELAY_MS")
 
-    stage7_reject_spike_threshold: int = Field(
-        default=3, alias="STAGE7_REJECT_SPIKE_THRESHOLD"
-    )
-    stage7_retry_alert_threshold: int = Field(
-        default=5, alias="STAGE7_RETRY_ALERT_THRESHOLD"
-    )
+    stage7_reject_spike_threshold: int = Field(default=3, alias="STAGE7_REJECT_SPIKE_THRESHOLD")
+    stage7_retry_alert_threshold: int = Field(default=5, alias="STAGE7_RETRY_ALERT_THRESHOLD")
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
     )
