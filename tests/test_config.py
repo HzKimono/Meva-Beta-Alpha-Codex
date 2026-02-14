@@ -81,11 +81,46 @@ def test_btcturk_base_url_default() -> None:
 
 
 def test_live_trading_requires_ack() -> None:
-    disabled = Settings(LIVE_TRADING=True, LIVE_TRADING_ACK="")
-    enabled = Settings(LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND")
+    with pytest.raises(ValueError):
+        Settings(LIVE_TRADING=True, LIVE_TRADING_ACK="", KILL_SWITCH=False)
 
-    assert disabled.is_live_trading_enabled() is False
+    enabled = Settings(
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        KILL_SWITCH=False,
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
+        DRY_RUN=False,
+    )
+
     assert enabled.is_live_trading_enabled() is True
+
+
+def test_live_trading_requires_keys_and_kill_switch_off() -> None:
+    with pytest.raises(ValueError):
+        Settings(LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND", DRY_RUN=False)
+
+    with pytest.raises(ValueError):
+        Settings(
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            DRY_RUN=False,
+            KILL_SWITCH=True,
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        )
+
+
+def test_live_trading_cannot_be_enabled_in_dry_run() -> None:
+    with pytest.raises(ValueError):
+        Settings(
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        )
 
 
 def test_settings_defaults_are_prod_safe() -> None:

@@ -82,17 +82,17 @@ Copy-Item .env.example .env -Force
 
 # 4) Stage 3 acceptance commands
 python -m pytest -q
-btcbot health
-btcbot run --dry-run
+python -m btcbot.cli health
+python -m btcbot.cli run --dry-run
 ```
 
 ## Common commands
 
 ```bash
 pip install -e ".[dev]"
-btcbot health
-btcbot run --dry-run
-btcbot stage4-run --dry-run
+python -m btcbot.cli health
+python -m btcbot.cli run --dry-run
+python -m btcbot.cli stage4-run --dry-run
 python -m pytest -q
 ```
 
@@ -134,7 +134,7 @@ Stage 4 modules are available for controlled live trading lifecycle/accounting/r
 Run Stage 4 directly via the dedicated subcommand:
 
 ```bash
-btcbot stage4-run --dry-run
+python -m btcbot.cli stage4-run --dry-run
 ```
 
 To arm Stage 4 live writes, all of the following must be set:
