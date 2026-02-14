@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import perf_counter
 from uuid import uuid4
 
 from btcbot.config import Settings
@@ -82,12 +83,12 @@ class Stage7CycleRunner:
             settings=settings,
         )
 
-        ctx = with_cycle_context(cycle_id=cycle_id, run_id=run_id)
-        ctx.__enter__()
-        try:
+        collector.start_timer("cycle_total")
+        with with_cycle_context(cycle_id=cycle_id, run_id=run_id):
             logger.info(
                 "stage7_cycle_start", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}}
             )
+            collector.start_timer("selection")
             bootstrap_symbols = sorted({normalize_symbol(symbol) for symbol in settings.symbols})
             bootstrap_marks, _ = stage4.resolve_mark_prices(exchange, bootstrap_symbols)
             get_balances = getattr(base_client, "get_balances", None)
@@ -176,6 +177,7 @@ class Stage7CycleRunner:
                 settings=settings,
                 now_utc=now,
             )
+            collector.stop_timer("selection")
             universe_syms = {
                 normalize_symbol(symbol) for symbol in universe_result.selected_symbols
             }
@@ -230,6 +232,7 @@ class Stage7CycleRunner:
                 "risk_inputs_hash": stage7_risk_decision.inputs_hash,
             }
 
+            collector.start_timer("planning")
             portfolio_plan = policy_service.build_plan(
                 universe=universe_result.selected_symbols,
                 mark_prices_try=mark_prices,
@@ -250,6 +253,9 @@ class Stage7CycleRunner:
                 rules_unavailable=rules_unavailable,
             )
 
+            collector.stop_timer("planning")
+
+            collector.start_timer("intents")
             actions: list[dict[str, object]] = []
             simulated_count = 0
             slippage_try = Decimal("0")
@@ -298,6 +304,8 @@ class Stage7CycleRunner:
                         continue
                     filtered_actions.append(action)
 
+                collector.stop_timer("intents")
+                collector.start_timer("oms")
                 oms_service = OMSService()
                 market_simulator = Stage7MarketSimulator(mark_prices)
                 reconciled_orders, reconciled_events = oms_service.reconcile_open_orders(
@@ -319,7 +327,8 @@ class Stage7CycleRunner:
                 )
                 oms_orders = [*reconciled_orders, *oms_orders]
                 oms_events = [*reconciled_events, *oms_events]
-                simulated_count = len(oms_events)
+                simulated_count = len(oms_orders)
+                collector.stop_timer("oms")
                 actions = (
                     [
                         {
@@ -345,14 +354,19 @@ class Stage7CycleRunner:
                     + skipped_actions
                 )
             else:
+                collector.stop_timer("intents")
+                collector.set("oms", 0)
                 actions = [{"status": "skipped", "reason": "observe_only"}]
 
+            collector.start_timer("ledger")
             snapshot = ledger_service.snapshot(
                 mark_prices=mark_prices,
                 cash_try=Decimal(str(settings.dry_run_try_balance)),
                 slippage_try=slippage_try,
                 ts=now,
             )
+
+            collector.stop_timer("ledger")
 
             planned_count = sum(1 for intent in order_intents if not intent.skipped)
             skipped_count = sum(1 for intent in order_intents if intent.skipped)
@@ -370,13 +384,17 @@ class Stage7CycleRunner:
             throttled_events = sum(
                 1 for event in oms_events if "THROTTL" in event.event_type.upper()
             )
-            retry_count = max(0, settings.stage7_retry_max_attempts - 1)
+            retry_count = sum(1 for event in oms_events if event.event_type == "RETRY_SCHEDULED")
+            retry_giveup_count = sum(
+                1 for event in oms_events if event.event_type == "RETRY_GIVEUP"
+            )
             quality_flags = {
                 "stale_data": data_age_sec > settings.stage7_max_data_age_sec,
-                "missing_mark_price": missing_mark_price_count,
-                "spread_spike": int(spread_bps >= Decimal(str(settings.stage7_spread_spike_bps))),
+                "missing_mark_price": missing_mark_price_count > 0,
+                "spread_spike": spread_bps >= Decimal(str(settings.stage7_spread_spike_bps)),
                 "throttled": throttled_events > 0,
-                "retry_count": retry_count,
+                "retry_scheduled": retry_count > 0,
+                "retry_giveup": retry_giveup_count > 0,
             }
             alert_flags = {
                 "drawdown_breach": snapshot.max_drawdown >= settings.stage7_max_drawdown_pct,
@@ -384,7 +402,9 @@ class Stage7CycleRunner:
                 "missing_data": missing_mark_price_count > 0,
                 "throttled": throttled_events > 0,
                 "retry_excess": retry_count >= settings.stage7_retry_alert_threshold,
+                "retry_giveup": retry_giveup_count > 0,
             }
+            collector.stop_timer("cycle_total")
             finalized = collector.finalize()
             run_metrics = {
                 "ts": now.isoformat(),
@@ -414,9 +434,15 @@ class Stage7CycleRunner:
                 "oms_ms": int(finalized.get("oms_ms", 0)),
                 "ledger_ms": int(finalized.get("ledger_ms", 0)),
                 "persist_ms": int(finalized.get("persist_ms", 0)),
+                "cycle_total_ms": int(finalized.get("cycle_total_ms", 0)),
+                "missing_mark_price_count": missing_mark_price_count,
+                "oms_throttled_count": throttled_events,
+                "retry_count": retry_count,
+                "retry_giveup_count": retry_giveup_count,
                 "quality_flags": quality_flags,
                 "alert_flags": alert_flags,
             }
+            persist_started = perf_counter()
             state_store.save_stage7_cycle(
                 cycle_id=cycle_id,
                 ts=now,
@@ -483,14 +509,16 @@ class Stage7CycleRunner:
                 risk_decision=stage7_risk_decision,
                 run_metrics=run_metrics,
             )
-        finally:
-            logger.info(
-                "stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}}
-            )
-            ctx.__exit__(None, None, None)
-            close = getattr(exchange, "close", None)
-            if callable(close):
-                close()
+            persist_ms = max(0, int(round((perf_counter() - persist_started) * 1000)))
+            run_metrics["persist_ms"] = persist_ms
+            run_metrics["latency_ms_total"] = int(run_metrics["latency_ms_total"]) + persist_ms
+            run_metrics["cycle_total_ms"] = int(run_metrics.get("cycle_total_ms", 0)) + persist_ms
+            state_store.save_stage7_run_metrics(cycle_id, run_metrics)
+            state_store.set_last_stage7_cycle_id(cycle_id)
 
-        state_store.set_last_stage7_cycle_id(cycle_id)
+        logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})
+        close = getattr(exchange, "close", None)
+        if callable(close):
+            close()
+
         return result

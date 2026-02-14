@@ -22,6 +22,7 @@ def _seed_metrics(store: StateStore) -> None:
             "oms_canceled_count": 0,
             "events_appended": 1,
             "events_ignored": 0,
+            "oms_throttled_count": 0,
             "equity_try": "100",
             "gross_pnl_try": "2",
             "net_pnl_try": "1",
@@ -49,7 +50,10 @@ def test_stage7_report_and_alerts(capsys, tmp_path: Path) -> None:
 
     assert cli.run_stage7_report(settings, last=5) == 0
     report = capsys.readouterr().out
+    assert "cycle_id" in report
     assert "net_pnl_try" in report
+    assert "c1" in report
+    assert "1" in report
 
     assert cli.run_stage7_alerts(settings, last=5) == 0
     alerts = capsys.readouterr().out
@@ -65,3 +69,14 @@ def test_stage7_export_jsonl(tmp_path: Path) -> None:
     assert cli.run_stage7_export(settings, last=5, export_format="jsonl", out_path=str(out)) == 0
     assert out.exists()
     assert "cycle_id" in out.read_text(encoding="utf-8")
+
+
+def test_stage7_alerts_all_false_only_header(capsys, tmp_path: Path) -> None:
+    settings = Settings(STATE_DB_PATH=str(tmp_path / "s7.db"))
+    store = StateStore(db_path=settings.state_db_path)
+    _seed_metrics(store)
+
+    assert cli.run_stage7_alerts(settings, last=5) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+
+    assert lines == ["cycle_id ts alerts"]
