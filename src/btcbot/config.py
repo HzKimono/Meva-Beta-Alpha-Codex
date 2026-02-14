@@ -106,6 +106,20 @@ class Settings(BaseSettings):
         default="skip_symbol",
         alias="STAGE7_RULES_INVALID_METADATA_POLICY",
     )
+    stage7_max_drawdown_pct: Decimal = Field(
+        default=Decimal("0.20"), alias="STAGE7_MAX_DRAWDOWN_PCT"
+    )
+    stage7_max_daily_loss_try: Decimal = Field(
+        default=Decimal("500"), alias="STAGE7_MAX_DAILY_LOSS_TRY"
+    )
+    stage7_max_consecutive_losses: int = Field(default=3, alias="STAGE7_MAX_CONSECUTIVE_LOSSES")
+    stage7_max_data_age_sec: int = Field(default=60, alias="STAGE7_MAX_DATA_AGE_SEC")
+    stage7_spread_spike_bps: int = Field(default=300, alias="STAGE7_SPREAD_SPIKE_BPS")
+    stage7_risk_cooldown_sec: int = Field(default=900, alias="STAGE7_RISK_COOLDOWN_SEC")
+    stage7_concentration_top_n: int = Field(default=3, alias="STAGE7_CONCENTRATION_TOP_N")
+    stage7_loss_guardrail_mode: str = Field(
+        default="reduce_risk_only", alias="STAGE7_LOSS_GUARDRAIL_MODE"
+    )
 
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
@@ -370,6 +384,43 @@ class Settings(BaseSettings):
             raise ValueError(
                 "STAGE7_RULES_INVALID_METADATA_POLICY must be one of: "
                 "skip_symbol,observe_only_cycle"
+            )
+        return normalized
+
+    @field_validator(
+        "stage7_max_drawdown_pct",
+        "stage7_max_daily_loss_try",
+    )
+    def validate_stage7_risk_non_negative_decimal(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("Stage7 risk decimal settings must be >= 0")
+        return value
+
+    @field_validator(
+        "stage7_spread_spike_bps",
+        "stage7_risk_cooldown_sec",
+    )
+    def validate_stage7_risk_non_negative_int(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("Stage7 risk integer settings must be >= 0")
+        return value
+
+    @field_validator(
+        "stage7_max_consecutive_losses",
+        "stage7_max_data_age_sec",
+        "stage7_concentration_top_n",
+    )
+    def validate_stage7_risk_min_one_int(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Stage7 risk integer settings must be >= 1")
+        return value
+
+    @field_validator("stage7_loss_guardrail_mode")
+    def validate_stage7_loss_guardrail_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"reduce_risk_only", "observe_only"}:
+            raise ValueError(
+                "STAGE7_LOSS_GUARDRAIL_MODE must be one of: reduce_risk_only,observe_only"
             )
         return normalized
 
