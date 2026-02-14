@@ -39,9 +39,9 @@ class ExposureTracker:
         total_exposure_try = sum(sorted_exposure.values(), Decimal("0"))
 
         top_n = max(1, settings.stage7_concentration_top_n)
-        concentration = sorted(
-            sorted_exposure.items(), key=lambda item: (-item[1], item[0])
-        )[:top_n]
+        concentration = sorted(sorted_exposure.items(), key=lambda item: (-item[1], item[0]))[
+            :top_n
+        ]
 
         turnover_estimate = Decimal("0")
         if plan is not None:
@@ -73,4 +73,3 @@ class ExposureTracker:
             computed_at=now_utc.astimezone(UTC),
             inputs_hash=inputs_hash,
         )
-

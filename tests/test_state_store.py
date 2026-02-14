@@ -409,7 +409,6 @@ def test_record_stage4_order_error_persists_context(tmp_path) -> None:
     assert row["last_error"] == "cancel_missing_exchange_order_id"
 
 
-
 def test_stage7_risk_decision_saved_and_latest_fetchable(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "stage7_risk.db"))
     decision = RiskDecision(

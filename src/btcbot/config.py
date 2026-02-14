@@ -112,9 +112,7 @@ class Settings(BaseSettings):
     stage7_max_daily_loss_try: Decimal = Field(
         default=Decimal("500"), alias="STAGE7_MAX_DAILY_LOSS_TRY"
     )
-    stage7_max_consecutive_losses: int = Field(
-        default=3, alias="STAGE7_MAX_CONSECUTIVE_LOSSES"
-    )
+    stage7_max_consecutive_losses: int = Field(default=3, alias="STAGE7_MAX_CONSECUTIVE_LOSSES")
     stage7_max_data_age_sec: int = Field(default=60, alias="STAGE7_MAX_DATA_AGE_SEC")
     stage7_spread_spike_bps: int = Field(default=300, alias="STAGE7_SPREAD_SPIKE_BPS")
     stage7_risk_cooldown_sec: int = Field(default=900, alias="STAGE7_RISK_COOLDOWN_SEC")

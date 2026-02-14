@@ -142,4 +142,3 @@ class Stage7RiskBudgetService:
             decided_at=now_utc.astimezone(UTC),
             inputs_hash=inputs_hash,
         )
-

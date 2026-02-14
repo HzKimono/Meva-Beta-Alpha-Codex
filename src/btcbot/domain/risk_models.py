@@ -57,4 +57,3 @@ def stable_hash_payload(payload: object) -> str:
 
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_default)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
