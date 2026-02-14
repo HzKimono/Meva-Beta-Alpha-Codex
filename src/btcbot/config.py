@@ -397,15 +397,22 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "stage7_max_consecutive_losses",
-        "stage7_max_data_age_sec",
         "stage7_spread_spike_bps",
         "stage7_risk_cooldown_sec",
-        "stage7_concentration_top_n",
     )
     def validate_stage7_risk_non_negative_int(cls, value: int) -> int:
         if value < 0:
             raise ValueError("Stage7 risk integer settings must be >= 0")
+        return value
+
+    @field_validator(
+        "stage7_max_consecutive_losses",
+        "stage7_max_data_age_sec",
+        "stage7_concentration_top_n",
+    )
+    def validate_stage7_risk_min_one_int(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Stage7 risk integer settings must be >= 1")
         return value
 
     @field_validator("stage7_loss_guardrail_mode")

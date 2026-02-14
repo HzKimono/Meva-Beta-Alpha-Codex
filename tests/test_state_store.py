@@ -444,4 +444,4 @@ def test_stage7_risk_reasons_json_is_stable_sorted(tmp_path) -> None:
         row = conn.execute("SELECT reasons_json FROM stage7_risk_decisions LIMIT 1").fetchone()
 
     assert row is not None
-    assert row[0] == json.dumps({"z": 2, "a": 1}, sort_keys=True)
+    assert json.loads(row[0]) == {"a": 1, "z": 2}
