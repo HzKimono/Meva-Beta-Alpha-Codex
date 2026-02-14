@@ -662,3 +662,112 @@ def test_intents_summary_counts_correct(monkeypatch, tmp_path) -> None:
     assert summary["order_intents_total"] == (
         summary["order_intents_planned"] + summary["order_intents_skipped"]
     )
+
+
+def test_stage7_lifecycle_symbols_included_in_rules_coverage(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_lifecycle_symbols.db"
+
+    def _fake_stage4(self, settings):
+        del self, settings
+        return 0
+
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return [_Pair("BTC_TRY")]
+
+        def get_ticker_stats(self):
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "100",
+                    "high": "101",
+                    "low": "99",
+                }
+            ]
+
+        def get_orderbook(self, symbol):
+            if symbol == "BTCTRY":
+                return Decimal("99"), Decimal("100")
+            if symbol == "XRPTRY":
+                return Decimal("19"), Decimal("20")
+            raise RuntimeError("unknown symbol")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: _Exchange(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+    monkeypatch.setattr(
+        "btcbot.services.state_store.StateStore.list_stage4_open_orders",
+        lambda self: [
+            SimpleNamespace(
+                status="simulated_submitted",
+                symbol="XRP_TRY",
+                side="SELL",
+                price=Decimal("20"),
+                qty=Decimal("1"),
+                client_order_id="xrp-lifecycle-1",
+                exchange_order_id="xrp-ex-lifecycle-1",
+            )
+        ],
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE7_RULES_REQUIRE_METADATA=True,
+        STAGE7_RULES_INVALID_METADATA_POLICY="skip_symbol",
+    )
+
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        cycle = conn.execute(
+            """
+            SELECT intents_summary_json, order_decisions_json, order_intents_json
+            FROM stage7_cycle_trace
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    summary = json.loads(str(cycle["intents_summary_json"]))
+    assert (
+        summary["rules_stats"]["rules_missing_count"]
+        + summary["rules_stats"]["rules_invalid_count"]
+    ) >= 1
+
+    decisions = json.loads(str(cycle["order_decisions_json"]))
+    traces = json.loads(str(cycle["order_intents_json"]))
+    assert any(
+        decision.get("symbol") == "XRPTRY"
+        and decision.get("status") == "skipped"
+        and str(decision.get("reason", "")).startswith("rules_unavailable:")
+        for decision in decisions
+    ) or any(
+        trace.get("symbol") == "XRPTRY"
+        and str(trace.get("skip_reason", "")).startswith("rules_unavailable:")
+        for trace in traces
+    )

@@ -77,6 +77,7 @@ class OMSService:
                 intent.client_order_id
             )
             existing_event_types = [event.event_type for event in existing_events]
+            seq = len(existing_events)
 
             order = existing or Stage7Order(
                 order_id=make_order_id(intent.client_order_id),
@@ -99,13 +100,13 @@ class OMSService:
                 continue
 
             if intent.client_order_id in cancel_set:
-                order, new_event = self._transition_once(
+                order, new_event, seq = self._transition_once(
                     order=order,
                     now_utc=now_utc,
                     event_type="CANCELED",
                     payload={"reason": "cancel_requested"},
                     existing_event_types=existing_event_types,
-                    seq_start=len(existing_events) + len(events_to_append),
+                    seq=seq,
                 )
                 if new_event is not None:
                     events_to_append.append(new_event)
@@ -113,26 +114,26 @@ class OMSService:
                 continue
 
             for event_type in ("SUBMIT_REQUESTED", "ACKED"):
-                order, new_event = self._transition_once(
+                order, new_event, seq = self._transition_once(
                     order=order,
                     now_utc=now_utc,
                     event_type=event_type,
                     payload={"symbol": order.symbol, "side": order.side},
                     existing_event_types=existing_event_types,
-                    seq_start=len(existing_events) + len(events_to_append),
+                    seq=seq,
                 )
                 if new_event is not None:
                     events_to_append.append(new_event)
                     existing_event_types.append(event_type)
 
             if market_sim.should_reject(intent, settings):
-                order, rejected_event = self._transition_once(
+                order, rejected_event, seq = self._transition_once(
                     order=order,
                     now_utc=now_utc,
                     event_type="REJECTED",
                     payload={"reason": "invalid_price_or_qty"},
                     existing_event_types=existing_event_types,
-                    seq_start=len(existing_events) + len(events_to_append),
+                    seq=seq,
                 )
                 if rejected_event is not None:
                     events_to_append.append(rejected_event)
@@ -142,13 +143,13 @@ class OMSService:
             slices = market_sim.fill_slices(intent, settings)
             if len(slices) > 1:
                 first_qty, first_px = slices[0]
-                order, partial_event = self._transition_once(
+                order, partial_event, seq = self._transition_once(
                     order=order,
                     now_utc=now_utc,
                     event_type="PARTIAL_FILL",
                     payload={"fill_qty": str(first_qty), "fill_price_try": str(first_px)},
                     existing_event_types=existing_event_types,
-                    seq_start=len(existing_events) + len(events_to_append),
+                    seq=seq,
                     fill_qty=first_qty,
                     fill_price=first_px,
                     target_status=OrderStatus.PARTIALLY_FILLED,
@@ -159,13 +160,13 @@ class OMSService:
 
             total_fill_qty = sum((qty for qty, _ in slices), Decimal("0"))
             fill_price = slices[-1][1]
-            order, filled_event = self._transition_once(
+            order, filled_event, seq = self._transition_once(
                 order=order,
                 now_utc=now_utc,
                 event_type="FILLED",
                 payload={"filled_qty": str(total_fill_qty), "avg_fill_price_try": str(fill_price)},
                 existing_event_types=existing_event_types,
-                seq_start=len(existing_events) + len(events_to_append),
+                seq=seq,
                 fill_qty=total_fill_qty - order.filled_qty,
                 fill_price=fill_price,
                 target_status=OrderStatus.FILLED,
@@ -187,13 +188,13 @@ class OMSService:
         event_type: str,
         payload: dict[str, object],
         existing_event_types: list[str],
-        seq_start: int,
+        seq: int,
         fill_qty: Decimal = Decimal("0"),
         fill_price: Decimal | None = None,
         target_status: OrderStatus | None = None,
-    ) -> tuple[Stage7Order, OrderEvent | None]:
+    ) -> tuple[Stage7Order, OrderEvent | None, int]:
         if event_type in existing_event_types:
-            return order, None
+            return order, None, seq
 
         status = target_status
         if status is None:
@@ -219,8 +220,9 @@ class OMSService:
             avg_fill_price_try=avg_fill,
             last_update=now_utc.astimezone(UTC),
         )
+        next_seq = seq + 1
         event = OrderEvent(
-            event_id=make_event_id(order.client_order_id, seq_start + 1, event_type),
+            event_id=make_event_id(order.client_order_id, next_seq, event_type),
             ts=now_utc.astimezone(UTC),
             client_order_id=order.client_order_id,
             order_id=order.order_id,
@@ -228,4 +230,4 @@ class OMSService:
             payload=payload,
             cycle_id=order.cycle_id,
         )
-        return next_order, event
+        return next_order, event, next_seq

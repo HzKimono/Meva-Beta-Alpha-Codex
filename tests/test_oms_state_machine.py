@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from btcbot.config import Settings
 from btcbot.domain.order_intent import OrderIntent
+from btcbot.domain.order_state import make_event_id
 from btcbot.services.oms_service import OMSService, Stage7MarketSimulator
 from btcbot.services.state_store import StateStore
 
@@ -42,6 +43,15 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
         state_store=store,
         settings=settings,
     )
+    with store._connect() as conn:
+        rows_before = conn.execute(
+            """
+            SELECT client_order_id, event_id
+            FROM stage7_order_events
+            ORDER BY client_order_id, ts, event_id
+            """
+        ).fetchall()
+
     orders_2, events_2 = svc.process_intents(
         cycle_id="cycle-1",
         now_utc=now,
@@ -59,6 +69,22 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM stage7_order_events").fetchone()[0] == len(
             events_1
         )
+        rows_after = conn.execute(
+            """
+            SELECT client_order_id, event_id
+            FROM stage7_order_events
+            ORDER BY client_order_id, ts, event_id
+            """
+        ).fetchall()
+    assert rows_before == rows_after
+    for client_order_id in {str(row["client_order_id"]) for row in rows_before}:
+        client_event_ids = {
+            str(row["event_id"])
+            for row in rows_before
+            if str(row["client_order_id"]) == client_order_id
+        }
+        assert make_event_id(client_order_id, 1, "SUBMIT_REQUESTED") in client_event_ids
+        assert make_event_id(client_order_id, 2, "ACKED") in client_event_ids
     assert [o.order_id for o in orders_1] == [o.order_id for o in orders_2]
 
 
