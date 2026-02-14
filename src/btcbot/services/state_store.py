@@ -54,6 +54,10 @@ class AppendResult:
     ignored: int
 
 
+class IdempotencyConflictError(ValueError):
+    """Raised when an idempotency key is re-used with a conflicting payload."""
+
+
 class StateStore:
     def __init__(self, db_path: str = "btcbot_state.db") -> None:
         self.db_path = db_path
@@ -439,6 +443,15 @@ class StateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS stage7_idempotency_keys (
+                key TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                payload_hash TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS stage7_risk_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cycle_id TEXT,
@@ -778,6 +791,65 @@ class StateStore:
         attempted = len(events)
         return AppendResult(attempted=attempted, inserted=inserted, ignored=attempted - inserted)
 
+    def append_stage7_order_event(self, event: OrderEvent) -> bool:
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO stage7_order_events(
+                    event_id, ts, cycle_id, order_id, client_order_id, event_type, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    ensure_utc(event.ts).isoformat(),
+                    event.cycle_id,
+                    event.order_id,
+                    event.client_order_id,
+                    event.event_type,
+                    event.payload_json(),
+                ),
+            )
+        return bool(cur.rowcount)
+
+    def try_register_idempotency_key(self, key: str, payload_hash: str) -> bool:
+        now_iso = ensure_utc(datetime.now(UTC)).isoformat()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_hash FROM stage7_idempotency_keys WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is not None:
+                existing_payload_hash = str(row["payload_hash"])
+                if existing_payload_hash != payload_hash:
+                    raise IdempotencyConflictError(
+                        f"idempotency key conflict: {key}: "
+                        f"{existing_payload_hash} != {payload_hash}"
+                    )
+                return False
+            conn.execute(
+                """
+                INSERT INTO stage7_idempotency_keys(key, ts, payload_hash)
+                VALUES (?, ?, ?)
+                """,
+                (key, now_iso, payload_hash),
+            )
+            return True
+
+    def load_non_terminal_orders(self) -> list[Stage7Order]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM stage7_orders
+                WHERE status NOT IN ('FILLED', 'CANCELED', 'REJECTED')
+                ORDER BY last_update, client_order_id
+                """
+            ).fetchall()
+        return [self._row_to_stage7_order(row) for row in rows]
+
+    def load_order_events(self, client_order_id: str) -> list[OrderEvent]:
+        return self.get_stage7_order_events_by_client_id(client_order_id)
+
     def get_stage7_order_by_client_id(self, client_order_id: str) -> Stage7Order | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -786,22 +858,7 @@ class StateStore:
             ).fetchone()
         if row is None:
             return None
-        avg_fill = row["avg_fill_price_try"]
-        return Stage7Order(
-            order_id=str(row["order_id"]),
-            client_order_id=str(row["client_order_id"]),
-            cycle_id=str(row["cycle_id"]),
-            symbol=str(row["symbol"]),
-            side=str(row["side"]),
-            order_type=str(row["order_type"]),
-            price_try=Decimal(str(row["price_try"])),
-            qty=Decimal(str(row["qty"])),
-            filled_qty=Decimal(str(row["filled_qty"])),
-            avg_fill_price_try=Decimal(str(avg_fill)) if avg_fill is not None else None,
-            status=Stage7OrderStatus(str(row["status"])),
-            last_update=datetime.fromisoformat(str(row["last_update"])),
-            intent_hash=str(row["intent_hash"]),
-        )
+        return self._row_to_stage7_order(row)
 
     def get_stage7_order_events_by_client_id(self, client_order_id: str) -> list[OrderEvent]:
         with self._connect() as conn:
@@ -826,6 +883,24 @@ class StateStore:
             )
             for row in rows
         ]
+
+    def _row_to_stage7_order(self, row: sqlite3.Row) -> Stage7Order:
+        avg_fill = row["avg_fill_price_try"]
+        return Stage7Order(
+            order_id=str(row["order_id"]),
+            client_order_id=str(row["client_order_id"]),
+            cycle_id=str(row["cycle_id"]),
+            symbol=str(row["symbol"]),
+            side=str(row["side"]),
+            order_type=str(row["order_type"]),
+            price_try=Decimal(str(row["price_try"])),
+            qty=Decimal(str(row["qty"])),
+            filled_qty=Decimal(str(row["filled_qty"])),
+            avg_fill_price_try=Decimal(str(avg_fill)) if avg_fill is not None else None,
+            status=Stage7OrderStatus(str(row["status"])),
+            last_update=datetime.fromisoformat(str(row["last_update"])),
+            intent_hash=str(row["intent_hash"]),
+        )
 
     def _ensure_ledger_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(

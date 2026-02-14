@@ -63,12 +63,12 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
 
     assert len(orders_1) == 2
     assert len(events_1) >= 6
-    assert len(events_2) == 0
+    assert all(e.event_type == "DUPLICATE_IGNORED" for e in events_2)
     with store._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM stage7_orders").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM stage7_order_events").fetchone()[0] == len(
             events_1
-        )
+        ) + len(events_2)
         rows_after = conn.execute(
             """
             SELECT client_order_id, event_id
@@ -76,7 +76,7 @@ def test_process_intents_deterministic_and_idempotent(tmp_path) -> None:
             ORDER BY client_order_id, ts, event_id
             """
         ).fetchall()
-    assert rows_before == rows_after
+    assert len(rows_after) == len(rows_before) + len(events_2)
     for client_order_id in {str(row["client_order_id"]) for row in rows_before}:
         client_event_ids = {
             str(row["event_id"])

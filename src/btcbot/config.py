@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     stage7_sim_reject_prob_bps: Decimal = Field(
         default=Decimal("0"), alias="STAGE7_SIM_REJECT_PROB_BPS"
     )
+    stage7_rate_limit_rps: Decimal = Field(default=Decimal("5"), alias="STAGE7_RATE_LIMIT_RPS")
+    stage7_rate_limit_burst: int = Field(default=5, alias="STAGE7_RATE_LIMIT_BURST")
+    stage7_retry_max_attempts: int = Field(default=3, alias="STAGE7_RETRY_MAX_ATTEMPTS")
+    stage7_retry_base_delay_ms: int = Field(default=100, alias="STAGE7_RETRY_BASE_DELAY_MS")
+    stage7_retry_max_delay_ms: int = Field(default=1_000, alias="STAGE7_RETRY_MAX_DELAY_MS")
 
     risk_max_daily_drawdown_try: Decimal = Field(
         default=Decimal("1000"), alias="RISK_MAX_DAILY_DRAWDOWN_TRY"
@@ -402,10 +407,20 @@ class Settings(BaseSettings):
     @field_validator(
         "stage7_spread_spike_bps",
         "stage7_risk_cooldown_sec",
+        "stage7_retry_max_attempts",
+        "stage7_retry_base_delay_ms",
+        "stage7_retry_max_delay_ms",
+        "stage7_rate_limit_burst",
     )
     def validate_stage7_risk_non_negative_int(cls, value: int) -> int:
         if value < 0:
             raise ValueError("Stage7 risk integer settings must be >= 0")
+        return value
+
+    @field_validator("stage7_rate_limit_rps")
+    def validate_stage7_rate_limit_rps(cls, value: Decimal) -> Decimal:
+        if value <= 0:
+            raise ValueError("STAGE7_RATE_LIMIT_RPS must be > 0")
         return value
 
     @field_validator(
