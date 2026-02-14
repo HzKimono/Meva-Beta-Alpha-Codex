@@ -1,38 +1,27 @@
 # btcbot Architecture
 
-## Inventory and diagnosis
-Current strengths:
-- Domain models are mostly pure and concentrated under `src/btcbot/domain`.
-- Stage7 persistence already uses atomic cycle writes (`StateStore.save_stage7_cycle`).
-- Replay/backtest and parity paths are deterministic-first and well-tested.
+## Replay architecture
+- `btcbot.services.market_data_replay` consumes replay folder files (`candles/`, `orderbook/`, optional `ticker/`) and provides deterministic market snapshots.
+- `btcbot.adapters.replay_exchange` wraps replay service behind exchange client interfaces.
+- `btcbot.replay.validate` defines and enforces the replay dataset contract for CLI doctor/tooling.
+- `btcbot.replay.tools` provides:
+  - `replay-init` (folder + schema + deterministic synthetic sample)
+  - `replay-capture` (public endpoint capture only; atomic file writes)
 
-Architecture smells addressed in this PR:
-- Doctor checks were embedded in CLI and mixed parsing/validation/policy concerns.
-- Safety gate semantics were documented inconsistently across docs.
-- Missing top-level architecture/runbook/stage contract docs made onboarding slower.
+## Dataset contract (formal)
+- Required folders: `candles`, `orderbook`
+- Optional folder: `ticker`
+- Required candle columns: `ts,open,high,low,close,volume`
+- Required orderbook columns: `ts,best_bid,best_ask`
+- Required ticker columns when present: `ts,last,high,low,volume` (`quote_volume` optional)
+- Timestamps: parseable ISO8601 / unix sec / unix ms; monotonic per file
 
-## Module boundaries
-- `btcbot.domain`: pure models/value objects and invariants, no IO.
-- `btcbot.services`: orchestration and business workflows (cycle runners, risk, adaptation, parity, doctor checks).
-- `btcbot.adapters`: exchange and HTTP integrations.
-- `btcbot.cli`: command entrypoint, argument wiring, and output formatting.
-- `btcbot.logging_utils`: JSON logging and logger-level setup.
+## Determinism and idempotency guarantees
+- Replay backtest is deterministic for same dataset/time-range/seed.
+- Parity compares deterministic fingerprints over persisted Stage7 tables.
+- Rerunning Stage7 backtest into the same DB is idempotent for cycle rows.
 
-## Stage7 lifecycle (end-to-end)
-1. **Input data**: live adapters or `MarketDataReplay`.
-2. **Selection & planning**: universe selection + portfolio policy + intent generation.
-3. **Risk/degrade gates**: risk decision (`NORMAL/REDUCE_RISK_ONLY/OBSERVE_ONLY`) combined with global safety gates.
-4. **Dry-run execution state machine**: deterministic OMS transitions and simulated fills only.
-5. **Persistence**: cycle trace + ledger metrics + run metrics + optional adaptation data in a single transaction.
-6. **Metrics/parity**: deterministic fingerprints over canonicalized DB rows.
-
-## Determinism principles
-- Replay clock is sourced from dataset timestamps; no wall-clock dependency for backtests.
-- Stable ordering for parity payloads and JSON serialization.
-- `Decimal` values persisted as strings for round-trip stability.
-- Missing parity tables produce deterministic empty fingerprints instead of runtime failure.
-
-## Safety model
-- Stage7 is dry-run only.
-- `STAGE7_ENABLED` requires `DRY_RUN=true` and `LIVE_TRADING=false`.
-- Kill-switch remains authoritative for blocking writes in run paths.
+## Safety boundaries
+- Stage7 gate semantics unchanged: `STAGE7_ENABLED` still gates `stage7-run`.
+- Kill-switch semantics unchanged: `KILL_SWITCH=true` keeps side effects blocked/observe-only.
+- `replay-capture` uses public endpoints only and does not call private trading endpoints.

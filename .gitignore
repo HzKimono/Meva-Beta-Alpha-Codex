@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+/data/*
+!/data/README.md
+!/data/replay/
+/data/replay/*
+!/data/replay/README.md
