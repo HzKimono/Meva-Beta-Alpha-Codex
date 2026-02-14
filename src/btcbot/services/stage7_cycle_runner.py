@@ -12,12 +12,14 @@ from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
+from btcbot.services.exposure_tracker import ExposureTracker
 from btcbot.services.ledger_service import LedgerService
 from btcbot.services.order_builder_service import OrderBuilderService
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
+from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
 from btcbot.services.state_store import StateStore
-from btcbot.services.universe_selection_service import UniverseSelectionService
+from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,8 @@ class Stage7CycleRunner:
         universe_service = UniverseSelectionService()
         policy_service = PortfolioPolicyService()
         order_builder = OrderBuilderService()
+        exposure_tracker = ExposureTracker()
+        risk_budget_service = Stage7RiskBudgetService()
 
         open_orders = state_store.list_stage4_open_orders()
         lifecycle_actions: list[LifecycleAction] = []
@@ -66,16 +70,8 @@ class Stage7CycleRunner:
         )
 
         try:
-            universe_result = universe_service.select_universe(
-                exchange=base_client,
-                settings=settings,
-                now_utc=now,
-            )
-            symbols_needed = sorted(
-                {normalize_symbol(symbol) for symbol in universe_result.selected_symbols}
-                | {normalize_symbol(action.symbol) for action in lifecycle_actions}
-            )
-            mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
+            bootstrap_symbols = sorted({normalize_symbol(symbol) for symbol in settings.symbols})
+            bootstrap_marks, _ = stage4.resolve_mark_prices(exchange, bootstrap_symbols)
             get_balances = getattr(base_client, "get_balances", None)
             balances = get_balances() if callable(get_balances) else []
             if not balances:
@@ -86,6 +82,87 @@ class Stage7CycleRunner:
                     )
                 ]
 
+            exposure_snapshot = exposure_tracker.compute_snapshot(
+                balances=balances,
+                mark_prices_try=bootstrap_marks,
+                settings=settings,
+                now_utc=now,
+                plan=None,
+            )
+
+            latest_metrics = state_store.get_latest_stage7_ledger_metrics() or {
+                "max_drawdown": Decimal("0"),
+                "net_pnl_try": Decimal("0"),
+                "equity_try": Decimal(str(settings.dry_run_try_balance)),
+            }
+            previous_risk_decision = state_store.get_latest_stage7_risk_decision()
+            spread_bps = Decimal("0")
+            quote_volume_try = Decimal("0")
+            observed_ts: list[datetime] = []
+            ticker_stats_getter = getattr(base_client, "get_ticker_stats", None)
+            if callable(ticker_stats_getter):
+                for row in ticker_stats_getter() or []:
+                    if not isinstance(row, dict):
+                        continue
+                    symbol = normalize_symbol(str(row.get("pairSymbol") or row.get("symbol") or ""))
+                    if bootstrap_symbols and symbol not in bootstrap_symbols:
+                        continue
+                    vol_raw = row.get("volume") or row.get("quoteVolume")
+                    if vol_raw is not None:
+                        quote_volume_try += Decimal(str(vol_raw))
+                    ts_raw = row.get("ts") or row.get("timestamp")
+                    if isinstance(ts_raw, (int, float)):
+                        observed_ts.append(datetime.fromtimestamp(float(ts_raw), tz=UTC))
+
+            orderbook_getter = getattr(base_client, "get_orderbook", None)
+            if callable(orderbook_getter):
+                spreads: list[Decimal] = []
+                for symbol in bootstrap_symbols:
+                    try:
+                        bid, ask = orderbook_getter(symbol)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    bid_dec = Decimal(str(bid))
+                    ask_dec = Decimal(str(ask))
+                    if bid_dec > 0 and ask_dec >= bid_dec:
+                        mid = (bid_dec + ask_dec) / Decimal("2")
+                        spreads.append(((ask_dec - bid_dec) / mid) * _BPS)
+                if spreads:
+                    spread_bps = max(spreads)
+
+            data_age_sec = settings.stage7_max_data_age_sec + 1
+            if observed_ts:
+                newest = max(observed_ts)
+                data_age_sec = max(0, int((now - newest).total_seconds()))
+            elif quote_volume_try > 0:
+                data_age_sec = 0
+
+            risk_inputs = Stage7RiskInputs(
+                max_drawdown_pct=latest_metrics["max_drawdown"],
+                daily_pnl_try=latest_metrics["net_pnl_try"],
+                consecutive_loss_streak=0,
+                market_data_age_sec=data_age_sec,
+                observed_spread_bps=spread_bps,
+                quote_volume_try=quote_volume_try,
+                exposure_snapshot=exposure_snapshot,
+            )
+            stage7_risk_decision = risk_budget_service.decide(
+                settings=settings,
+                now_utc=now,
+                inputs=risk_inputs,
+                previous_decision=previous_risk_decision,
+            )
+
+            universe_result = universe_service.select_universe(
+                exchange=base_client,
+                settings=settings,
+                now_utc=now,
+            )
+            symbols_needed = sorted(
+                {normalize_symbol(symbol) for symbol in universe_result.selected_symbols}
+                | {normalize_symbol(action.symbol) for action in lifecycle_actions}
+            )
+            mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
             rules_symbols_fallback: set[str] = set()
             rules_symbols_invalid: set[str] = set()
             rules_symbols_missing: set[str] = set()
@@ -112,6 +189,8 @@ class Stage7CycleRunner:
 
             base_mode = state_store.get_latest_risk_mode()
             final_mode = combine_modes(base_mode, None)
+            stage7_mode = Mode(stage7_risk_decision.mode.value)
+            final_mode = combine_modes(final_mode, stage7_mode)
             invalid_policy = settings.stage7_rules_invalid_metadata_policy
             if invalid_policy == "observe_only_cycle" and (
                 rules_stats["rules_invalid_count"] > 0 or rules_stats["rules_missing_count"] > 0
@@ -122,6 +201,14 @@ class Stage7CycleRunner:
                 "base_mode": base_mode.value,
                 "override_mode": None,
                 "final_mode": final_mode.value,
+                "risk_mode": stage7_risk_decision.mode.value,
+                "risk_reasons": stage7_risk_decision.reasons,
+                "risk_cooldown_until": (
+                    stage7_risk_decision.cooldown_until.isoformat()
+                    if stage7_risk_decision.cooldown_until
+                    else None
+                ),
+                "risk_inputs_hash": stage7_risk_decision.inputs_hash,
             }
 
             portfolio_plan = policy_service.build_plan(
@@ -271,6 +358,7 @@ class Stage7CycleRunner:
                     "equity_try": snapshot.equity_try,
                     "max_drawdown": snapshot.max_drawdown,
                 },
+                risk_decision=stage7_risk_decision,
             )
         finally:
             close = getattr(exchange, "close", None)

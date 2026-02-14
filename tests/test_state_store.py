@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 
 from btcbot.domain.models import Order, OrderSide, OrderStatus
+from btcbot.domain.risk_models import RiskDecision, RiskMode
 from btcbot.services import state_store as state_store_module
 from btcbot.services.state_store import StateStore
 
@@ -406,3 +407,42 @@ def test_record_stage4_order_error_persists_context(tmp_path) -> None:
     assert row["status"] == "error"
     assert row["mode"] == "live"
     assert row["last_error"] == "cancel_missing_exchange_order_id"
+
+
+
+def test_stage7_risk_decision_saved_and_latest_fetchable(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "stage7_risk.db"))
+    decision = RiskDecision(
+        mode=RiskMode.REDUCE_RISK_ONLY,
+        reasons={"a": 1, "z": ["x"]},
+        cooldown_until=None,
+        decided_at=datetime(2024, 1, 1, tzinfo=UTC),
+        inputs_hash="abc",
+    )
+
+    store.save_stage7_risk_decision(cycle_id="c1", decision=decision)
+    latest = store.get_latest_stage7_risk_decision()
+
+    assert latest is not None
+    assert latest.mode == RiskMode.REDUCE_RISK_ONLY
+    assert latest.reasons == {"a": 1, "z": ["x"]}
+    assert latest.inputs_hash == "abc"
+
+
+def test_stage7_risk_reasons_json_is_stable_sorted(tmp_path) -> None:
+    db_path = tmp_path / "stage7_risk_sorted.db"
+    store = StateStore(db_path=str(db_path))
+    decision = RiskDecision(
+        mode=RiskMode.OBSERVE_ONLY,
+        reasons={"z": 2, "a": 1},
+        cooldown_until=None,
+        decided_at=datetime(2024, 1, 1, tzinfo=UTC),
+        inputs_hash="hash",
+    )
+    store.save_stage7_risk_decision(cycle_id="c2", decision=decision)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute("SELECT reasons_json FROM stage7_risk_decisions LIMIT 1").fetchone()
+
+    assert row is not None
+    assert row[0] == json.dumps({"z": 2, "a": 1}, sort_keys=True)

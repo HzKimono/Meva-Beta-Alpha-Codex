@@ -191,3 +191,37 @@ New table: `stage7_order_intents`
 - full JSON payload (`intent_json`)
 
 `stage7-run` now persists intents together with cycle trace/metrics atomically. No live order submission is performed in PR-4.
+
+## PR-5 Risk Budget v2 + Exposure Tracking
+
+Stage 7 now computes a dedicated **risk decision before universe selection** and persists it in both cycle trace and a dedicated table.
+
+### New concepts
+- `RiskMode`: `NORMAL | REDUCE_RISK_ONLY | OBSERVE_ONLY`
+- `RiskDecision`: mode, structured reasons, cooldown, decided timestamp, deterministic inputs hash.
+- `ExposureSnapshot`: per-symbol and total TRY exposure, concentration top-N, turnover estimate, free cash, deterministic inputs hash.
+
+### Rules (deterministic)
+- Drawdown breach (`STAGE7_MAX_DRAWDOWN_PCT`) -> `OBSERVE_ONLY` (+ cooldown).
+- Daily loss breach (`STAGE7_MAX_DAILY_LOSS_TRY`) -> `OBSERVE_ONLY`.
+- Consecutive losses (`STAGE7_MAX_CONSECUTIVE_LOSSES`) -> configurable degrade mode.
+- Stale data (`STAGE7_MAX_DATA_AGE_SEC`) -> `OBSERVE_ONLY`.
+- Spread spike (`STAGE7_SPREAD_SPIKE_BPS`) or liquidity drop (`STAGE7_MIN_QUOTE_VOLUME_TRY`) -> `REDUCE_RISK_ONLY`.
+- Cooldown monotonicity keeps prior restrictive mode until cooldown expiry.
+
+### Persistence
+- New table: `stage7_risk_decisions` (append-only).
+- `stage7_cycle_trace.mode_json` now includes:
+  - `risk_mode`, `risk_reasons`, `risk_cooldown_until`, `risk_inputs_hash`.
+
+### New Stage 7 settings
+- `STAGE7_MAX_DRAWDOWN_PCT`
+- `STAGE7_MAX_DAILY_LOSS_TRY`
+- `STAGE7_MAX_CONSECUTIVE_LOSSES`
+- `STAGE7_MAX_DATA_AGE_SEC`
+- `STAGE7_SPREAD_SPIKE_BPS`
+- `STAGE7_RISK_COOLDOWN_SEC`
+- `STAGE7_CONCENTRATION_TOP_N`
+- `STAGE7_LOSS_GUARDRAIL_MODE` (`reduce_risk_only|observe_only`)
+
+Stage 7 remains **DRY-RUN ONLY**.

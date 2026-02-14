@@ -21,6 +21,7 @@ from btcbot.domain.stage4 import Position as Stage4Position
 if TYPE_CHECKING:
     from btcbot.domain.anomalies import AnomalyEvent
     from btcbot.domain.risk_budget import Mode, RiskDecision
+    from btcbot.domain.risk_models import RiskDecision as Stage7RiskDecision
 
 
 @dataclass
@@ -394,6 +395,23 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS idx_stage7_order_intents_cycle_id "
             "ON stage7_order_intents(cycle_id)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_risk_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_id TEXT,
+                decided_at TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                cooldown_until TEXT,
+                inputs_hash TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_risk_decisions_decided_at "
+            "ON stage7_risk_decisions(decided_at)"
+        )
 
     def save_stage7_cycle(
         self,
@@ -409,6 +427,7 @@ class StateStore:
         ledger_metrics: dict[str, Decimal],
         order_intents: list[OrderIntent] | None = None,
         order_intents_trace: list[dict[str, object]] | None = None,
+        risk_decision: Stage7RiskDecision | None = None,
     ) -> None:
         with self.transaction() as conn:
             derived_trace = (
@@ -474,6 +493,12 @@ class StateStore:
                     ts=ts,
                     intents=order_intents,
                 )
+            if risk_decision is not None:
+                self._save_stage7_risk_decision_with_conn(
+                    conn=conn,
+                    cycle_id=cycle_id,
+                    decision=risk_decision,
+                )
             conn.execute(
                 """
                 INSERT INTO stage7_ledger_metrics(
@@ -506,6 +531,92 @@ class StateStore:
                     str(ledger_metrics["max_drawdown"]),
                 ),
             )
+
+    def save_stage7_risk_decision(
+        self,
+        *,
+        cycle_id: str | None,
+        decision: Stage7RiskDecision,
+    ) -> None:
+        with self._connect() as conn:
+            self._save_stage7_risk_decision_with_conn(
+                conn=conn,
+                cycle_id=cycle_id,
+                decision=decision,
+            )
+
+    def _save_stage7_risk_decision_with_conn(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        cycle_id: str | None,
+        decision: Stage7RiskDecision,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO stage7_risk_decisions(
+                cycle_id, decided_at, mode, reasons_json, cooldown_until, inputs_hash
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cycle_id,
+                ensure_utc(decision.decided_at).isoformat(),
+                decision.mode.value,
+                json.dumps(decision.reasons, sort_keys=True),
+                (
+                    ensure_utc(decision.cooldown_until).isoformat()
+                    if decision.cooldown_until is not None
+                    else None
+                ),
+                decision.inputs_hash,
+            ),
+        )
+
+    def get_latest_stage7_risk_decision(self) -> Stage7RiskDecision | None:
+        from btcbot.domain.risk_models import RiskDecision as Stage7RiskDecision
+        from btcbot.domain.risk_models import RiskMode
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT mode, reasons_json, cooldown_until, decided_at, inputs_hash
+                FROM stage7_risk_decisions
+                ORDER BY decided_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        cooldown = (
+            datetime.fromisoformat(str(row["cooldown_until"]))
+            if row["cooldown_until"] is not None
+            else None
+        )
+        return Stage7RiskDecision(
+            mode=RiskMode(str(row["mode"])),
+            reasons=json.loads(str(row["reasons_json"])),
+            cooldown_until=cooldown,
+            decided_at=datetime.fromisoformat(str(row["decided_at"])),
+            inputs_hash=str(row["inputs_hash"]),
+        )
+
+    def get_latest_stage7_ledger_metrics(self) -> dict[str, Decimal] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT max_drawdown, net_pnl_try, equity_try
+                FROM stage7_ledger_metrics
+                ORDER BY ts DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "max_drawdown": Decimal(str(row["max_drawdown"])),
+            "net_pnl_try": Decimal(str(row["net_pnl_try"])),
+            "equity_try": Decimal(str(row["equity_try"])),
+        }
 
     def _save_stage7_order_intents(
         self,
