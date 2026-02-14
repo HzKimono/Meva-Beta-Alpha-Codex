@@ -66,7 +66,20 @@ class ExecutionService:
                 if self.state_store.is_order_terminal(action.client_order_id):
                     continue
 
-                rules = self.rules_service.get_rules(action.symbol)
+                try:
+                    rules = self.rules_service.get_rules(action.symbol)
+                except ValueError:
+                    self.state_store.record_stage4_order_rejected(
+                        action.client_order_id,
+                        "missing_exchange_rules",
+                        symbol=action.symbol,
+                        side=action.side,
+                        price=action.price,
+                        qty=action.qty,
+                        mode=("live" if live_mode else "dry_run"),
+                    )
+                    rejected += 1
+                    continue
                 q_price = Quantizer.quantize_price(action.price, rules)
                 q_qty = Quantizer.quantize_qty(action.qty, rules)
                 if not Quantizer.validate_min_notional(q_price, q_qty, rules):
