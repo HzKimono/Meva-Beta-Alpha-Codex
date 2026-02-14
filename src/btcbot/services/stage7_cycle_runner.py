@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from time import perf_counter
 from uuid import uuid4
 
 from btcbot.config import Settings
@@ -41,12 +40,6 @@ class Stage7CycleRunner:
         collector = MetricsCollector()
         collector.set("run_id", run_id)
         collector.set("ts", now.isoformat())
-        collector.set("selection", 0)
-        collector.set("planning", 0)
-        collector.set("intents", 0)
-        collector.set("oms", 0)
-        collector.set("ledger", 0)
-        collector.set("persist", 0)
         state_store = StateStore(db_path=settings.state_db_path)
         stage4 = Stage4CycleRunner(command=self.command)
         result = stage4.run_one_cycle(settings)
@@ -241,23 +234,24 @@ class Stage7CycleRunner:
                 now_utc=now,
                 final_mode=final_mode,
             )
-
-            order_intents = order_builder.build_intents(
-                cycle_id=cycle_id,
-                plan=portfolio_plan,
-                mark_prices_try=mark_prices,
-                rules=rules_service,
-                settings=settings,
-                final_mode=final_mode,
-                now_utc=now,
-                rules_unavailable=rules_unavailable,
-            )
-
             collector.stop_timer("planning")
 
             collector.start_timer("intents")
+            try:
+                order_intents = order_builder.build_intents(
+                    cycle_id=cycle_id,
+                    plan=portfolio_plan,
+                    mark_prices_try=mark_prices,
+                    rules=rules_service,
+                    settings=settings,
+                    final_mode=final_mode,
+                    now_utc=now,
+                    rules_unavailable=rules_unavailable,
+                )
+            finally:
+                collector.stop_timer("intents")
+
             actions: list[dict[str, object]] = []
-            simulated_count = 0
             slippage_try = Decimal("0")
             oms_orders = []
             oms_events = []
@@ -304,7 +298,6 @@ class Stage7CycleRunner:
                         continue
                     filtered_actions.append(action)
 
-                collector.stop_timer("intents")
                 collector.start_timer("oms")
                 oms_service = OMSService()
                 market_simulator = Stage7MarketSimulator(mark_prices)
@@ -327,7 +320,6 @@ class Stage7CycleRunner:
                 )
                 oms_orders = [*reconciled_orders, *oms_orders]
                 oms_events = [*reconciled_events, *oms_events]
-                simulated_count = len(oms_orders)
                 collector.stop_timer("oms")
                 actions = (
                     [
@@ -354,8 +346,6 @@ class Stage7CycleRunner:
                     + skipped_actions
                 )
             else:
-                collector.stop_timer("intents")
-                collector.set("oms", 0)
                 actions = [{"status": "skipped", "reason": "observe_only"}]
 
             collector.start_timer("ledger")
@@ -381,9 +371,7 @@ class Stage7CycleRunner:
             missing_mark_price_count = sum(
                 1 for action in actions if action.get("reason") == "missing_mark_price"
             )
-            throttled_events = sum(
-                1 for event in oms_events if "THROTTL" in event.event_type.upper()
-            )
+            throttled_events = sum(1 for event in oms_events if event.event_type == "THROTTLED")
             retry_count = sum(1 for event in oms_events if event.event_type == "RETRY_SCHEDULED")
             retry_giveup_count = sum(
                 1 for event in oms_events if event.event_type == "RETRY_GIVEUP"
@@ -404,9 +392,7 @@ class Stage7CycleRunner:
                 "retry_excess": retry_count >= settings.stage7_retry_alert_threshold,
                 "retry_giveup": retry_giveup_count > 0,
             }
-            collector.stop_timer("cycle_total")
-            finalized = collector.finalize()
-            run_metrics = {
+            run_metrics_base = {
                 "ts": now.isoformat(),
                 "run_id": run_id,
                 "mode_base": base_mode.value,
@@ -427,6 +413,88 @@ class Stage7CycleRunner:
                 "slippage_try": snapshot.slippage_try,
                 "max_drawdown_pct": snapshot.max_drawdown,
                 "turnover_try": snapshot.turnover_try,
+                "missing_mark_price_count": missing_mark_price_count,
+                "oms_throttled_count": throttled_events,
+                "retry_count": retry_count,
+                "retry_giveup_count": retry_giveup_count,
+                "quality_flags": quality_flags,
+                "alert_flags": alert_flags,
+            }
+            collector.start_timer("persist")
+            try:
+                state_store.save_stage7_cycle(
+                    cycle_id=cycle_id,
+                    ts=now,
+                    selected_universe=universe_result.selected_symbols,
+                    universe_scores=[
+                        {
+                            "symbol": item.symbol,
+                            "total_score": str(item.total_score),
+                            "breakdown": item.breakdown,
+                        }
+                        for item in universe_result.scored[: max(0, settings.stage7_universe_size)]
+                    ],
+                    intents_summary={
+                        "order_decisions_total": len(actions),
+                        "orders_simulated": len(oms_orders),
+                        "order_intents_total": len(order_intents),
+                        "order_intents_planned": planned_count,
+                        "order_intents_skipped": skipped_count,
+                        "rules_stats": rules_stats,
+                        "events_total": len(oms_events),
+                        "oms_summary": {
+                            "orders_total": len(oms_orders),
+                            "orders_submitted": sum(
+                                1 for o in oms_orders if o.status.value == "SUBMITTED"
+                            ),
+                            "orders_acked": sum(1 for o in oms_orders if o.status.value == "ACKED"),
+                            "orders_partially_filled": sum(
+                                1 for o in oms_orders if o.status.value == "PARTIALLY_FILLED"
+                            ),
+                            "orders_filled": sum(
+                                1 for o in oms_orders if o.status.value == "FILLED"
+                            ),
+                            "orders_rejected": sum(
+                                1 for o in oms_orders if o.status.value == "REJECTED"
+                            ),
+                            "orders_canceled": sum(
+                                1 for o in oms_orders if o.status.value == "CANCELED"
+                            ),
+                        },
+                    },
+                    mode_payload=mode_payload,
+                    order_decisions=actions,
+                    portfolio_plan=portfolio_plan.to_dict(),
+                    order_intents=order_intents,
+                    order_intents_trace=[
+                        {
+                            "client_order_id": intent.client_order_id,
+                            "symbol": intent.symbol,
+                            "side": intent.side,
+                            "skipped": intent.skipped,
+                            "skip_reason": intent.skip_reason,
+                        }
+                        for intent in order_intents
+                    ],
+                    ledger_metrics={
+                        "gross_pnl_try": snapshot.gross_pnl_try,
+                        "realized_pnl_try": snapshot.realized_pnl_try,
+                        "unrealized_pnl_try": snapshot.unrealized_pnl_try,
+                        "net_pnl_try": snapshot.net_pnl_try,
+                        "fees_try": snapshot.fees_try,
+                        "slippage_try": snapshot.slippage_try,
+                        "turnover_try": snapshot.turnover_try,
+                        "equity_try": snapshot.equity_try,
+                        "max_drawdown": snapshot.max_drawdown,
+                    },
+                    risk_decision=stage7_risk_decision,
+                )
+            finally:
+                collector.stop_timer("persist")
+            collector.stop_timer("cycle_total")
+            finalized = collector.finalize()
+            run_metrics = {
+                **run_metrics_base,
                 "latency_ms_total": int(finalized.get("latency_ms_total", 0)),
                 "selection_ms": int(finalized.get("selection_ms", 0)),
                 "planning_ms": int(finalized.get("planning_ms", 0)),
@@ -435,84 +503,7 @@ class Stage7CycleRunner:
                 "ledger_ms": int(finalized.get("ledger_ms", 0)),
                 "persist_ms": int(finalized.get("persist_ms", 0)),
                 "cycle_total_ms": int(finalized.get("cycle_total_ms", 0)),
-                "missing_mark_price_count": missing_mark_price_count,
-                "oms_throttled_count": throttled_events,
-                "retry_count": retry_count,
-                "retry_giveup_count": retry_giveup_count,
-                "quality_flags": quality_flags,
-                "alert_flags": alert_flags,
             }
-            persist_started = perf_counter()
-            state_store.save_stage7_cycle(
-                cycle_id=cycle_id,
-                ts=now,
-                selected_universe=universe_result.selected_symbols,
-                universe_scores=[
-                    {
-                        "symbol": item.symbol,
-                        "total_score": str(item.total_score),
-                        "breakdown": item.breakdown,
-                    }
-                    for item in universe_result.scored[: max(0, settings.stage7_universe_size)]
-                ],
-                intents_summary={
-                    "order_decisions_total": len(actions),
-                    "orders_simulated": simulated_count,
-                    "order_intents_total": len(order_intents),
-                    "order_intents_planned": planned_count,
-                    "order_intents_skipped": skipped_count,
-                    "rules_stats": rules_stats,
-                    "events_total": len(oms_events),
-                    "oms_summary": {
-                        "orders_total": len(oms_orders),
-                        "orders_submitted": sum(
-                            1 for o in oms_orders if o.status.value == "SUBMITTED"
-                        ),
-                        "orders_acked": sum(1 for o in oms_orders if o.status.value == "ACKED"),
-                        "orders_partially_filled": sum(
-                            1 for o in oms_orders if o.status.value == "PARTIALLY_FILLED"
-                        ),
-                        "orders_filled": sum(1 for o in oms_orders if o.status.value == "FILLED"),
-                        "orders_rejected": sum(
-                            1 for o in oms_orders if o.status.value == "REJECTED"
-                        ),
-                        "orders_canceled": sum(
-                            1 for o in oms_orders if o.status.value == "CANCELED"
-                        ),
-                    },
-                },
-                mode_payload=mode_payload,
-                order_decisions=actions,
-                portfolio_plan=portfolio_plan.to_dict(),
-                order_intents=order_intents,
-                order_intents_trace=[
-                    {
-                        "client_order_id": intent.client_order_id,
-                        "symbol": intent.symbol,
-                        "side": intent.side,
-                        "skipped": intent.skipped,
-                        "skip_reason": intent.skip_reason,
-                    }
-                    for intent in order_intents
-                ],
-                ledger_metrics={
-                    "gross_pnl_try": snapshot.gross_pnl_try,
-                    "realized_pnl_try": snapshot.realized_pnl_try,
-                    "unrealized_pnl_try": snapshot.unrealized_pnl_try,
-                    "net_pnl_try": snapshot.net_pnl_try,
-                    "fees_try": snapshot.fees_try,
-                    "slippage_try": snapshot.slippage_try,
-                    "turnover_try": snapshot.turnover_try,
-                    "equity_try": snapshot.equity_try,
-                    "max_drawdown": snapshot.max_drawdown,
-                },
-                risk_decision=stage7_risk_decision,
-                run_metrics=run_metrics,
-            )
-            persist_ms = max(0, int(round((perf_counter() - persist_started) * 1000)))
-            run_metrics["persist_ms"] = persist_ms
-            run_metrics["latency_ms_total"] = int(run_metrics["latency_ms_total"]) + persist_ms
-            run_metrics["cycle_total_ms"] = int(run_metrics.get("cycle_total_ms", 0)) + persist_ms
             state_store.save_stage7_run_metrics(cycle_id, run_metrics)
             state_store.set_last_stage7_cycle_id(cycle_id)
 
