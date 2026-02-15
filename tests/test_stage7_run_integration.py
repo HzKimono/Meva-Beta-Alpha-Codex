@@ -10,7 +10,9 @@ from btcbot import cli
 from btcbot.config import Settings
 from btcbot.domain.adaptation_models import ParamChange
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType
+from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.risk_budget import Mode
+from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.state_store import StateStore
 
 
@@ -877,3 +879,173 @@ def test_stage7_policy_observe_only_on_exchange_rules_error(monkeypatch, tmp_pat
     summary = json.loads(str(cycle["intents_summary_json"]))
     assert mode_payload["final_mode"] == "OBSERVE_ONLY"
     assert summary["rules_stats"]["rules_error_count"] >= 1
+
+
+def test_stage7_materializes_fills_into_ledger_and_positions(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_fill_materialization.db"
+
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return [_Pair("BTC_TRY")]
+
+        def get_ticker_stats(self):
+            return [{"pairSymbol": "BTC_TRY", "volume": "1000", "last": "100"}]
+
+        def get_orderbook(self, symbol):
+            del symbol
+            return Decimal("99"), Decimal("100")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+    def _fake_intents(self, **kwargs):
+        return [
+            OrderIntent(
+                cycle_id=str(kwargs["cycle_id"]),
+                symbol="BTCTRY",
+                side="BUY",
+                order_type="LIMIT",
+                price_try=Decimal("100"),
+                qty=Decimal("1"),
+                notional_try=Decimal("100"),
+                client_order_id="s7-fill-1",
+                reason="test",
+                constraints_applied={},
+                skipped=False,
+                skip_reason=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "btcbot.services.order_builder_service.OrderBuilderService.build_intents",
+        _fake_intents,
+    )
+
+    runner = Stage7CycleRunner()
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE7_SIM_REJECT_PROB_BPS=0,
+    )
+    store = StateStore(db_path=str(db_path))
+
+    runner.run_one_cycle_with_dependencies(
+        settings=settings,
+        exchange=SimpleNamespace(client=_Exchange()),
+        state_store=store,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+        cycle_id="cycle-fill-1",
+        run_id="run-fill-1",
+        stage4_result=0,
+        enable_adaptation=False,
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        run_metrics = conn.execute("SELECT * FROM stage7_run_metrics").fetchone()
+        ledger_metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
+        ledger_events_count = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()["c"]
+        position = conn.execute("SELECT * FROM positions WHERE symbol='BTCTRY'").fetchone()
+    finally:
+        conn.close()
+
+    assert run_metrics is not None
+    assert int(run_metrics["oms_filled_count"]) > 0
+    assert int(run_metrics["fills_written_count"]) == int(run_metrics["oms_filled_count"])
+    assert int(run_metrics["fills_applied_count"]) == int(run_metrics["oms_filled_count"])
+    assert int(run_metrics["ledger_events_inserted"]) > 0
+    assert int(run_metrics["positions_updated_count"]) > 0
+    assert ledger_metrics is not None
+    assert Decimal(str(ledger_metrics["turnover_try"])) > 0
+    assert ledger_events_count > 0
+    assert position is not None
+    assert Decimal(str(position["qty"])) > 0
+
+
+def test_stage7_fill_materialization_is_idempotent_for_same_cycle(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_fill_idempotent.db"
+
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return [_Pair("BTC_TRY")]
+
+        def get_ticker_stats(self):
+            return [{"pairSymbol": "BTC_TRY", "volume": "1000", "last": "100"}]
+
+        def get_orderbook(self, symbol):
+            del symbol
+            return Decimal("99"), Decimal("100")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+    def _fake_intents(self, **kwargs):
+        return [
+            OrderIntent(
+                cycle_id=str(kwargs["cycle_id"]),
+                symbol="BTCTRY",
+                side="BUY",
+                order_type="LIMIT",
+                price_try=Decimal("100"),
+                qty=Decimal("1"),
+                notional_try=Decimal("100"),
+                client_order_id="s7-fill-duf",
+                reason="test",
+                constraints_applied={},
+                skipped=False,
+                skip_reason=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "btcbot.services.order_builder_service.OrderBuilderService.build_intents",
+        _fake_intents,
+    )
+
+    runner = Stage7CycleRunner()
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE7_SIM_REJECT_PROB_BPS=0,
+    )
+    store = StateStore(db_path=str(db_path))
+    exchange = SimpleNamespace(client=_Exchange())
+
+    kwargs = dict(
+        settings=settings,
+        exchange=exchange,
+        state_store=store,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+        cycle_id="cycle-fill-dup",
+        run_id="run-fill-dup",
+        stage4_result=0,
+        enable_adaptation=False,
+    )
+    runner.run_one_cycle_with_dependencies(**kwargs)
+    runner.run_one_cycle_with_dependencies(**kwargs)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        fills_count = conn.execute("SELECT COUNT(*) AS c FROM fills").fetchone()["c"]
+        ledger_events_count = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()["c"]
+    finally:
+        conn.close()
+
+    assert fills_count == 1
+    assert ledger_events_count == 2
