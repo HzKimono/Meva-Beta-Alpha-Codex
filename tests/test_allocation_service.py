@@ -382,3 +382,42 @@ def test_small_try_balance_rejects_with_blocking_cap_diagnostics() -> None:
         "cycle_notional_cap",
         "max_position_exposure_cap",
     }
+
+
+def test_buy_respects_fee_buffer_remaining_cash_at_or_above_target() -> None:
+    knobs = AllocationKnobs(
+        target_try_cash=Decimal("300"),
+        min_order_notional_try=Decimal("10"),
+        fee_buffer_bps=Decimal("100"),
+    )
+
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("100"))],
+        balances={"TRY": Decimal("400")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        knobs=knobs,
+    )
+
+    assert len(result.actions) == 1
+    spent_with_fee = result.actions[0].notional_try * (
+        Decimal("1") + knobs.fee_buffer_bps / Decimal("10000")
+    )
+    assert Decimal("400") - spent_with_fee >= Decimal("300")
+
+
+def test_buy_respects_try_cash_max_cap() -> None:
+    knobs = AllocationKnobs(
+        target_try_cash=Decimal("300"),
+        try_cash_max=Decimal("350"),
+        min_order_notional_try=Decimal("10"),
+    )
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("100"))],
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        knobs=knobs,
+    )
+    assert len(result.actions) == 1
+    assert result.actions[0].notional_try == Decimal("50")

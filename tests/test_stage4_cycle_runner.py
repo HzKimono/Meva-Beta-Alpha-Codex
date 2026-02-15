@@ -336,3 +336,33 @@ def test_cursor_advances_when_new_fills_arrive(monkeypatch, tmp_path) -> None:
     degrade = store.get_degrade_state_current()
     payload = json.loads(degrade.get("cursor_stall_cycles_json") or "{}")
     assert payload == {}
+
+
+def test_stage4_cycle_records_snapshot_and_no_submit_in_killswitch(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=True,
+        STATE_DB_PATH=str(tmp_path / "snap.sqlite"),
+        SYMBOLS="BTC_TRY,ETH_TRY,SOL_TRY",
+        TRY_CASH_TARGET="300",
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(settings.state_db_path)
+    with store._connect() as conn:
+        row = conn.execute("SELECT cycle_id FROM account_snapshots LIMIT 1").fetchone()
+    assert row is not None
+    assert "stage4_account_snapshot" in caplog.text
+    assert "stage4_allocation_plan" in caplog.text
+    assert "submit" not in exchange.calls

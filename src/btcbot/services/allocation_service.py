@@ -23,7 +23,9 @@ REASON_POSITION_VALUE_CAP: ReasonCode = "position_value_cap"
 @dataclass(frozen=True)
 class AllocationKnobs:
     target_try_cash: Decimal = Decimal("300")
+    try_cash_max: Decimal = Decimal("0")
     min_order_notional_try: Decimal = Decimal("10")
+    fee_buffer_bps: Decimal = Decimal("0")
     max_intent_notional_try: Decimal = Decimal("0")
     max_position_try_per_symbol: Decimal = Decimal("0")
     max_total_notional_try_per_cycle: Decimal = Decimal("0")
@@ -53,9 +55,12 @@ class AllocationService:
         actions: list[SizedAction] = []
         counters: dict[str, int] = {}
 
-        remaining_cash = max(
-            normalized_balances.get("TRY", Decimal("0")) - knobs.target_try_cash, Decimal("0")
-        )
+        total_try_cash = normalized_balances.get("TRY", Decimal("0"))
+        available_cash = total_try_cash
+        if knobs.try_cash_max > Decimal("0"):
+            available_cash = min(available_cash, knobs.try_cash_max)
+        remaining_cash = max(available_cash - knobs.target_try_cash, Decimal("0"))
+        fee_multiplier = Decimal("1") + (knobs.fee_buffer_bps / Decimal("10000"))
         remaining_cycle_notional = knobs.max_total_notional_try_per_cycle
 
         for intent_index, intent in enumerate(intents):
@@ -127,7 +132,9 @@ class AllocationService:
                     current_position_notional = position.qty * mark_price
 
                 limits = {
-                    REASON_CASH_TARGET: remaining_cash,
+                    REASON_CASH_TARGET: (
+                        remaining_cash / fee_multiplier if fee_multiplier > 0 else remaining_cash
+                    ),
                     REASON_MAX_POSITION_CAP: _max_new_position_notional(
                         current_position_notional, knobs.max_position_try_per_symbol
                     ),
@@ -215,6 +222,7 @@ class AllocationService:
                 "price_used": str(mark_price),
                 "cap_limits": {k: str(v) for k, v in limits.items()},
                 "blocking_cap": None,
+                "fee_buffer_bps": str(knobs.fee_buffer_bps),
             }
 
             if allocated_notional < knobs.min_order_notional_try:
@@ -288,7 +296,7 @@ class AllocationService:
                 )
             )
             if intent.side == "buy":
-                remaining_cash -= allocated_notional
+                remaining_cash -= allocated_notional * fee_multiplier
             if knobs.max_total_notional_try_per_cycle > Decimal("0"):
                 remaining_cycle_notional -= allocated_notional
 
