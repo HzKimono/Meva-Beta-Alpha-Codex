@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
@@ -42,11 +42,12 @@ class AccountingService:
         cursor_floor_ms = int(stored_cursor) if stored_cursor is not None else 0
         if stored_cursor is not None:
             since_ms = max(0, cursor_floor_ms - lookback_ms)
+        else:
+            since_ms = max(0, int(datetime.now(UTC).timestamp() * 1000) - lookback_ms)
 
         incoming = self.exchange.get_recent_fills(symbol, since_ms=since_ms)
-        if since_ms is None:
-            since_dt = datetime.now(UTC) - timedelta(minutes=self.lookback_minutes)
-            incoming = [fill for fill in incoming if fill.ts >= since_dt]
+        since_dt = datetime.fromtimestamp(since_ms / 1000, tz=UTC)
+        incoming = [fill for fill in incoming if fill.ts >= since_dt]
 
         fills: list[Fill] = []
         max_ts_ms = cursor_floor_ms

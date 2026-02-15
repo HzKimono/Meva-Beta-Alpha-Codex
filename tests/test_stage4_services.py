@@ -25,7 +25,6 @@ from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.state_store import StateStore
 
-
 class FakeExchangeStage4:
     def __init__(self) -> None:
         self.submits: list[tuple[str, Decimal, Decimal, str]] = []
@@ -71,16 +70,13 @@ class FakeExchangeStage4:
         self.last_since_ms = since_ms
         return list(self.fills)
 
-
 class MissingRulesService:
     def get_rules(self, symbol: str):
         raise ValueError(f"No usable exchange rules for symbol={symbol} status=missing")
 
-
 @pytest.fixture
 def store(tmp_path) -> StateStore:
     return StateStore(str(tmp_path / "stage4.sqlite"))
-
 
 def test_execution_enforces_live_ack_and_kill_switch(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
@@ -123,7 +119,6 @@ def test_execution_enforces_live_ack_and_kill_switch(store: StateStore) -> None:
     )
     assert svc.execute([action]) == 0
 
-
 def test_decimal_end_to_end_and_idempotent_submit(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
     svc = ExecutionService(
@@ -157,7 +152,6 @@ def test_decimal_end_to_end_and_idempotent_submit(store: StateStore) -> None:
     assert submitted_qty == Decimal("1.2345")
     assert len(submitted_client_id) <= 50
     assert submitted_client_id != action.client_order_id
-
 
 def test_cancel_lookup_works_when_action_has_no_exchange_id(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
@@ -195,7 +189,6 @@ def test_cancel_lookup_works_when_action_has_no_exchange_id(store: StateStore) -
     assert svc.execute([cancel]) == 1
     assert exchange.cancels == ["ex-77"]
 
-
 def test_lifecycle_replace_plan_and_ordering() -> None:
     now = datetime.now(UTC)
     open_order = Order(
@@ -229,7 +222,6 @@ def test_lifecycle_replace_plan_and_ordering() -> None:
         LifecycleActionType.CANCEL,
         LifecycleActionType.SUBMIT,
     ]
-
 
 def test_risk_profit_enforcement_and_projection() -> None:
     policy = RiskPolicy(
@@ -276,7 +268,6 @@ def test_risk_profit_enforcement_and_projection() -> None:
     )
     assert accepted == []
     assert decisions[0].reason == "min_profit_threshold"
-
 
 def test_accounting_equity_realized_today_fee_and_oversell(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
@@ -336,7 +327,6 @@ def test_accounting_equity_realized_today_fee_and_oversell(store: StateStore) ->
             fills3.fills, mark_prices={"BTC_TRY": Decimal("120")}, try_cash=Decimal("620")
         )
 
-
 def test_reconcile_enrichment_and_missing_client_id() -> None:
     now = now_utc()
     db_order = Order(
@@ -385,6 +375,18 @@ def test_reconcile_enrichment_and_missing_client_id() -> None:
     assert result.enrich_exchange_ids == [("cid-1", "ex-1")]
     assert len(result.external_missing_client_id) == 1
 
+def test_accounting_fetch_new_fills_initializes_since_ms_with_lookback_when_cursor_missing(
+    store: StateStore,
+) -> None:
+    exchange = FakeExchangeStage4()
+    svc = AccountingService(exchange=exchange, state_store=store, lookback_minutes=30)
+
+    before_ms = int((datetime.now(UTC) - timedelta(minutes=30)).timestamp() * 1000)
+    svc.fetch_new_fills("BTC_TRY")
+    after_ms = int((datetime.now(UTC) - timedelta(minutes=30)).timestamp() * 1000)
+
+    assert exchange.last_since_ms is not None
+    assert before_ms <= exchange.last_since_ms <= after_ms
 
 def test_accounting_fetch_new_fills_applies_lookback_even_with_cursor(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
@@ -394,7 +396,6 @@ def test_accounting_fetch_new_fills_applies_lookback_even_with_cursor(store: Sta
     svc.fetch_new_fills("BTC_TRY")
 
     assert exchange.last_since_ms == 1800000
-
 
 def test_cancel_does_not_hit_exchange_when_live_not_armed(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
@@ -425,7 +426,6 @@ def test_cancel_does_not_hit_exchange_when_live_not_armed(store: StateStore) -> 
 
     assert svc.execute([cancel]) == 1
     assert exchange.cancels == []
-
 
 def test_submit_idempotency_persists_single_row(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
@@ -464,7 +464,6 @@ def test_submit_idempotency_persists_single_row(store: StateStore) -> None:
     assert row is not None
     assert row["c"] == 1
 
-
 def test_failed_submit_allows_retry(store: StateStore) -> None:
     class FailingExchange(FakeExchangeStage4):
         def submit_limit_order(self, symbol, side, price, qty, client_order_id):
@@ -500,7 +499,6 @@ def test_failed_submit_allows_retry(store: StateStore) -> None:
     with pytest.raises(RuntimeError):
         svc.execute([action])
 
-
 def test_open_order_dedupe_only_while_open(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
     svc = ExecutionService(
@@ -530,7 +528,6 @@ def test_open_order_dedupe_only_while_open(store: StateStore) -> None:
     assert svc.execute([action]) == 0
     store.record_stage4_order_canceled("cid-open-dedupe")
     assert svc.execute([action]) == 1
-
 
 def test_execution_rejects_and_continues_when_rules_missing(store: StateStore) -> None:
     exchange = FakeExchangeStage4()

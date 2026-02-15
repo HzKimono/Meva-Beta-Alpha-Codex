@@ -332,7 +332,7 @@ class BtcturkHttpClient(ExchangeClient):
         if since_ms is not None:
             params["startDate"] = since_ms
         payload = self._private_get("/api/v1/users/transactions/trade", params=params)
-        rows = self._extract_list_data(payload, path="/api/v1/users/transactions/trade")
+        rows = self._extract_fill_rows(payload, path="/api/v1/users/transactions/trade")
         fills: list[TradeFill] = []
         for row in rows:
             fill_id = str(row.get("id") or row.get("orderClientId") or row.get("orderId"))
@@ -355,6 +355,38 @@ class BtcturkHttpClient(ExchangeClient):
                 )
             )
         return fills
+
+    def _extract_fill_rows(self, payload: dict, *, path: str) -> list[dict[str, object]]:
+        data = payload.get("data")
+        if data is None:
+            return []
+
+        rows: list[object] | None = None
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict):
+            data_items = data.get("items")
+            if isinstance(data_items, list):
+                rows = data_items
+            else:
+                symbols = data.get("symbols")
+                if isinstance(symbols, list):
+                    rows = symbols
+                elif not data:
+                    rows = []
+                else:
+                    return []
+        elif not data:
+            rows = []
+        else:
+            raise ValueError(f"Malformed list payload for {path}: {type(data).__name__}")
+
+        normalized: list[dict[str, object]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"Malformed item in {path} payload: {row!r}")
+            normalized.append(row)
+        return normalized
 
     def _pair_symbol(self, symbol: str) -> str:
         return normalize_symbol(symbol)
@@ -1234,7 +1266,7 @@ class BtcturkHttpClientStage4(ExchangeClientStage4):
             params["startDate"] = since_ms
 
         payload = self.client._private_get("/api/v1/users/transactions/trade", params=params)
-        rows = self.client._extract_list_data(payload, path="/api/v1/users/transactions/trade")
+        rows = self.client._extract_fill_rows(payload, path="/api/v1/users/transactions/trade")
         fills: list[TradeFill] = []
         for row in rows:
             fill_id_raw = row.get("id") or row.get("tradeId") or row.get("transactionId")
