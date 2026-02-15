@@ -124,7 +124,17 @@ Defaults evidence: `src/btcbot/config.py` (field defaults ~22-193), `.env.exampl
 - Adapter sanitizes request params/json to remove sensitive keys (`api_key`, `secret`, `signature`, etc.) before attaching to errors.
 - Evidence: `src/btcbot/logging_utils.py` (~67-78), `src/btcbot/adapters/btcturk_http.py` (~136-155, 291-293, 307-309).
 
----
+## 4.3 Edge-case handling validation
+
+a) **Partial fills**
+- Stage7 OMS explicitly emits `PARTIAL_FILL` then `FILLED` when slices >1. (`src/btcbot/services/oms_service.py` L341-L371)
+- Stage3/4 ingest relies on exchange fills stream + dedupe by `fill_id`. (`src/btcbot/services/accounting_service_stage4.py` L37-L87, L98-L101)
+
+b) **Fees in base/quote**
+- Stage3 accounting ignores non-quote fees with warning (risk of understated fee burden). (`src/btcbot/accounting/accounting_service.py` L57-L69)
+- Stage4 logs fee conversion missing for non-TRY fee asset and records audit note. (`src/btcbot/services/accounting_service_stage4.py` L109-L114, L167-L172)
+- Stage7 currently books fees in TRY for simulated OMS fills. (`src/btcbot/services/stage7_cycle_runner.py` L479-L535)
+- **GAP:** no implemented generic FX fee conversion pipeline for non-TRY fees in stage3/4 live accounting.
 
 ## 4) Operational safety
 
