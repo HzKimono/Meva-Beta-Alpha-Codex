@@ -132,6 +132,12 @@ Key notes:
 
 ## Stage 4 additions
 
+Cash buffer allocation policy (Stage 4):
+- `TRY_CASH_TARGET` (default `300`) is reserved cash.
+- Buy allocations use only `max(0, cash_try - TRY_CASH_TARGET)` (optionally capped by `TRY_CASH_MAX`) with fee buffer (`ALLOCATION_FEE_BUFFER_BPS`) so planned buys do not drive remaining cash below target.
+- Account snapshots read private balances; when credentials/auth fail, logs include `missing_private_data` and fallback cash is used for deterministic dry-run planning.
+
+
 Stage 4 modules are available for controlled live trading lifecycle/accounting/risk flows. See `docs/stage4.md` for canary checklist, idempotency model (`client_order_id`/`fill_id`), env vars, and current limitations.
 
 

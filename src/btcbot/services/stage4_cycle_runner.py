@@ -22,6 +22,7 @@ from btcbot.domain.stage4 import (
 )
 from btcbot.domain.strategy_core import PositionSummary
 from btcbot.services import metrics_service
+from btcbot.services.account_snapshot_service import AccountSnapshotService
 from btcbot.services.accounting_service_stage4 import AccountingService
 from btcbot.services.anomaly_detector_service import AnomalyDetectorConfig, AnomalyDetectorService
 from btcbot.services.decision_pipeline_service import DecisionPipelineService
@@ -119,8 +120,30 @@ class Stage4CycleRunner:
             )
 
             mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, active_symbols)
-            try_cash = self._resolve_try_cash(
-                exchange, fallback=Decimal(str(settings.dry_run_try_balance))
+            snapshot_service = AccountSnapshotService(exchange=exchange)
+            account_snapshot = snapshot_service.build_snapshot(
+                symbols=active_symbols,
+                fallback_try_cash=Decimal(str(settings.dry_run_try_balance)),
+            )
+            try_cash = account_snapshot.cash_try
+            state_store.save_account_snapshot(cycle_id=cycle_id, snapshot=account_snapshot)
+            holdings_summary = {
+                asset: str(item.total)
+                for asset, item in account_snapshot.holdings.items()
+                if item.total > Decimal("0")
+            }
+            logger.info(
+                "stage4_account_snapshot",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "cash_try": str(account_snapshot.cash_try),
+                        "equity_try": str(account_snapshot.total_equity_try),
+                        "holdings": holdings_summary,
+                        "flags": list(account_snapshot.flags),
+                        "source_endpoints": list(account_snapshot.source_endpoints),
+                    }
+                },
             )
 
             exchange_open_orders: list[Order] = []
@@ -259,6 +282,47 @@ class Stage4CycleRunner:
                 pair_info=pair_info,
                 bootstrap_enabled=settings.stage4_bootstrap_intents,
                 live_mode=live_mode,
+            )
+            total_try_cash = try_cash
+            capped_cash = (
+                min(total_try_cash, settings.try_cash_max)
+                if settings.try_cash_max > Decimal("0")
+                else total_try_cash
+            )
+            investable_try = max(Decimal("0"), capped_cash - settings.try_cash_target)
+            logger.info(
+                "stage4_allocation_plan",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "cash_target": str(settings.try_cash_target),
+                        "cash_try": str(total_try_cash),
+                        "investable_try": str(investable_try),
+                        "planned": [
+                            {
+                                "symbol": item.symbol,
+                                "side": item.side,
+                                "notional_try": str(item.notional_try),
+                                "qty": str(item.qty),
+                                "reason": item.rationale,
+                            }
+                            for item in decision_report.allocation_actions
+                        ],
+                        "decisions": [
+                            {
+                                "symbol": item.symbol,
+                                "status": item.status,
+                                "reason": item.reason,
+                                "requested_notional_try": (
+                                    str(item.requested_notional_try)
+                                    if item.requested_notional_try is not None
+                                    else None
+                                ),
+                            }
+                            for item in decision_report.allocation_decisions
+                        ],
+                    }
+                },
             )
             pipeline_orders = [
                 order

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from btcbot.domain.account_snapshot import AccountSnapshot, Holding
 from btcbot.domain.accounting import Position, TradeFill
 from btcbot.domain.adaptation_models import ParamChange, Stage7Params
 from btcbot.domain.intent import Intent
@@ -1451,6 +1452,20 @@ class StateStore:
             conn.execute("ALTER TABLE cycle_audit ADD COLUMN envelope_json TEXT")
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS account_snapshots (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                cash_try TEXT NOT NULL,
+                total_equity_try TEXT NOT NULL,
+                holdings_json TEXT NOT NULL,
+                source_endpoints_json TEXT NOT NULL,
+                flags_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS applied_fills (
                 fill_id TEXT PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -2407,6 +2422,56 @@ class StateStore:
                     json.dumps(envelope, sort_keys=True) if envelope is not None else None,
                 ),
             )
+
+    def save_account_snapshot(self, *, cycle_id: str, snapshot: AccountSnapshot) -> None:
+        holdings_payload = {
+            asset: {"free": str(item.free), "locked": str(item.locked)}
+            for asset, item in snapshot.holdings.items()
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO account_snapshots(
+                    cycle_id, ts, exchange, cash_try, total_equity_try,
+                    holdings_json, source_endpoints_json, flags_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cycle_id,
+                    snapshot.timestamp.isoformat(),
+                    snapshot.exchange,
+                    str(snapshot.cash_try),
+                    str(snapshot.total_equity_try),
+                    json.dumps(holdings_payload, sort_keys=True),
+                    json.dumps(list(snapshot.source_endpoints), sort_keys=True),
+                    json.dumps(list(snapshot.flags), sort_keys=True),
+                ),
+            )
+
+    def get_account_snapshot(self, cycle_id: str) -> AccountSnapshot | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM account_snapshots WHERE cycle_id = ?", (cycle_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        holdings_data = json.loads(str(row["holdings_json"]))
+        holdings: dict[str, Holding] = {}
+        for asset, payload in holdings_data.items():
+            holdings[str(asset)] = Holding(
+                asset=str(asset),
+                free=Decimal(str(payload.get("free", "0"))),
+                locked=Decimal(str(payload.get("locked", "0"))),
+            )
+        return AccountSnapshot(
+            timestamp=datetime.fromisoformat(str(row["ts"])),
+            exchange=str(row["exchange"]),
+            cash_try=Decimal(str(row["cash_try"])),
+            holdings=holdings,
+            total_equity_try=Decimal(str(row["total_equity_try"])),
+            source_endpoints=tuple(json.loads(str(row["source_endpoints_json"]))),
+            flags=tuple(json.loads(str(row["flags_json"]))),
+        )
 
     def append_ledger_events(self, events: list[LedgerEvent]) -> AppendResult:
         inserted = 0

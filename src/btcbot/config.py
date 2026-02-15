@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     slippage_bps_buffer: Decimal = Field(default=Decimal("10"), alias="SLIPPAGE_BPS_BUFFER")
     try_cash_target: Decimal = Field(default=Decimal("300"), alias="TRY_CASH_TARGET")
     try_cash_max: Decimal = Field(default=Decimal("600"), alias="TRY_CASH_MAX")
+    allocation_fee_buffer_bps: Decimal = Field(
+        default=Decimal("20"), alias="ALLOCATION_FEE_BUFFER_BPS"
+    )
     rules_cache_ttl_sec: int = Field(default=300, alias="RULES_CACHE_TTL_SEC")
     fills_poll_lookback_minutes: int = Field(default=30, alias="FILLS_POLL_LOOKBACK_MINUTES")
     stage4_bootstrap_intents: bool = Field(default=True, alias="STAGE4_BOOTSTRAP_INTENTS")
@@ -311,6 +314,12 @@ class Settings(BaseSettings):
     def validate_risk_max_fee_try_per_day(cls, value: Decimal | None) -> Decimal | None:
         if value is not None and value <= 0:
             raise ValueError("RISK_MAX_FEE_TRY_PER_DAY must be > 0 when configured")
+        return value
+
+    @field_validator("allocation_fee_buffer_bps")
+    def validate_allocation_fee_buffer_bps(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("ALLOCATION_FEE_BUFFER_BPS must be >= 0")
         return value
 
     @field_validator(

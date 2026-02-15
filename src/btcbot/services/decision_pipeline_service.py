@@ -95,7 +95,9 @@ class DecisionPipelineService:
             mark_prices=mark_prices,
             knobs=AllocationKnobs(
                 target_try_cash=self._to_decimal(self.settings.try_cash_target),
+                try_cash_max=self._to_decimal(self.settings.try_cash_max),
                 min_order_notional_try=self._to_decimal(self.settings.min_order_notional_try),
+                fee_buffer_bps=self._to_decimal(self.settings.allocation_fee_buffer_bps),
                 max_intent_notional_try=Decimal("0"),
                 max_position_try_per_symbol=self._to_decimal(
                     self.settings.max_position_try_per_symbol
