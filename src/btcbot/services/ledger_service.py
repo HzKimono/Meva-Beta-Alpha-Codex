@@ -53,6 +53,20 @@ class SimulatedFill:
     baseline_price: Decimal
 
 
+@dataclass(frozen=True)
+class FinancialBreakdown:
+    cash_try: Decimal
+    position_mtm_try: Decimal
+    realized_pnl_try: Decimal
+    unrealized_pnl_try: Decimal
+    fees_try: Decimal
+    slippage_try: Decimal
+    gross_pnl_try: Decimal
+    net_pnl_try: Decimal
+    equity_try: Decimal
+    turnover_try: Decimal
+
+
 class LedgerService:
     def __init__(self, state_store: StateStore, logger: logging.Logger) -> None:
         self.state_store = state_store
@@ -186,15 +200,23 @@ class LedgerService:
             events_ignored=append.ignored,
         )
 
-    def snapshot(
+    def _position_mtm(self, state: LedgerState, mark_prices: dict[str, Decimal]) -> Decimal:
+        total = Decimal("0")
+        for symbol, ledger in state.symbols.items():
+            mark = mark_prices.get(symbol)
+            if mark is None:
+                continue
+            total += sum((lot.qty * mark for lot in ledger.lots), Decimal("0"))
+        return total
+
+    def financial_breakdown(
         self,
         *,
         mark_prices: dict[str, Decimal],
         cash_try: Decimal,
         price_for_fee_conversion: callable | None = None,
         slippage_try: Decimal = Decimal("0"),
-        ts: datetime | None = None,
-    ) -> LedgerSnapshot:
+    ) -> FinancialBreakdown:
         events = self.state_store.load_ledger_events()
         state = apply_events(LedgerState(), events)
         realized = compute_realized_pnl(state)
@@ -218,6 +240,37 @@ class LedgerService:
 
         gross = realized + unrealized
         net = gross - fees_try - slippage_try
+        mtm = self._position_mtm(state, normalized_marks)
+        equity = cash_try + mtm
+
+        return FinancialBreakdown(
+            cash_try=cash_try,
+            position_mtm_try=mtm,
+            realized_pnl_try=realized,
+            unrealized_pnl_try=unrealized,
+            fees_try=fees_try,
+            slippage_try=slippage_try,
+            gross_pnl_try=gross,
+            net_pnl_try=net,
+            equity_try=equity,
+            turnover_try=turnover,
+        )
+
+    def snapshot(
+        self,
+        *,
+        mark_prices: dict[str, Decimal],
+        cash_try: Decimal,
+        price_for_fee_conversion: callable | None = None,
+        slippage_try: Decimal = Decimal("0"),
+        ts: datetime | None = None,
+    ) -> LedgerSnapshot:
+        breakdown = self.financial_breakdown(
+            mark_prices=mark_prices,
+            cash_try=cash_try,
+            price_for_fee_conversion=price_for_fee_conversion,
+            slippage_try=slippage_try,
+        )
 
         with self.state_store._connect() as conn:
             rows = conn.execute(
@@ -231,17 +284,19 @@ class LedgerService:
             for row in rows
         ]
         if ts is not None:
-            points.append(EquityPoint(ts=ts, equity_try=cash_try + net))
+            points.append(EquityPoint(ts=ts, equity_try=breakdown.equity_try))
 
         return LedgerSnapshot(
-            gross_pnl_try=gross,
-            realized_pnl_try=realized,
-            unrealized_pnl_try=unrealized,
-            net_pnl_try=net,
-            fees_try=fees_try,
-            slippage_try=slippage_try,
-            turnover_try=turnover,
-            equity_try=cash_try + net,
+            cash_try=breakdown.cash_try,
+            position_mtm_try=breakdown.position_mtm_try,
+            gross_pnl_try=breakdown.gross_pnl_try,
+            realized_pnl_try=breakdown.realized_pnl_try,
+            unrealized_pnl_try=breakdown.unrealized_pnl_try,
+            net_pnl_try=breakdown.net_pnl_try,
+            fees_try=breakdown.fees_try,
+            slippage_try=breakdown.slippage_try,
+            turnover_try=breakdown.turnover_try,
+            equity_try=breakdown.equity_try,
             max_drawdown=compute_max_drawdown(points) if points else Decimal("0"),
         )
 
@@ -253,11 +308,12 @@ class LedgerService:
         events = self.state_store.load_ledger_events()
         state = apply_events(LedgerState(), events)
 
-        realized = compute_realized_pnl(state)
         normalized_marks = {
             normalize_symbol(symbol): value for symbol, value in mark_prices.items()
         }
-        unrealized = compute_unrealized_pnl(state, normalized_marks)
+        breakdown = self.financial_breakdown(mark_prices=mark_prices, cash_try=cash_try)
+        realized = breakdown.realized_pnl_try
+        unrealized = breakdown.unrealized_pnl_try
 
         per_symbol: list[SymbolPnlBreakdown] = []
         for symbol, ledger in sorted(state.symbols.items()):
@@ -277,17 +333,10 @@ class LedgerService:
                 )
             )
 
-        mtm = Decimal("0")
-        for symbol, ledger in state.symbols.items():
-            mark = normalized_marks.get(symbol)
-            if mark is None:
-                continue
-            mtm += sum((lot.qty * mark for lot in ledger.lots), Decimal("0"))
-
         return PnlReport(
             realized_pnl_total=realized,
             unrealized_pnl_total=unrealized,
             fees_total_by_currency=dict(state.fees_by_currency),
             per_symbol=per_symbol,
-            equity_estimate=cash_try + mtm,
+            equity_estimate=breakdown.equity_try,
         )
