@@ -134,7 +134,9 @@ class AnomalyDetectorService:
                 )
             )
 
-        diff = pnl_snapshot.total_equity_try - pnl_report.equity_estimate
+        snapshot_equity = pnl_snapshot.total_equity_try
+        ledger_equity = pnl_report.equity_estimate
+        diff = snapshot_equity - ledger_equity
         abs_diff = abs(diff)
         if abs_diff >= self.config.pnl_divergence_try_error:
             severity = "ERROR"
@@ -149,8 +151,17 @@ class AnomalyDetectorService:
                     severity=severity,
                     ts=ts,
                     details={
-                        "equity_snapshot_try": str(pnl_snapshot.total_equity_try),
-                        "equity_ledger_try": str(pnl_report.equity_estimate),
+                        "equity_snapshot_try": str(snapshot_equity),
+                        "equity_ledger_try": str(ledger_equity),
+                        "recomputed_equity_try": str(ledger_equity),
+                        "cash_try": "unknown_stage4",
+                        "mtm_try": "unknown_stage4",
+                        "realized_try": str(pnl_report.realized_pnl_total),
+                        "unrealized_try": str(pnl_report.unrealized_pnl_total),
+                        "fees_try": str(
+                            sum(pnl_report.fees_total_by_currency.values(), Decimal("0"))
+                        ),
+                        "slippage_try": "unknown_stage4",
                         "diff_try": str(diff),
                         "warn_threshold_try": str(self.config.pnl_divergence_try_warn),
                         "error_threshold_try": str(self.config.pnl_divergence_try_error),
