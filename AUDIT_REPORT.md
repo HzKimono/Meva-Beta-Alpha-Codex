@@ -1,307 +1,242 @@
-# Critical Path Call-Graph Verification (Grounded)
+# Financial Correctness & Safety Audit (Code-Proven)
 
-Scope: verified from code paths only; no behavior claims without source evidence.
-
-## 1) Runtime entrypoints (first executable unit)
-
-- **Console script: `btcbot`** → first unit `btcbot.cli:main` (configured in project scripts). (evidence: `pyproject.toml` L20-L22)
-- **Module entrypoint: `python -m btcbot`** → first unit `btcbot.__main__` then `main()`. (evidence: `src/btcbot/__main__.py` L3-L6)
-- **Module entrypoint: `python -m btcbot.cli`** → first unit `btcbot.cli.main` via module guard. (evidence: `src/btcbot/cli.py` L63-L74, L1099-L1100)
-- **Utility script: exchange info smoke** → first unit `fetch_exchangeinfo()` from `check_exchangeinfo.py` module guard. (evidence: `check_exchangeinfo.py` L8-L20)
-- **Utility script: capture fixture** → first unit `main()` in `scripts/capture_exchangeinfo_fixture.py`. (evidence: `scripts/capture_exchangeinfo_fixture.py` L9-L27)
-- **Utility script: debug stage7 metrics** → first unit `main()` in `scripts/debug_stage7_metrics.py`. (evidence: `scripts/debug_stage7_metrics.py` L8-L37)
-- **Utility script: debug stage7 schema** → first unit `main()` in `scripts/debug_stage7_schema.py`. (evidence: `scripts/debug_stage7_schema.py` L12-L32)
-- **Quality guard script** → first unit `main()` in `scripts/guard_multiline.py`. (evidence: `scripts/guard_multiline.py` L83-L113)
-
-### Schedulers/workers/crons
-
-- **NOT FOUND** for Celery/APScheduler/RQ/cron workers in `src/`, `scripts/`, `tests/`.
-  - Searched: `rg -n "cron|celery|apscheduler|rq|worker|beat|schedule\(|while True" src scripts tests`.
-  - Found only internal loop runners (`cli.run_with_optional_loop`, backtest loop, sweep internal loop). (evidence: `src/btcbot/cli.py` L354-L451; `src/btcbot/services/stage7_single_cycle_driver.py` L58-L77; `src/btcbot/services/sweep_service.py` L76)
-
-### Test harness entrypoints that execute full cycles
-
-- `tests/test_cli.py` directly invokes `cli.run_cycle(...)` and `cli.run_cycle_stage4(...)` for full stage3/stage4 flow wiring checks. (evidence: `tests/test_cli.py` L67-L68, L73-L74, L710-L711)
-- `tests/test_stage7_run_integration.py` invokes `cli.run_cycle_stage7(...)` and verifies persisted stage7 tables. (evidence: `tests/test_stage7_run_integration.py` L108-L116)
-- `tests/test_stage4_cycle_runner.py` invokes `Stage4CycleRunner().run_one_cycle(...)` and validates audit output. (evidence: `tests/test_stage4_cycle_runner.py` L78-L97)
+## Scope
+This report proves safety and accounting behavior from source code only. Every claim includes file + line evidence. If missing, it is marked **GAP**.
 
 ---
 
-## 2) Entrypoint call-graphs (critical loops, with data + side effects)
+## 1) Money/Quantity Type Inventory
 
-## A. `btcbot` / `python -m btcbot` / `python -m btcbot.cli`
+| Concept | Runtime type(s) | Rounding/quantization | Precision & constraints | Conversion points |
+|---|---|---|---|---|
+| Stage3 balances (`Balance.free/locked`) | `float` | none in model | no intrinsic scale constraints in `Balance`; constraints enforced later by rules validation | adapter payload parsing and strategy context conversions to `Decimal` (`Decimal(str(...))`) (`src/btcbot/domain/models.py` L65-L69; `src/btcbot/strategies/profit_v1.py` L47-L54; `src/btcbot/services/strategy_service.py` L37-L48) |
+| Stage3 orders (`Order.price/quantity`) | `float` | quantized to rules before live submit (`ROUND_DOWN`) | `validate_order` enforces price/qty positive, tick/step exactness, min/max, min_total | `ExecutionService` converts intent float->`Decimal` for quantize/validate, then float for exchange call (`src/btcbot/domain/models.py` L111-L121, L282-L323; `src/btcbot/services/execution_service.py` L321-L334) |
+| Symbol rules | `Decimal` (`min_total`, `tick_size`, `step_size`) | `quantize_price`/`quantize_quantity` with `ROUND_DOWN` | exchange min/max price/qty and min notional validated | pair-info mapping + exchange-rules extraction (`src/btcbot/domain/models.py` L80-L90, L325-L337; `src/btcbot/services/exchange_rules_service.py` L267-L315, L506-L539) |
+| Stage4 orders/fills/positions | `Decimal` | `Quantizer.quantize_price/qty` with `ROUND_DOWN` | `validate_min_notional`, oversell detection, mode-aware reject paths | Stage4 execution + accounting services (`src/btcbot/domain/stage4.py` L97-L121; `src/btcbot/services/execution_service_stage4.py` L121-L134; `src/btcbot/services/accounting_service_stage4.py` L128-L134) |
+| Fees | `Decimal` | no arbitrary rounding; arithmetic in Decimal | Stage3/4: non-quote/non-TRY fees can be ignored or audit-noted; Stage7 books TRY fee events | stage3 accounting fee currency check, stage4 fee notes, stage7 fee event generation (`src/btcbot/accounting/accounting_service.py` L57-L69; `src/btcbot/services/accounting_service_stage4.py` L109-L114, L167-L172; `src/btcbot/services/stage7_cycle_runner.py` L479-L535) |
+| PnL (realized/unrealized/gross/net), equity, drawdown | `Decimal` | no quantize in ledger math (exact Decimal ops) | oversell invariant in ledger and accounting; max drawdown computed as ratio | ledger apply + snapshot/report computation (`src/btcbot/domain/ledger.py` L81-L147, L150-L181; `src/btcbot/services/ledger_service.py` L196-L257, L258-L320) |
+| Stage7 OMS price/qty/notional | `Decimal` | fill slicing quantized to `0.00000001` in simulator partial branch | rejected when qty/price/notional <=0; allowed transitions prevent invalid states | OMS process + order state transitions (`src/btcbot/services/oms_service.py` L58-L66, L81-L97, L155-L174, L465-L470) |
+| Rate limits / retry delays | `float` seconds and `int` ms | deterministic exponential + jitter for retry | bounded by configured max attempts/delays | `retry_with_backoff` + token bucket limiter (`src/btcbot/services/retry.py` L19-L58; `src/btcbot/services/rate_limiter.py` L6-L46) |
+| Leverage | **NOT FOUND** | n/a | no leverage model/constraint present | searched `src tests docs` for `leverage|margin` with no matches (**GAP if leverage trading planned**) |
+| Funding/interest (futures) | **NOT FOUND** | n/a | no futures funding/interest postings in ledger | searched `src tests docs` for `funding|interest|futures|borrow` with no matches (**GAP only if futures scope intended**) |
 
-- `btcbot.cli.main()`
-  - parses subcommands and args (`run`, `stage4-run`, `stage7-run`, `stage7-backtest`, etc.)
-  - loads `Settings()` (env + `.env`) and configures logging
-  - dispatches command handler
-  - **Data models:** `Settings`, command arg namespace
-  - **Side effects:** reads env/.env, stdout, logging. (evidence: `src/btcbot/cli.py` L63-L75, L246-L351; `src/btcbot/config.py` L15-L20)
-
-### A1. Stage3 command `run`
-
-- `main` -> `run_with_optional_loop(command="run", cycle_fn=run_cycle(...))`
-  - optional retry loop with per-cycle backoff (1s,2s,4s capped by code path)
-  - `run_cycle(settings, force_dry_run)`
-    - live-side-effect policy check (`validate_live_side_effects_policy`)
-    - build exchange adapter (`build_exchange_stage3`)
-    - construct services (`PortfolioService`, `MarketDataService`, `AccountingService`, `StrategyService`, `RiskService`, `ExecutionService`, `SweepService`)
-    - execute cycle:
-      - `ExecutionService.cancel_stale_orders(cycle_id)`
-      - `PortfolioService.get_balances()`
-      - `MarketDataService.get_best_bids(symbols)`
-      - `AccountingService.refresh(symbols, mark_prices)`
-      - `StrategyService.generate(cycle_id, symbols, balances)` -> `Intent[]`
-      - `RiskService.filter(cycle_id, intents)` -> approved `Intent[]`
-      - `ExecutionService.execute_intents(approved_intents, cycle_id)`
-      - `StateStore.set_last_cycle_id(cycle_id)`
-  - **Data models:** `Balance`, `Intent`, `OrderIntent`, `Order`, `Position`, symbol maps
-  - **Side effects:**
-    - HTTP (BTCTurk public/private) via exchange adapter
-    - DB writes (`actions`, `orders`, `fills`, `positions`, `meta`)
-    - logs/stdout
-  - (evidence: `src/btcbot/cli.py` L250-L258, L354-L451, L476-L605; `src/btcbot/services/exchange_factory.py` L17-L68; `src/btcbot/services/execution_service.py` L129-L245, L247-L356; `src/btcbot/accounting/accounting_service.py` L21-L41)
-
-### A2. Stage4 command `stage4-run`
-
-- `main` -> `run_with_optional_loop(command="stage4-run", cycle_fn=run_cycle_stage4(...))`
-  - `run_cycle_stage4` does policy check and can persist `cycle_audit` block record when policy blocks
-  - `Stage4CycleRunner.run_one_cycle(settings)`:
-    - wires stage4 services (`ExchangeRulesService`, `AccountingService` stage4, `OrderLifecycleService`, `RiskPolicy`, `RiskBudgetService`, `ExecutionService` stage4, `DecisionPipelineService`, `AnomalyDetectorService`, `LedgerService`)
-    - fetches fills per symbol (`AccountingService.fetch_new_fills`)
-    - **transaction boundary #1:** `with state_store.transaction():` ingest ledger events + apply fills + update cursors
-    - run decision pipeline + lifecycle planning + risk filtering + risk-budget mode + degrade decisions
-    - execute actions (`execution_service.execute_with_report`)
-    - persist anomalies/degrade and metrics
-    - **transaction boundary #2:** persist cycle metrics in transaction
-    - write `cycle_audit` and last cycle id
-  - **Data models:** `Fill`, `Position`, `LifecycleAction`, `RiskDecision`, `PnLSnapshot`, `CycleMetrics`
-  - **Side effects:**
-    - HTTP exchange calls for market/open orders/fills/submit/cancel
-    - DB writes to stage4/risk/anomaly/metrics/audit/ledger tables
-  - (evidence: `src/btcbot/cli.py` L260-L268, L607-L654, L622-L637; `src/btcbot/services/stage4_cycle_runner.py` L62-L120, L170-L217, L250-L333, L396-L448, L416-L417, L545-L547, L632-L636)
-
-### A3. Stage7 command `stage7-run`
-
-- `main` -> `run_cycle_stage7(settings, include_adaptation)`
-  - enforces `--dry-run` + `STAGE7_ENABLED`
-  - `Stage7CycleRunner.run_one_cycle(...)`
-    - (if not injected) executes `Stage4CycleRunner.run_one_cycle` first
-    - calls `run_one_cycle_with_dependencies(...)`
-      - creates services (`UniverseSelectionService`, `PortfolioPolicyService`, `OrderBuilderService`, `Stage7RiskBudgetService`, `OMSService`, `LedgerService`)
-      - computes risk inputs -> `Stage7RiskDecision`
-      - selects universe, resolves rules, computes final mode
-      - builds order intents, runs OMS (`reconcile_open_orders`, `process_intents`)
-      - materializes fills/events, appends ledger events
-      - computes snapshot + run metrics
-      - **transaction boundary:** `StateStore.save_stage7_cycle(...)` (internally transactional)
-      - writes run metrics and optional adaptation
-  - **Data models:** `Stage7RiskInputs`, `RiskDecision`, `OrderIntent`, `Stage7Order`, `OrderEvent`, `LedgerEvent`
-  - **Side effects:**
-    - HTTP/replay market reads
-    - DB writes to `stage7_*`, `ledger_events`, `fills`, `positions`
-  - (evidence: `src/btcbot/cli.py` L270-L275, L657-L682; `src/btcbot/services/stage7_cycle_runner.py` L43-L87, L89-L130, L246-L260, L262-L321, L420-L441, L555-L566, L678-L749, L764-L787)
-
-### A4. Stage7 backtest command `stage7-backtest`
-
-- `main` -> `run_stage7_backtest(...)`
-  - validates dataset contract, builds `MarketDataReplay.from_folder`
-  - `Stage7BacktestRunner.run(...)` -> `Stage7SingleCycleDriver.run(...)`
-  - driver loops time steps and invokes `Stage7CycleRunner.run_one_cycle(...)` per step
-  - **Data models:** replay candles/orderbook/ticker -> stage7 domain models
-  - **Side effects:** file reads (dataset), SQLite writes (output DB), stdout JSON summary
-  - (evidence: `src/btcbot/cli.py` L824-L880; `src/btcbot/services/market_data_replay.py` L110-L132, L159-L217; `src/btcbot/services/stage7_backtest_runner.py` L32-L71; `src/btcbot/services/stage7_single_cycle_driver.py` L27-L77)
-
-### A5. Replay capture command `replay-capture`
-
-- `main` -> `run_replay_capture(...)`
-  - `capture_replay_dataset(ReplayCaptureConfig(...))`
-    - init folders
-    - loop polling BTCTurk public endpoints (ticker/orderbook)
-    - atomic write CSV files
-    - validate dataset at end
-  - **Data models:** replay capture config + CSV row dicts
-  - **Side effects:** HTTP GETs, file system writes (`data/replay/*`)
-  - (evidence: `src/btcbot/cli.py` L1032-L1049; `src/btcbot/replay/tools.py` L109-L186)
+Additional type notes:
+- Config mixes `float` (e.g., `target_try`, `dry_run_try_balance`) and `Decimal` (risk/fees/notional controls), so conversion boundaries are material. (`src/btcbot/config.py` L31-L60)
+- `parse_decimal` normalizes int/float/string into Decimal via `Decimal(str(...))`, reducing binary-float propagation where used. (`src/btcbot/domain/models.py` L18-L28)
 
 ---
 
-## 3) Verified sequence flows (A-F)
+## 2) All trade-enabling side effects + mandatory gates
 
-## A) Bootstrap / startup
+## 2.1 Stage3/legacy execution side effects
 
-- **Trigger:** manual CLI invocation (`btcbot ...`). (evidence: `src/btcbot/cli.py` L63-L75)
-- **Flow:** parse args -> `Settings()` (loads env and `.env`) -> `setup_logging` -> command dispatch. (evidence: `src/btcbot/cli.py` L246-L351; `src/btcbot/config.py` L15-L20)
-- **Idempotency/dedupe:** none at startup; starts applying once cycle methods call state store methods.
-- **Retry/backoff:** loop wrapper retries cycle exceptions up to 3 attempts with exponential sleep. (evidence: `src/btcbot/cli.py` L387-L418)
-- **Transactions:** none at startup itself.
-- **Failure modes:** invalid settings raise validation errors before cycle; loop returns non-zero when cycle fails repeatedly. (evidence: `src/btcbot/config.py` L487-L508; `src/btcbot/cli.py` L398-L411)
+1. **Submit order (live)**: `ExecutionService.execute_intents` -> `exchange.place_limit_order(...)`. (`src/btcbot/services/execution_service.py` L247-L356, L328-L335)
+   - Mandatory gates before side effect:
+     - CLI policy block when not dry-run and not armed. (`src/btcbot/cli.py` L479-L491)
+     - per-action check `_ensure_live_side_effects_allowed()`. (`src/btcbot/services/execution_service.py` L279-L281, L628-L637)
+     - kill switch short-circuits execution to no side effects. (`src/btcbot/services/execution_service.py` L262-L275)
 
-## B) Market data ingest (external -> persistence)
+2. **Cancel order (live)**: `ExecutionService.cancel_stale_orders` -> `exchange.cancel_order(...)`. (`src/btcbot/services/execution_service.py` L129-L245, L193-L195)
+   - Mandatory gates:
+     - kill switch blocks cancels and only logs. (`src/btcbot/services/execution_service.py` L136-L143)
+     - live-side-effects check if not dry-run. (`src/btcbot/services/execution_service.py` L166-L168)
 
-- **Trigger:** per cycle (manual single-shot or timed loop). (evidence: `src/btcbot/cli.py` L370-L371, L387-L393)
-- **Flow (live/public mode):**
-  - Exchange reads via `BtcturkHttpClient._get` with retry behavior.
-  - Stage3 gets best bids (`MarketDataService.get_best_bids`) and feeds accounting/strategy.
-  - Stage4 fetches new fills per symbol (`fetch_new_fills`) and persists within transaction (`ingest_exchange_updates`, `apply_fills`, cursor updates).
-  - Stage7 replay reads dataset files (`MarketDataReplay.from_folder`) or exchange client methods.
-  - (evidence: `src/btcbot/adapters/btcturk_http.py` L197-L232; `src/btcbot/services/market_data_service.py` L20-L35; `src/btcbot/services/accounting_service_stage4.py` L37-L87; `src/btcbot/services/stage4_cycle_runner.py` L195-L205; `src/btcbot/services/market_data_replay.py` L110-L132)
-- **Idempotency/dedupe:** ledger/fill/event inserts use `INSERT OR IGNORE`; fill cursor avoids re-reading too far except lookback overlap. (evidence: `src/btcbot/services/state_store.py` L2411-L2441; `src/btcbot/services/accounting_service_stage4.py` L38-L46, L98-L101)
-- **Retry/backoff:** HTTP retries for timeout/429/5xx with capped total wait. (evidence: `src/btcbot/adapters/btcturk_http.py` L49-L53, L103-L110, L201-L217)
-- **Transactions:** stage4 ingest is wrapped in explicit transaction. (evidence: `src/btcbot/services/stage4_cycle_runner.py` L196-L205; `src/btcbot/services/state_store.py` L111-L127)
-- **Failure modes:** per-symbol fill fetch errors are logged and symbol marked failed; transaction failures raise and fail cycle. (evidence: `src/btcbot/services/stage4_cycle_runner.py` L187-L193, L206-L217)
+3. **Credentialed private API use**: `BtcturkHttpClient._private_request` (all private submit/cancel/fills). (`src/btcbot/adapters/btcturk_http.py` L241-L310)
+   - Mandatory gates:
+     - api key + secret required else `ConfigurationError`. (`src/btcbot/adapters/btcturk_http.py` L248-L252)
+     - signing via `build_auth_headers` / HMAC signature. (`src/btcbot/adapters/btcturk_http.py` L255-L260; `src/btcbot/adapters/btcturk_auth.py` L8-L31)
 
-## C) Strategy decision (signal -> intents)
+## 2.2 Stage4 execution side effects
 
-- **Trigger:** after balances + market/accounting context in cycle. (evidence: `src/btcbot/cli.py` L542-L553)
-- **Flow:**
-  - `StrategyService.generate` builds `StrategyContext` from orderbooks, positions, balances, open order counts.
-  - `ProfitAwareStrategyV1.generate_intents` applies take-profit / conservative-entry rules.
-  - Stage4 alternative: `DecisionPipelineService.run_cycle` produces order requests/allocation decisions.
-  - Stage7 alternative: `PortfolioPolicyService` + `OrderBuilderService` produce stage7 order intents.
-  - (evidence: `src/btcbot/services/strategy_service.py` L31-L67; `src/btcbot/strategies/profit_v1.py` L11-L67; `src/btcbot/services/stage4_cycle_runner.py` L250-L280; `src/btcbot/services/stage7_cycle_runner.py` L125-L129, L262-L273)
-- **Idempotency/dedupe:** stage3 `Intent.create` carries idempotency key (ASSUMPTION: generated in intent model; verify in `src/btcbot/domain/intent.py`).
-- **Retry/backoff:** none in strategy generation itself.
-- **Transactions:** none around generation itself.
-- **Failure modes:** missing market data/rules can skip symbols and continue (stage7 rules unavailable statuses). (evidence: `src/btcbot/services/stage7_cycle_runner.py` L280-L309)
+4. **Submit order (stage4 live path)**: `ExecutionService.execute_with_report` -> `exchange.submit_limit_order(...)`. (`src/btcbot/services/execution_service_stage4.py` L43-L57, L147-L153)
+   - Mandatory gates:
+     - kill switch immediate block. (`src/btcbot/services/execution_service_stage4.py` L44-L48)
+     - `live_mode = is_live_trading_enabled and not dry_run`; if not live mode, records simulated submit only. (`src/btcbot/services/execution_service_stage4.py` L52-L56, L136-L145)
+     - exchange rules must resolve + min-notional pass (else rejected). (`src/btcbot/services/execution_service_stage4.py` L90-L105, L121-L134)
+     - submit dedupe check prevents duplicate side effects. (`src/btcbot/services/execution_service_stage4.py` L69-L88)
 
-## D) Risk gating (limits, drawdown caps, throttles, circuit-like modes)
+5. **Cancel order (stage4 live path)**: `ExecutionService.execute_with_report` -> `exchange.cancel_order_by_exchange_id(...)`. (`src/btcbot/services/execution_service_stage4.py` L178-L212)
+   - Mandatory gates:
+     - terminal-order short-circuit. (`src/btcbot/services/execution_service_stage4.py` L183-L184)
+     - missing exchange id -> error record, no call. (`src/btcbot/services/execution_service_stage4.py` L186-L201)
+     - non-live mode simulates cancel only. (`src/btcbot/services/execution_service_stage4.py` L203-L207)
 
-- **Trigger:** immediately after intents/actions are produced.
-- **Flow:**
-  - Stage3: `RiskService.filter` -> `risk.policy.RiskPolicy.evaluate` (max orders, open-orders-per-symbol, cooldown, notional cap, min_notional quantization checks).
-  - Stage4: `services.risk_policy.RiskPolicy.filter_actions` (daily loss, drawdown, max open orders, max position notional, min profit threshold).
-  - Stage7: `Stage7RiskBudgetService.decide` computes `RiskMode` (`NORMAL/REDUCE_RISK_ONLY/OBSERVE_ONLY`) from drawdown/daily loss/stale data/spread/liquidity + cooldown monotonicity.
-  - Stage7 OMS throttle: `TokenBucketRateLimiter.consume` emits THROTTLED path.
-  - (evidence: `src/btcbot/services/risk_service.py` L15-L45; `src/btcbot/risk/policy.py` L42-L79, L81-L104; `src/btcbot/services/risk_policy.py` L40-L106; `src/btcbot/services/stage7_risk_budget_service.py` L29-L114; `src/btcbot/services/oms_service.py` L127-L131, L200-L215; `src/btcbot/services/rate_limiter.py` L36-L46)
-- **Idempotency/dedupe:** stage7 mode + risk decision persisted each cycle; later writes are upserted by cycle id. (evidence: `src/btcbot/services/state_store.py` L896-L920, L923-L942)
-- **Retry/backoff:** stage7 risk decision computation has no retry; OMS retries happen downstream.
-- **Transactions:** risk decisions persisted in `save_stage7_cycle` transaction when included. (evidence: `src/btcbot/services/state_store.py` L807-L920)
-- **Failure modes:** policy blocks return code 2 (stage3/stage4 live not armed/kill-switch); stage4 can still write policy-block audit envelope. (evidence: `src/btcbot/cli.py` L484-L491, L618-L637)
+## 2.3 Adapter implementations that actually perform write calls
 
-## E) Execution / OMS (placement -> retries -> reconciliation)
+6. **BTCTurk write endpoints**:
+   - submit: `_private_request("POST", "/api/v1/order", ...)` in `submit_limit_order` and legacy place. (`src/btcbot/adapters/btcturk_http.py` L828-L848, L883-L902)
+   - cancel: `_private_request("DELETE", "/api/v1/order", ...)` in `cancel_order`/`cancel_order_by_client_order_id`. (`src/btcbot/adapters/btcturk_http.py` L859-L862, L914-L917)
+   - credentials + signing gate at `_private_request`. (`src/btcbot/adapters/btcturk_http.py` L248-L260)
 
-- **Trigger:** approved intents/actions available.
-- **Flow (stage3/stage4):**
-  - `ExecutionService.cancel_stale_orders`: stale detection -> dedupe action -> cancel or reconcile uncertain result.
-  - `ExecutionService.execute_intents`: lifecycle refresh -> dedupe action -> dry-run metadata or live place + uncertain submit reconcile.
-  - Live side effects require policy pass (`_ensure_live_side_effects_allowed`).
-  - (evidence: `src/btcbot/services/execution_service.py` L129-L245, L247-L356, L628-L637)
-- **Flow (stage7 OMS):**
-  - `reconcile_open_orders` builds synthetic intents for non-terminal orders.
-  - `process_intents`: throttle check -> idempotency registration -> retry_with_backoff on transient errors -> state transitions/events -> transactionally upsert orders + append events.
-  - (evidence: `src/btcbot/services/oms_service.py` L381-L414, L112-L131, L200-L275, L376-L379)
-- **Idempotency/dedupe:**
-  - stage3 `record_action` dedupe key bucketed by action+payload+time window.
-  - stage7 `try_register_idempotency_key` conflicts on payload mismatch; duplicates become `DUPLICATE_IGNORED`.
-  - stage7 event append uses deterministic event IDs + insert-ignore semantics.
-  - (evidence: `src/btcbot/services/state_store.py` L1511-L1535, L1201-L1224, L1160-L1178; `src/btcbot/services/oms_service.py` L217-L252)
-- **Retry/backoff:**
-  - HTTP adapter retries network/429/5xx.
-  - OMS retry utility uses deterministic exponential backoff + jitter seed.
-  - (evidence: `src/btcbot/adapters/btcturk_http.py` L201-L217; `src/btcbot/services/retry.py` L19-L58)
-- **Transactions:**
-  - stage7 OMS persists orders/events together in one transaction.
-  - stage3 action writes are autocommit per `_connect` context.
-  - (evidence: `src/btcbot/services/oms_service.py` L376-L379; `src/btcbot/services/state_store.py` L89-L103)
-- **Failure modes:**
-  - non-retryable placement/cancel logs and continue.
-  - uncertain errors attempt reconciliation.
-  - retry exhaustion emits `RETRY_GIVEUP` and continues with next intent.
-  - (evidence: `src/btcbot/services/execution_service.py` L193-L228, L336-L355; `src/btcbot/services/oms_service.py` L275-L298)
-
-## F) Ledger/accounting & metrics (events -> metrics -> reporting)
-
-- **Trigger:** after fills are fetched/simulated in cycle.
-- **Flow:**
-  - stage4: ingest fills -> `LedgerService.ingest_exchange_updates` -> `AccountingService.apply_fills` -> snapshot/risk/metrics -> persist cycle metrics.
-  - stage7: materialize fills from OMS FILLED orders -> append ledger events -> recompute ledger state/positions -> snapshot -> `save_stage7_cycle` + `save_stage7_run_metrics`.
-  - report commands read run metrics and export JSONL/CSV.
-  - (evidence: `src/btcbot/services/stage4_cycle_runner.py` L196-L200, L529-L547; `src/btcbot/services/ledger_service.py` L69-L114, L196-L257; `src/btcbot/services/stage7_cycle_runner.py` L469-L606, L678-L764; `src/btcbot/cli.py` L751-L760, L765-L960)
-- **Idempotency/dedupe:** ledger events use `INSERT OR IGNORE` by `event_id`; fill apply guard `mark_fill_applied`. (evidence: `src/btcbot/services/state_store.py` L2283-L2309, L2411-L2441)
-- **Retry/backoff:** no explicit retry around metric writes; relies on exception handling and transaction rollback.
-- **Transactions:**
-  - stage4 metrics persisted in explicit transaction.
-  - stage7 cycle trace + intents + risk + run metrics + ledger metrics persisted in one transactional call.
-  - (evidence: `src/btcbot/services/stage4_cycle_runner.py` L545-L547; `src/btcbot/services/state_store.py` L783-L972)
-- **Failure modes:**
-  - stage4 metrics persistence failure logs warning and continues.
-  - stage7 save raises runtime error with stage marker (`cycle_trace_upsert`, `order_intents_upsert`, etc.) and bubbles to caller.
-  - (evidence: `src/btcbot/services/stage4_cycle_runner.py` L548-L558; `src/btcbot/services/state_store.py` L876-L972)
+7. **Dry-run adapters** (`DryRunExchangeClient*`) mutate in-memory order lists only (non-external). (`src/btcbot/adapters/btcturk_http.py` L1088-L1138)
 
 ---
 
-## 4) Scenario checklist (triggers, dedupe, retries, tx boundaries, failure behavior)
+## 3) Risk Controls Proof
 
-### A) Bootstrap/startup
-- Trigger: manual command execution. (evidence: `src/btcbot/cli.py` L63-L75)
-- Dedupe: none.
-- Retry: loop retries cycle execution only, not parser/settings creation. (evidence: `src/btcbot/cli.py` L387-L418)
-- Tx boundary: none.
-- Failure: settings validation or command handler returns non-zero. (evidence: `src/btcbot/config.py` L487-L508)
+| Control | Enforcement location | Phase | Notes / Bypass analysis |
+|---|---|---|---|
+| Kill switch global side-effect block | CLI policy block + execution service checks | pre-execution | Enforced in stage3 CLI block + stage3/stage4 execution services; direct adapter invocation outside services would bypass (**GAP: architectural, not runtime path**). (`src/btcbot/cli.py` L479-L491; `src/btcbot/services/execution_service.py` L136-L143; `src/btcbot/services/execution_service_stage4.py` L44-L48) |
+| Live arming (`LIVE_TRADING_ACK`) | settings validation + runtime policy check | startup + pre-execution | `Settings` rejects invalid live combos; runtime policy still checks each run. (`src/btcbot/config.py` L487-L503, L535-L536; `src/btcbot/services/trading_policy.py` L12-L24) |
+| Max orders per cycle | stage3 risk policy | pre-intent | slices intents list to cap. (`src/btcbot/risk/policy.py` L49-L50) |
+| Max open orders per symbol | stage3 risk policy | pre-intent | blocks with explicit reason. (`src/btcbot/risk/policy.py` L51-L53) |
+| Cooldown between intents | stage3 risk policy | pre-intent | compares last intent timestamps. (`src/btcbot/risk/policy.py` L55-L61) |
+| Notional cap per cycle | stage3 risk policy | pre-intent | rejects if cumulative notional exceeds cap. (`src/btcbot/risk/policy.py` L71-L74) |
+| Tick/step/min-notional rule checks | stage3 quantize/validate + stage4 rules/min-notional + stage7 rules boundary | pre-execution | stage7 can enforce metadata-required and degrade/skip behavior. (`src/btcbot/domain/models.py` L282-L323; `src/btcbot/services/execution_service_stage4.py` L90-L134; `src/btcbot/services/exchange_rules_service.py` L425-L460, L490-L539) |
+| Max daily loss / max drawdown | stage4 `RiskPolicy.filter_actions`; stage7 risk budget decision | pre-execution + mode gating | stage4 can reject all actions; stage7 can force OBSERVE_ONLY. (`src/btcbot/services/risk_policy.py` L46-L57; `src/btcbot/services/stage7_risk_budget_service.py` L50-L68, L85-L93) |
+| Max gross exposure / position concentration | stage4 risk budget (`decide_mode`) and signals computation | pre-execution | sets `REDUCE_RISK_ONLY` when exposure limits exceeded. (`src/btcbot/domain/risk_budget.py` L52-L67; `src/btcbot/services/risk_budget_service.py` L51-L67, L116-L140) |
+| Fee budget cap | stage4 risk budget decide_mode | pre-execution | mode downgrade when fees exceed day cap. (`src/btcbot/domain/risk_budget.py` L64-L67) |
+| Rate limiting | stage7 token-bucket in OMS | pre-execution | emits `THROTTLED` and skips intent processing. (`src/btcbot/services/oms_service.py` L127-L131, L200-L215) |
+| Retry budget / giveup | stage7 OMS retry policy | pre-execution reliability | deterministic retries then `RETRY_GIVEUP` event. (`src/btcbot/services/oms_service.py` L264-L298; `src/btcbot/services/retry.py` L40-L58) |
+| Post-trade reconciliation | stage3 uncertain submit/cancel reconciliation + stage4 reconcile service | post-execution | closes uncertainty windows; still eventual consistency window exists on exchange outages. (`src/btcbot/services/execution_service.py` L203-L228, L357-L360; `src/btcbot/services/stage4_cycle_runner.py` L91-L92, L248-L250) |
 
-### B) Market ingest
-- Trigger: cycle start / timer loop. (evidence: `src/btcbot/cli.py` L370-L393)
-- Dedupe: cursor + insert-ignore event ids/fill ids. (evidence: `src/btcbot/services/accounting_service_stage4.py` L38-L46; `src/btcbot/services/state_store.py` L2411-L2441)
-- Retry: HTTP retry in adapter. (evidence: `src/btcbot/adapters/btcturk_http.py` L201-L217)
-- Tx boundary: stage4 fill+ledger+cursors transaction. (evidence: `src/btcbot/services/stage4_cycle_runner.py` L196-L205)
-- Failure: per-symbol failures degrade and continue; transaction failure aborts cycle. (evidence: `src/btcbot/services/stage4_cycle_runner.py` L187-L217)
-
-### C) Strategy decision
-- Trigger: after balances/market/accounting refresh. (evidence: `src/btcbot/cli.py` L542-L553)
-- Dedupe: risk service records approved intents (ASSUMPTION: dedupe semantics depend on intent idempotency key; verify `StateStore.record_intent` usage in `state_store.py`).
-- Retry: none.
-- Tx boundary: none explicit.
-- Failure: invalid symbols/constraints lead to skips, not process crash in normal paths. (evidence: `src/btcbot/risk/policy.py` L63-L93)
-
-### D) Risk gating
-- Trigger: immediately post-intent generation / pre-execution.
-- Dedupe: decisions persisted by cycle id upserts (stage7).
-- Retry: none in risk compute itself.
-- Tx boundary: included inside `save_stage7_cycle` transaction for stage7 risk decision.
-- Failure: policy blocks side effects and can return code 2. (evidence: `src/btcbot/cli.py` L484-L491, L618-L637)
-
-### E) Execution/OMS
-- Trigger: approved intents/actions exist.
-- Dedupe: stage3 `record_action`; stage7 idempotency key table + duplicate/conflict events.
-- Retry: OMS transient retries + HTTP retries.
-- Tx boundary: stage7 orders+events persisted together.
-- Failure: uncertain errors reconciled; retry give-up continues.
-
-### F) Ledger/accounting/metrics
-- Trigger: after fills/events.
-- Dedupe: `append_ledger_events` insert-ignore + `mark_fill_applied`.
-- Retry: none explicit for DB persist.
-- Tx boundary: stage4 metrics transaction; stage7 cycle transaction.
-- Failure: warnings on non-critical metric write failures, hard errors on stage7 atomic save failures.
-
-(Scenario D/E/F evidence: `src/btcbot/services/state_store.py` L1511-L1535, L1201-L1224, L2411-L2441, L783-L972; `src/btcbot/services/oms_service.py` L217-L252, L264-L298, L376-L379; `src/btcbot/services/stage4_cycle_runner.py` L545-L558)
+### Potential bypass paths
+- **Direct adapter calls** (`BtcturkHttpClient.submit_limit_order/cancel_order`) bypass service-level policy checks if called outside orchestrated runners. This is not observed in normal runtime wiring but is an architectural bypass vector. (**GAP**) (`src/btcbot/adapters/btcturk_http.py` L828-L862, L914-L917)
+- **Multi-instance runners on same DB**: controls are idempotent in many tables, but concurrent bot instances can still race at business level (e.g., both decide to submit different client IDs). (**GAP**) (`src/btcbot/services/state_store.py` L111-L127, L1201-L1224)
 
 ---
 
-## Single Page Map
+## 4) Ledger / Accounting Proof
 
-**EntryPoints**
-- `btcbot` / `python -m btcbot` / `python -m btcbot.cli` -> `cli.main`
-- `stage7-backtest` path -> `run_stage7_backtest` -> `Stage7BacktestRunner.run` -> `Stage7SingleCycleDriver.run`
-- `replay-capture` path -> `run_replay_capture` -> `capture_replay_dataset`
+## 4.1 Canonical source of truth
 
-**Loops**
-- `run_with_optional_loop` (stage3/stage4 timed loop with retry)
-- `Stage7SingleCycleDriver.run` replay-step loop
+- Canonical event store is `ledger_events` table with `event_id` PK and unique `exchange_trade_id` index/fallback unique key. (`src/btcbot/services/state_store.py` L1295-L1335)
+- Stage7 OMS canonical lifecycle state is `stage7_order_events` (append-only) + `stage7_orders` snapshot. (`src/btcbot/services/state_store.py` L517-L554)
 
-**Core Services**
-- Stage3: `MarketDataService`, `AccountingService`, `StrategyService`, `RiskService`, `ExecutionService`
-- Stage4: `Stage4CycleRunner` + `DecisionPipelineService`, `RiskBudgetService`, `AnomalyDetectorService`, `ExecutionService` stage4
-- Stage7: `Stage7CycleRunner` + `Stage7RiskBudgetService`, `UniverseSelectionService`, `PortfolioPolicyService`, `OrderBuilderService`, `OMSService`, `LedgerService`
+## 4.2 PnL/equity/drawdown computation path
 
-**Persistence**
-- `StateStore` (SQLite, WAL, busy timeout)
-- Transactional blocks: `state_store.transaction()` and `save_stage7_cycle(...)`
-- Key tables: `actions`, `orders`, `fills`, `ledger_events`, `cycle_audit`, `stage7_cycle_trace`, `stage7_run_metrics`, `stage7_order_events`, `stage7_idempotency_keys`
+- `apply_events` produces lot-based realized PnL and fee accumulation by currency; oversell raises invariant violation. (`src/btcbot/domain/ledger.py` L81-L137, L122-L125)
+- `compute_realized_pnl`, `compute_unrealized_pnl`, `compute_max_drawdown` are Decimal-based deterministic reducers. (`src/btcbot/domain/ledger.py` L150-L181)
+- `LedgerService.financial_breakdown/snapshot` computes gross/net/equity/turnover and persists snapshot context. (`src/btcbot/services/ledger_service.py` L196-L257, L258-L320)
+
+## 4.3 Edge-case handling validation
+
+a) **Partial fills**
+- Stage7 OMS explicitly emits `PARTIAL_FILL` then `FILLED` when slices >1. (`src/btcbot/services/oms_service.py` L341-L371)
+- Stage3/4 ingest relies on exchange fills stream + dedupe by `fill_id`. (`src/btcbot/services/accounting_service_stage4.py` L37-L87, L98-L101)
+
+b) **Fees in base/quote**
+- Stage3 accounting ignores non-quote fees with warning (risk of understated fee burden). (`src/btcbot/accounting/accounting_service.py` L57-L69)
+- Stage4 logs fee conversion missing for non-TRY fee asset and records audit note. (`src/btcbot/services/accounting_service_stage4.py` L109-L114, L167-L172)
+- Stage7 currently books fees in TRY for simulated OMS fills. (`src/btcbot/services/stage7_cycle_runner.py` L479-L535)
+- **GAP:** no implemented generic FX fee conversion pipeline for non-TRY fees in stage3/4 live accounting.
+
+c) **Funding/interest (futures)**
+- **NOT FOUND** (no leverage/futures/funding domain/events). command used: `rg -n "leverage|margin|futures|funding|interest|borrow" src tests docs`.
+- **GAP only if futures are expected**.
+
+d) **Cancellations and replace**
+- Replace modeled as `replace_cancel` + `replace_submit` lifecycle action pair, not atomic exchange replace. (`src/btcbot/services/order_lifecycle_service.py` L55-L83)
+- Cancel paths update order status and reconciliation metadata in stage3/stage4. (`src/btcbot/services/execution_service.py` L203-L244; `src/btcbot/services/execution_service_stage4.py` L178-L212)
+
+e) **Clock/timezone drift**
+- UTC normalization helper (`ensure_utc`) used in ledger sorting and state-store writes; stage7 anomaly config includes clock skew threshold. (`src/btcbot/domain/ledger.py` L77-L79, L184-L187; `src/btcbot/services/stage4_cycle_runner.py` L110-L118)
+- **GAP:** no dedicated exchange-server time sync/offset correction component beyond anomaly detection.
+
+## 4.4 Double-counting / missing-event scenarios
+
+- Prevented duplicates:
+  - fills/events: `INSERT OR IGNORE` on fill/event primary keys. (`src/btcbot/services/state_store.py` L1643-L1663, L2411-L2441)
+  - applied fill marker (`applied_fills`) prevents replay re-application. (`src/btcbot/services/state_store.py` L2283-L2289)
+- Potential misses:
+  - if exchange delivers fill without stable ID and fallback composition changes, dedupe risk exists across schema variants. stage4 attempts deterministic fallback fill id. (`src/btcbot/services/accounting_service_stage4.py` L57-L64)
+
+---
+
+## 5) Idempotency & Consistency Proof
+
+- Stage3 action idempotency window key: `action_type:payload_hash:time_bucket`; duplicate actions ignored. (`src/btcbot/services/state_store.py` L1511-L1535)
+- Stage7 idempotency table (`stage7_idempotency_keys`) enforces one key/one payload; conflict raises `IdempotencyConflictError`. (`src/btcbot/services/state_store.py` L1201-L1224)
+- Stage7 OMS event dedupe uses deterministic `event_id` + `INSERT OR IGNORE`; orders/events persisted in one transaction. (`src/btcbot/services/oms_service.py` L376-L379, L416-L439; `src/btcbot/services/state_store.py` L1160-L1178)
+- Stage7 cycle persistence is atomic transaction (`save_stage7_cycle`), and stage-specific failure markers identify where commit failed. (`src/btcbot/services/state_store.py` L783-L972)
+- Re-run duplicate ledger prevention by `event_id` and unique indexes on exchange trade ids. (`src/btcbot/services/state_store.py` L1298-L1335, L2411-L2441)
+
+### Race-condition risks
+- SQLite uses WAL + busy timeout + `BEGIN IMMEDIATE`, which protects DB integrity but not high-level multi-bot decision races. (**GAP**) (`src/btcbot/services/state_store.py` L94-L120)
+- Retry loops may replay intent processing; idempotency keys/events mitigate, but only where keys are consistently used. (`src/btcbot/services/oms_service.py` L217-L252, L264-L298)
+
+---
+
+## 6) Security & Secrets Audit
+
+- Secret loading:
+  - `Settings` uses `SecretStr` for API key/secret loaded from env/.env. (`src/btcbot/config.py` L22-L24, L15-L20)
+- Required live env constraints:
+  - model validator requires ACK, kill-switch off, and key+secret when live trading true. (`src/btcbot/config.py` L495-L503)
+- Signing point:
+  - `build_auth_headers` computes HMAC signature from base64 secret and stamp. (`src/btcbot/adapters/btcturk_auth.py` L8-L31)
+- Redaction/safe logging:
+  - request params/json are sanitized to remove API/secret/signature fields before attached to exceptions. (`src/btcbot/adapters/btcturk_http.py` L136-L155, L291-L293, L307-L309)
+- **Key-printing check:**
+  - No direct key/secret logging found in adapter/runtime paths reviewed; errors log sanitized payloads and flags such as `request_has_json`. (`src/btcbot/adapters/btcturk_http.py` L280-L285, L291-L293)
+- Config source and defaults:
+  - `.env.example` keeps defaults safe (`DRY_RUN=true`, `KILL_SWITCH=true`, `LIVE_TRADING=false`). (`.env.example` L6-L11)
+
+---
+
+## Invariant Tests We Must Have (Release-critical)
+
+| # | Invariant | Why it matters | Where it can break | Suggested test location | Acceptance criteria |
+|---|---|---|---|---|---|
+| 1 | Live submit blocked unless all gates armed | Prevent unintended real trades | CLI/service gate drift | `tests/test_cli.py` + execution service tests | unarmed live run returns code 2; no submit call |
+| 2 | Kill switch blocks submit/cancel in stage3 | Emergency stop correctness | execution path regressions | `tests/test_execution_service.py` | with kill switch, submitted/canceled == 0 |
+| 3 | Kill switch blocks stage4 writes | stage4 canary safety | `execution_service_stage4` changes | `tests/test_stage4_services.py` | execute report totals all zero in kill switch mode |
+| 4 | Stage4 min-notional reject before submit | avoid invalid orders | rules parsing/fallback drift | `tests/test_stage4_services.py` | rejected increments; no exchange submit |
+| 5 | Stage4 dedupe on repeated client_order_id | duplicate live order prevention | dedupe key logic regression | `tests/test_stage4_cycle_runner.py` | second cycle logs deduped and no second submit |
+| 6 | Stage3 action dedupe window works | retry safety | `record_action` bucket logic | `tests/test_execution_service.py` | duplicate payload in same bucket returns None |
+| 7 | Stage7 idempotency same payload ignored | deterministic reruns | OMS idempotency layer | `tests/test_oms_idempotency.py` | DUPLICATE_IGNORED emitted, no extra submit |
+| 8 | Stage7 idempotency conflicting payload rejects | consistency/safety | key reuse bugs | `tests/test_oms_idempotency.py` | IDEMPOTENCY_CONFLICT + REJECTED emitted |
+| 9 | OMS transition graph forbids illegal transitions | ledger/order correctness | state-machine drift | `tests/test_oms_state_machine.py` | illegal transition leaves state unchanged |
+|10| OMS retry give-up emits events deterministically | operational auditability | retry changes | `tests/test_oms_retry_backoff.py` | RETRY_SCHEDULED count matches config, then RETRY_GIVEUP |
+|11| Ledger oversell invariant throws | prevents negative inventory corruption | event ordering/data gaps | `tests/test_ledger_domain.py` | apply_events raises ValueError on oversell |
+|12| Fee event invariant enforced (`side=None,qty=0,price=None`) | avoid fee/fill confusion | ingestion mapper bugs | `tests/test_ledger_domain.py` | invalid FEE event raises ValueError |
+|13| Stage4 accounting oversell raises integrity error | protects realized PnL correctness | fill ingestion/order mismatch | `tests/test_stage4_services.py` | oversell -> `AccountingIntegrityError` |
+|14| Non-TRY fee produces audit note | explicit known limitation tracking | silent under-reporting | `tests/test_stage4_services.py` | cycle audit contains `fee_conversion_missing:*` |
+|15| Stage7 ledger event dedupe works on rerun | no double-counted PnL | rerun parity/idempotency | `tests/test_backtest_replay_determinism.py` | rerun does not increase duplicate ledger events |
+|16| Drawdown mode transitions monotonic under cooldown | risk circuit-breaker stability | risk-budget regressions | `tests/test_stage7_risk_budget_service.py` | mode not less restrictive before cooldown expires |
+|17| Rate limiter throttles excess intents | exchange safety and anti-burst | limiter parameter drift | `tests/test_oms_throttling.py` | THROTTLED events present when burst exceeded |
+|18| Sanitized error payload excludes secrets/signature | secret hygiene | adapter error logging changes | `tests/test_btcturk_http.py` | `request_json/request_params` never include blocked keys |
+
+Evidence basis for table scope: gate logic, risk, OMS, ledger invariants, and sanitization are in cited modules above. (`src/btcbot/services/trading_policy.py` L12-L24; `src/btcbot/services/oms_service.py` L200-L252; `src/btcbot/domain/ledger.py` L122-L137; `src/btcbot/adapters/btcturk_http.py` L136-L155)
+
+---
+
+## Safety Gate Checklist (Release Blocker)
+
+1. **Global live gates pass/fail test** (KILL_SWITCH/DRY_RUN/LIVE_TRADING/ACK) in CI. (`src/btcbot/services/trading_policy.py` L12-L24; `src/btcbot/config.py` L487-L503)
+2. **No side-effect path skips execution service** (architectural lint/review rule). (**GAP**) (`src/btcbot/adapters/btcturk_http.py` L828-L862)
+3. **Stage4 min-notional + rules enforcement remains hard-fail pre-submit**. (`src/btcbot/services/execution_service_stage4.py` L90-L134)
+4. **Stage3/Stage7 idempotency tests green** (action dedupe + stage7 key dedupe/conflict). (`src/btcbot/services/state_store.py` L1511-L1535, L1201-L1224)
+5. **OMS retry/throttle tests green**. (`src/btcbot/services/oms_service.py` L200-L298)
+6. **Ledger oversell + fee-event invariants green**. (`src/btcbot/domain/ledger.py` L122-L137)
+7. **Non-TRY fee conversion limitation explicitly accepted or fixed**. (**GAP**) (`src/btcbot/services/accounting_service_stage4.py` L109-L114)
+8. **Multi-instance policy defined** (single-writer lock or orchestration guarantee). (**GAP**) (`src/btcbot/services/state_store.py` L94-L120)
+9. **Secret redaction tests green** for adapter errors. (`src/btcbot/adapters/btcturk_http.py` L136-L155, L291-L293)
+10. **Default env remains safe** in templates/docs (`DRY_RUN=true`, `KILL_SWITCH=true`). (`.env.example` L6-L11)
 
 **External Integrations**
 - BTCTurk HTTP (public + private endpoints via `BtcturkHttpClient`)
 - Replay file datasets (`candles/`, `orderbook/`, `ticker/`) for backtest/replay modes
 
-(evidence: `src/btcbot/cli.py` L354-L451, L824-L880, L1032-L1049; `src/btcbot/services/state_store.py` L89-L127, L783-L972; `src/btcbot/adapters/btcturk_http.py` L165-L232; `src/btcbot/services/market_data_replay.py` L110-L132)
+## GAP Summary + Minimal Fix Approach (no code edits here)
+
+- **GAP-1: direct adapter bypass risk**
+  - Issue: service-level gates can be bypassed by direct adapter calls.
+  - Minimal fix: add a single policy-enforcing façade/port for exchange writes and forbid direct adapter imports in runners via lint rule.
+  - Verify locations: adapter write methods in `btcturk_http.py`. (`src/btcbot/adapters/btcturk_http.py` L828-L862, L914-L917)
+
+- **GAP-2: non-TRY fee conversion incomplete (stage3/stage4)**
+  - Issue: non-TRY fees ignored/audited, potentially understating cost.
+  - Minimal fix: centralized FX conversion service with deterministic rate source + fallback behavior.
+  - Verify locations: stage3/stage4 accounting fee handling. (`src/btcbot/accounting/accounting_service.py` L57-L69; `src/btcbot/services/accounting_service_stage4.py` L109-L114)
+
+- **GAP-3: multi-instance race policy not explicit**
+  - Issue: SQLite transaction safety ≠ business-level single-run safety.
+  - Minimal fix: advisory lock table/OS file lock at startup and explicit operator docs for single active writer.
+  - Verify locations: transaction implementation. (`src/btcbot/services/state_store.py` L111-L127)
+
+- **GAP-4: no leverage/futures/funding model**
+  - Issue: if futures are intended, risk/accounting coverage is incomplete.
+  - Minimal fix: explicit spot-only assertion in docs/doctor, or add futures domain/events/risk caps before enabling futures.
+  - Verification search command: `rg -n "leverage|margin|futures|funding|interest|borrow" src tests docs` (no matches).
+
