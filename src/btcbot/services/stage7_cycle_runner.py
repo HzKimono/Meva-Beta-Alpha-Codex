@@ -157,6 +157,24 @@ class Stage7CycleRunner:
             logger.info(
                 "stage7_cycle_start", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}}
             )
+            logger.info(
+                "stage7_effective_settings",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "priority_order": ["defaults", "env", "stage7_params_active"],
+                        "try_cash_target": str(runtime.try_cash_target),
+                        "try_cash_max": str(runtime.try_cash_max),
+                        "max_orders_per_cycle": runtime.max_orders_per_cycle,
+                        "notional_cap_try_per_cycle": str(runtime.notional_cap_try_per_cycle),
+                        "stage7_order_offset_bps": str(runtime.stage7_order_offset_bps),
+                        "stage7_max_drawdown_ratio": str(runtime.stage7_max_drawdown_pct),
+                        "pnl_divergence_try_warn": str(runtime.pnl_divergence_try_warn),
+                        "pnl_divergence_try_error": str(runtime.pnl_divergence_try_error),
+                        "active_param_version": active_params.version if active_params else 0,
+                    }
+                },
+            )
             collector.start_timer("selection")
             bootstrap_symbols = sorted({normalize_symbol(symbol) for symbol in settings.symbols})
             bootstrap_marks, _ = stage4.resolve_mark_prices(exchange, bootstrap_symbols)
@@ -179,7 +197,7 @@ class Stage7CycleRunner:
             )
 
             latest_metrics = state_store.get_latest_stage7_ledger_metrics() or {
-                "max_drawdown": Decimal("0"),
+                "max_drawdown_ratio": Decimal("0"),
                 "net_pnl_try": Decimal("0"),
                 "equity_try": Decimal(str(settings.dry_run_try_balance)),
             }
@@ -226,7 +244,7 @@ class Stage7CycleRunner:
                 data_age_sec = 0
 
             risk_inputs = Stage7RiskInputs(
-                max_drawdown_pct=latest_metrics["max_drawdown"],
+                max_drawdown_pct=latest_metrics["max_drawdown_ratio"],
                 daily_pnl_try=latest_metrics["net_pnl_try"],
                 consecutive_loss_streak=0,
                 market_data_age_sec=data_age_sec,
@@ -581,7 +599,7 @@ class Stage7CycleRunner:
             collector.start_timer("ledger")
             snapshot = ledger_service.snapshot(
                 mark_prices=mark_prices,
-                cash_try=runtime.try_cash_target,
+                cash_try=exposure_snapshot.free_cash_try,
                 slippage_try=slippage_try,
                 ts=now,
             )
@@ -615,7 +633,7 @@ class Stage7CycleRunner:
                 "retry_giveup": retry_giveup_count > 0,
             }
             alert_flags = {
-                "drawdown_breach": snapshot.max_drawdown >= settings.stage7_max_drawdown_pct,
+                "drawdown_breach": snapshot.max_drawdown >= runtime.stage7_max_drawdown_pct,
                 "reject_spike": oms_rejected >= settings.stage7_reject_spike_threshold,
                 "missing_data": missing_mark_price_count > 0,
                 "throttled": throttled_events > 0,
@@ -645,7 +663,8 @@ class Stage7CycleRunner:
                 "net_pnl_try": snapshot.net_pnl_try,
                 "fees_try": snapshot.fees_try,
                 "slippage_try": snapshot.slippage_try,
-                "max_drawdown_pct": snapshot.max_drawdown,
+                "max_drawdown_ratio": snapshot.max_drawdown,
+                "max_drawdown_pct": snapshot.max_drawdown * Decimal("100"),
                 "turnover_try": snapshot.turnover_try,
                 "missing_mark_price_count": missing_mark_price_count,
                 "oms_throttled_count": throttled_events,
@@ -719,6 +738,7 @@ class Stage7CycleRunner:
                         "slippage_try": snapshot.slippage_try,
                         "turnover_try": snapshot.turnover_try,
                         "equity_try": snapshot.equity_try,
+                        "max_drawdown_ratio": snapshot.max_drawdown,
                         "max_drawdown": snapshot.max_drawdown,
                     },
                     risk_decision=stage7_risk_decision,
@@ -789,5 +809,30 @@ class Stage7CycleRunner:
                 )
             state_store.set_last_stage7_cycle_id(cycle_id)
 
+        logger.info(
+            "stage7_cycle_financials",
+            extra={
+                "extra": {
+                    "cycle_id": cycle_id,
+                    "run_id": run_id,
+                    "cash_try": str(snapshot.cash_try),
+                    "mtm_try": str(snapshot.position_mtm_try),
+                    "realized_pnl_try": str(snapshot.realized_pnl_try),
+                    "unrealized_pnl_try": str(snapshot.unrealized_pnl_try),
+                    "fees_try": str(snapshot.fees_try),
+                    "slippage_try": str(snapshot.slippage_try),
+                    "equity_try": str(snapshot.equity_try),
+                    "drawdown_ratio": str(snapshot.max_drawdown),
+                    "turnover_try": str(snapshot.turnover_try),
+                    "sources": {
+                        "cash_try": "balances_snapshot.free_quote",
+                        "mtm_try": "ledger_open_lots_marked_to_market",
+                        "pnl": "ledger_events_fifo",
+                        "fees_try": "ledger_fee_events",
+                        "slippage_try": "simulated_fill_slippage",
+                    },
+                }
+            },
+        )
         logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})
         return stage4_result

@@ -55,6 +55,8 @@ class LedgerState:
 
 @dataclass(frozen=True)
 class LedgerSnapshot:
+    cash_try: Decimal
+    position_mtm_try: Decimal
     gross_pnl_try: Decimal
     realized_pnl_try: Decimal
     unrealized_pnl_try: Decimal

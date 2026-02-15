@@ -387,10 +387,23 @@ class StateStore:
                 turnover_try TEXT NOT NULL,
                 equity_try TEXT NOT NULL,
                 max_drawdown TEXT NOT NULL,
+                max_drawdown_ratio TEXT NOT NULL DEFAULT "0",
                 FOREIGN KEY(cycle_id) REFERENCES stage7_cycle_trace(cycle_id)
             )
             """
         )
+        ledger_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_ledger_metrics)")
+        }
+        if "max_drawdown_ratio" not in ledger_columns:
+            conn.execute(
+                "ALTER TABLE stage7_ledger_metrics "
+                "ADD COLUMN max_drawdown_ratio TEXT NOT NULL DEFAULT '0'"
+            )
+            conn.execute(
+                "UPDATE stage7_ledger_metrics SET max_drawdown_ratio=max_drawdown "
+                "WHERE max_drawdown_ratio='0'"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_stage7_cycle_trace_ts ON stage7_cycle_trace(ts)"
         )
@@ -423,6 +436,7 @@ class StateStore:
                 fees_try TEXT NOT NULL,
                 slippage_try TEXT NOT NULL,
                 max_drawdown_pct TEXT NOT NULL,
+                max_drawdown_ratio TEXT NOT NULL DEFAULT "0",
                 turnover_try TEXT NOT NULL,
                 latency_ms_total INTEGER NOT NULL,
                 selection_ms INTEGER NOT NULL,
@@ -459,6 +473,15 @@ class StateStore:
             conn.execute(
                 "ALTER TABLE stage7_run_metrics "
                 "ADD COLUMN positions_updated_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "max_drawdown_ratio" not in run_metric_columns:
+            conn.execute(
+                "ALTER TABLE stage7_run_metrics "
+                "ADD COLUMN max_drawdown_ratio TEXT NOT NULL DEFAULT '0'"
+            )
+            conn.execute(
+                "UPDATE stage7_run_metrics SET max_drawdown_ratio=max_drawdown_pct "
+                "WHERE max_drawdown_ratio='0'"
             )
         if "run_id" not in run_metric_columns:
             conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN run_id TEXT")
@@ -625,7 +648,7 @@ class StateStore:
                 ledger_events_inserted, positions_updated_count,
                 events_appended, events_ignored,
                 equity_try, gross_pnl_try, net_pnl_try, fees_try, slippage_try,
-                max_drawdown_pct, turnover_try,
+                max_drawdown_pct, max_drawdown_ratio, turnover_try,
                 latency_ms_total, selection_ms, planning_ms, intents_ms,
                 oms_ms, ledger_ms, persist_ms,
                 quality_flags_json, alert_flags_json, run_id
@@ -633,7 +656,7 @@ class StateStore:
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?
+                ?, ?, ?, ?, ?
             )
             ON CONFLICT(cycle_id) DO UPDATE SET
                 ts=excluded.ts,
@@ -658,6 +681,7 @@ class StateStore:
                 fees_try=excluded.fees_try,
                 slippage_try=excluded.slippage_try,
                 max_drawdown_pct=excluded.max_drawdown_pct,
+                max_drawdown_ratio=excluded.max_drawdown_ratio,
                 turnover_try=excluded.turnover_try,
                 latency_ms_total=excluded.latency_ms_total,
                 selection_ms=excluded.selection_ms,
@@ -694,6 +718,7 @@ class StateStore:
                 str(metrics_dict["fees_try"]),
                 str(metrics_dict["slippage_try"]),
                 str(metrics_dict["max_drawdown_pct"]),
+                str(metrics_dict.get("max_drawdown_ratio", metrics_dict["max_drawdown_pct"])),
                 str(metrics_dict["turnover_try"]),
                 int(metrics_dict["latency_ms_total"]),
                 int(metrics_dict["selection_ms"]),
@@ -900,8 +925,8 @@ class StateStore:
                         INSERT INTO stage7_ledger_metrics(
                             cycle_id, ts, gross_pnl_try, realized_pnl_try, unrealized_pnl_try,
                             net_pnl_try, fees_try, slippage_try,
-                            turnover_try, equity_try, max_drawdown
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            turnover_try, equity_try, max_drawdown, max_drawdown_ratio
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(cycle_id) DO UPDATE SET
                             ts=excluded.ts,
                             gross_pnl_try=excluded.gross_pnl_try,
@@ -912,7 +937,8 @@ class StateStore:
                             slippage_try=excluded.slippage_try,
                             turnover_try=excluded.turnover_try,
                             equity_try=excluded.equity_try,
-                            max_drawdown=excluded.max_drawdown
+                            max_drawdown=excluded.max_drawdown,
+                            max_drawdown_ratio=excluded.max_drawdown_ratio
                         """,
                         (
                             cycle_id,
@@ -926,6 +952,7 @@ class StateStore:
                             str(ledger_metrics["turnover_try"]),
                             str(ledger_metrics["equity_try"]),
                             str(ledger_metrics["max_drawdown"]),
+                            str(ledger_metrics.get("max_drawdown_ratio", ledger_metrics["max_drawdown"])),
                         ),
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1012,7 +1039,7 @@ class StateStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT max_drawdown, net_pnl_try, equity_try
+                SELECT COALESCE(max_drawdown_ratio, max_drawdown) as max_drawdown_ratio, net_pnl_try, equity_try
                 FROM stage7_ledger_metrics
                 ORDER BY ts DESC
                 LIMIT 1
@@ -1021,7 +1048,7 @@ class StateStore:
         if row is None:
             return None
         return {
-            "max_drawdown": Decimal(str(row["max_drawdown"])),
+            "max_drawdown_ratio": Decimal(str(row["max_drawdown_ratio"])),
             "net_pnl_try": Decimal(str(row["net_pnl_try"])),
             "equity_try": Decimal(str(row["equity_try"])),
         }
