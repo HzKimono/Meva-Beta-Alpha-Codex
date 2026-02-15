@@ -757,8 +757,11 @@ class StateStore:
                         if item.get("client_order_id")
                     }
                     if domain_ids != trace_ids:
-                        msg = "order_intents and order_intents_trace client_order_id mismatch"
-                        raise ValueError(msg)
+                        msg = (
+                            "save_stage7_cycle failed at intents_trace_validate "
+                            f"{_stage7_ctx(cycle_id, run_id)}"
+                        )
+                        raise RuntimeError(msg)
                 trace_payload = (
                     order_intents_trace if order_intents_trace is not None else derived_trace
                 )

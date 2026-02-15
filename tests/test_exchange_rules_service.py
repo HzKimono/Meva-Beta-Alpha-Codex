@@ -108,8 +108,8 @@ def test_invalid_metadata_not_cached_as_zero() -> None:
 
     assert first_rules is None
     assert second_rules is None
-    assert first_status == "invalid"
-    assert second_status == "invalid"
+    assert first_status == "invalid_metadata"
+    assert second_status == "invalid_metadata"
 
 
 def test_fallback_cache_preserves_status_when_metadata_not_required() -> None:
@@ -215,8 +215,8 @@ def test_resolve_symbol_rules_returns_error_without_throwing() -> None:
     resolution = service.resolve_symbol_rules("BTC_TRY")
 
     assert resolution.usable is False
-    assert resolution.status == "error"
-    assert resolution.reason == "exchange_info_error:TimeoutError"
+    assert resolution.status == "upstream_fetch_failure"
+    assert resolution.reason == "upstream_fetch_failure:TimeoutError"
 
 
 def test_rules_parser_supports_min_notional_filter_variants() -> None:
@@ -273,7 +273,39 @@ def test_flaky_exchangeinfo_never_raises_from_resolve() -> None:
     first = service.resolve_symbol_rules("BTC_TRY")
     second = service.resolve_symbol_rules("BTC_TRY")
 
-    assert first.status == "error"
+    assert first.status == "upstream_fetch_failure"
     assert first.rules is None
     assert second.status == "ok"
     assert second.rules is not None
+
+
+class UnsupportedVariantClient:
+    def get_exchange_info(self):
+        return [
+            {
+                "pairSymbol": "BTCTRY",
+                "filters": {"price": {"tickSize": "0.1"}},
+            }
+        ]
+
+
+def test_rules_boundary_decision_uses_typed_outcomes() -> None:
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_RULES_REQUIRE_METADATA=True)
+    service = ExchangeRulesService(UnsupportedVariantClient(), settings=settings)
+
+    decision = service.resolve_boundary("BTC_TRY")
+
+    assert decision.outcome == "SKIP"
+    assert decision.resolution.status == "invalid_metadata"
+    assert decision.rules is None
+
+
+def test_invalid_metadata_reason_lists_fields() -> None:
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_RULES_REQUIRE_METADATA=True)
+    service = ExchangeRulesService(InvalidMetadataExchangeClient(), settings=settings)
+
+    resolution = service.resolve_symbol_rules("BTC_TRY")
+
+    assert resolution.status == "invalid_metadata"
+    assert resolution.reason is not None
+    assert "invalid=tick_size" in resolution.reason

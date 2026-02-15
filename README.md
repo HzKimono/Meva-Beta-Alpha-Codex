@@ -177,3 +177,12 @@ conn.close()
 ## Changelog
 
 - ✅ Stage 3 acceptance achieved: strategy/risk/accounting pipeline integrated, deterministic safety gates enforced, and CI quality gates green.
+
+
+## Quality gates (single command)
+
+```bash
+make check
+```
+
+This runs compile checks, formatting/linting, tests, and guard scripts in the same order used by CI.
