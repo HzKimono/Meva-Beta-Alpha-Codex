@@ -113,3 +113,24 @@ def test_symbol_rules_use_tick_and_step_size_when_present() -> None:
 
     assert quantize_price(Decimal("123.99"), rules) == Decimal("120")
     assert quantize_quantity(Decimal("0.12349"), rules) == Decimal("0.1234")
+
+
+def test_to_pair_info_supports_pair_symbol_normalized_and_lot_size_filter_variant() -> None:
+    client = BtcturkHttpClient()
+
+    pair = client._to_pair_info(
+        {
+            "pairSymbol": "BTCTRY",
+            "pairSymbolNormalized": "BTC_TRY",
+            "numeratorScale": 8,
+            "denominatorScale": 2,
+            "filters": [
+                {"filterType": "PRICE_FILTER", "tickSize": "0.1", "minAmount": "99.91"},
+                {"filterType": "LOT_SIZE", "stepSize": "0.00001", "minQty": "0.00001"},
+            ],
+        }
+    )
+
+    assert pair.pair_symbol == "BTC_TRY"
+    assert pair.min_total_amount == Decimal("99.91")
+    assert pair.step_size == Decimal("0.00001")

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
+from typing import Literal
 
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.config import Settings
@@ -21,6 +22,7 @@ def _pair_symbol_candidates(pair: object) -> list[str]:
     if isinstance(pair, Mapping):
         candidates = [
             pair.get("pairSymbol"),
+            pair.get("pairSymbolNormalized"),
             pair.get("symbol"),
             pair.get("name"),
             pair.get("nameNormalized"),
@@ -30,6 +32,7 @@ def _pair_symbol_candidates(pair: object) -> list[str]:
 
     candidates = [
         getattr(pair, "pair_symbol", None),
+        getattr(pair, "pair_symbol_normalized", None),
         getattr(pair, "symbol", None),
         getattr(pair, "name", None),
         getattr(pair, "name_normalized", None),
@@ -66,6 +69,15 @@ def _infer_precision(value: Decimal | None, default: int = 8) -> int:
     return max(0, -int(exponent))
 
 
+def _to_int(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(str(value))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @dataclass(frozen=True)
 class SymbolRules:
     tick_size: Decimal
@@ -86,6 +98,18 @@ class _CachedRules:
     rules: SymbolRules
     status: str
     cached_at: datetime
+
+
+@dataclass(frozen=True)
+class SymbolRulesResolution:
+    symbol: str
+    status: Literal["ok", "fallback", "missing", "invalid", "error"]
+    rules: SymbolRules | None
+    reason: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        return self.rules is not None
 
 
 class ExchangeRulesService:
@@ -127,8 +151,17 @@ class ExchangeRulesService:
 
     def _extract_rules(self, pair: object) -> SymbolRules:
         tick_size = _to_decimal(_read_field(pair, "tick_size", "tickSize"))
-        lot_size = _to_decimal(_read_field(pair, "step_size", "stepSize"))
-        min_notional_try = _to_decimal(_read_field(pair, "min_total_amount", "minTotalAmount"))
+        lot_size = _to_decimal(_read_field(pair, "step_size", "stepSize", "lotSize"))
+        min_notional_try = _to_decimal(
+            _read_field(
+                pair,
+                "min_total_amount",
+                "minTotalAmount",
+                "minExchangeValue",
+                "minNotional",
+                "minimumOrderAmount",
+            )
+        )
         min_qty = _to_decimal(_read_field(pair, "min_quantity", "minQuantity", "minQty"))
         max_qty = _to_decimal(_read_field(pair, "max_quantity", "maxQuantity", "maxQty"))
 
@@ -143,6 +176,10 @@ class ExchangeRulesService:
                     min_notional_try = min_notional_try or _to_decimal(
                         raw_filter.get("minExchangeValue")
                     )
+                    min_notional_try = min_notional_try or _to_decimal(raw_filter.get("minAmount"))
+                    min_notional_try = min_notional_try or _to_decimal(
+                        raw_filter.get("minNotional")
+                    )
                 if filter_type in {"LOT_SIZE", "MARKET_LOT_SIZE", "QUANTITY_FILTER"}:
                     lot_size = lot_size or _to_decimal(raw_filter.get("stepSize"))
                     min_qty = (
@@ -151,19 +188,30 @@ class ExchangeRulesService:
                     max_qty = (
                         max_qty if max_qty is not None else _to_decimal(raw_filter.get("maxQty"))
                     )
+                if filter_type in {"MIN_TOTAL", "MIN_NOTIONAL", "NOTIONAL"}:
+                    min_notional_try = min_notional_try or _to_decimal(
+                        raw_filter.get("minTotalAmount")
+                    )
+                    min_notional_try = min_notional_try or _to_decimal(
+                        raw_filter.get("minExchangeValue")
+                    )
+                    min_notional_try = min_notional_try or _to_decimal(raw_filter.get("minAmount"))
+                    min_notional_try = min_notional_try or _to_decimal(
+                        raw_filter.get("minNotional")
+                    )
 
-        numerator_scale = _read_field(pair, "numerator_scale", "numeratorScale")
-        denominator_scale = _read_field(pair, "denominator_scale", "denominatorScale")
-        if lot_size in {None, Decimal("0")} and isinstance(numerator_scale, int):
+        numerator_scale = _to_int(_read_field(pair, "numerator_scale", "numeratorScale"))
+        denominator_scale = _to_int(_read_field(pair, "denominator_scale", "denominatorScale"))
+        if lot_size in {None, Decimal("0")} and min_qty and min_qty > 0:
+            lot_size = min_qty
+        if lot_size in {None, Decimal("0")} and numerator_scale is not None:
             lot_size = Decimal("1").scaleb(-numerator_scale)
 
         price_precision = (
-            int(denominator_scale)
-            if isinstance(denominator_scale, int)
-            else _infer_precision(tick_size)
+            denominator_scale if denominator_scale is not None else _infer_precision(tick_size)
         )
         qty_precision = (
-            int(numerator_scale) if isinstance(numerator_scale, int) else _infer_precision(lot_size)
+            numerator_scale if numerator_scale is not None else _infer_precision(lot_size)
         )
 
         return SymbolRules(
@@ -176,17 +224,28 @@ class ExchangeRulesService:
             qty_precision=qty_precision,
         )
 
-    def get_symbol_rules_status(self, symbol: str) -> tuple[SymbolRules | None, str]:
+    def resolve_symbol_rules(self, symbol: str) -> SymbolRulesResolution:
         key = _norm_symbol(symbol)
         now = datetime.now(UTC)
         cached = self._cache.get(key)
         if cached and (now - cached.cached_at) < timedelta(seconds=self.cache_ttl_sec):
-            return cached.rules, cached.status
+            return SymbolRulesResolution(symbol=key, rules=cached.rules, status=cached.status)
 
         index: dict[str, object] = {}
         get_info = getattr(self.exchange, "get_exchange_info", None)
         if callable(get_info):
-            pairs = get_info()
+            try:
+                pairs = get_info()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "exchange_rules_exchange_info_error", extra={"extra": {"symbol": key}}
+                )
+                return SymbolRulesResolution(
+                    symbol=key,
+                    rules=None,
+                    status="error",
+                    reason=f"exchange_info_error:{type(exc).__name__}",
+                )
             for pair in pairs:
                 for candidate in _pair_symbol_candidates(pair):
                     index[_norm_symbol(candidate)] = pair
@@ -195,27 +254,31 @@ class ExchangeRulesService:
         if match is None:
             require_metadata = bool(getattr(self.settings, "stage7_rules_require_metadata", True))
             if require_metadata:
-                return None, "missing"
+                return SymbolRulesResolution(
+                    symbol=key, rules=None, status="missing", reason="metadata_missing"
+                )
             fallback = self._fallback_rules()
             self._cache[key] = _CachedRules(
                 rules=fallback,
                 status="fallback",
                 cached_at=now,
             )
-            return fallback, "fallback"
+            return SymbolRulesResolution(symbol=key, rules=fallback, status="fallback")
 
         converted = self._extract_rules(match)
         if not self._is_valid_rules(converted):
             require_metadata = bool(getattr(self.settings, "stage7_rules_require_metadata", True))
             if require_metadata:
-                return None, "invalid"
+                return SymbolRulesResolution(
+                    symbol=key, rules=None, status="invalid", reason="metadata_invalid"
+                )
             fallback = self._fallback_rules()
             self._cache[key] = _CachedRules(
                 rules=fallback,
                 status="fallback",
                 cached_at=now,
             )
-            return fallback, "fallback"
+            return SymbolRulesResolution(symbol=key, rules=fallback, status="fallback")
 
         cached_rules = _CachedRules(
             rules=converted,
@@ -225,17 +288,25 @@ class ExchangeRulesService:
         for alias in _pair_symbol_candidates(match):
             self._cache[_norm_symbol(alias)] = cached_rules
         self._cache[key] = cached_rules
-        return converted, "ok"
+        return SymbolRulesResolution(symbol=key, rules=converted, status="ok")
+
+    def get_symbol_rules_status(self, symbol: str) -> tuple[SymbolRules | None, str]:
+        result = self.resolve_symbol_rules(symbol)
+        status = result.status if result.status != "error" else "missing"
+        return result.rules, status
 
     def get_symbol_rules_or_none(self, symbol: str) -> SymbolRules | None:
         rules, _ = self.get_symbol_rules_status(symbol)
         return rules
 
     def get_rules(self, symbol: str) -> SymbolRules:
-        rules, status = self.get_symbol_rules_status(symbol)
-        if rules is None:
-            raise ValueError(f"No usable exchange rules for symbol={symbol} status={status}")
-        return rules
+        resolution = self.resolve_symbol_rules(symbol)
+        if resolution.rules is None:
+            reason = f" reason={resolution.reason}" if resolution.reason else ""
+            raise ValueError(
+                f"No usable exchange rules for symbol={symbol} status={resolution.status}{reason}"
+            )
+        return resolution.rules
 
     def quantize_price(self, symbol: str, price: Decimal) -> Decimal:
         rules = self.get_rules(symbol)

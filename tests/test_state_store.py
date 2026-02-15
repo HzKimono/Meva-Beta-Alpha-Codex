@@ -514,3 +514,158 @@ def test_stage7_idempotency_key_contract(tmp_path) -> None:
     assert store.try_register_idempotency_key("k1", "h1") is False
     with pytest.raises(IdempotencyConflictError):
         store.try_register_idempotency_key("k1", "h2")
+
+
+def test_stage7_schema_upgrade_from_legacy_snapshot(tmp_path) -> None:
+    db_path = tmp_path / "legacy_stage7.sqlite"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE stage7_cycle_trace (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                selected_universe_json TEXT NOT NULL,
+                universe_scores_json TEXT NOT NULL DEFAULT '[]',
+                intents_summary_json TEXT NOT NULL,
+                mode_json TEXT NOT NULL,
+                order_decisions_json TEXT NOT NULL,
+                portfolio_plan_json TEXT NOT NULL DEFAULT '{}',
+                order_intents_json TEXT NOT NULL DEFAULT '[]'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE stage7_run_metrics (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                mode_base TEXT NOT NULL,
+                mode_final TEXT NOT NULL,
+                universe_size INTEGER NOT NULL,
+                intents_planned_count INTEGER NOT NULL,
+                intents_skipped_count INTEGER NOT NULL,
+                oms_submitted_count INTEGER NOT NULL,
+                oms_filled_count INTEGER NOT NULL,
+                oms_rejected_count INTEGER NOT NULL,
+                oms_canceled_count INTEGER NOT NULL,
+                events_appended INTEGER NOT NULL,
+                events_ignored INTEGER NOT NULL,
+                equity_try TEXT NOT NULL,
+                gross_pnl_try TEXT NOT NULL,
+                net_pnl_try TEXT NOT NULL,
+                fees_try TEXT NOT NULL,
+                slippage_try TEXT NOT NULL,
+                max_drawdown_pct TEXT NOT NULL,
+                turnover_try TEXT NOT NULL,
+                latency_ms_total INTEGER NOT NULL,
+                selection_ms INTEGER NOT NULL,
+                planning_ms INTEGER NOT NULL,
+                intents_ms INTEGER NOT NULL,
+                oms_ms INTEGER NOT NULL,
+                ledger_ms INTEGER NOT NULL,
+                persist_ms INTEGER NOT NULL,
+                quality_flags_json TEXT NOT NULL,
+                alert_flags_json TEXT NOT NULL
+            )
+            """
+        )
+
+    store = StateStore(db_path=str(db_path))
+
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    store.save_stage7_cycle(
+        cycle_id="legacy-upgrade-1",
+        ts=ts,
+        selected_universe=["BTCTRY"],
+        universe_scores=[],
+        intents_summary={"rules_stats": {}},
+        mode_payload={"final_mode": "OBSERVE_ONLY"},
+        order_decisions=[{"status": "skipped", "reason": "observe_only"}],
+        portfolio_plan={},
+        ledger_metrics={
+            "gross_pnl_try": Decimal("0"),
+            "realized_pnl_try": Decimal("0"),
+            "unrealized_pnl_try": Decimal("0"),
+            "net_pnl_try": Decimal("0"),
+            "fees_try": Decimal("0"),
+            "slippage_try": Decimal("0"),
+            "turnover_try": Decimal("0"),
+            "equity_try": Decimal("1000"),
+            "max_drawdown": Decimal("0"),
+        },
+        run_metrics={
+            "ts": ts.isoformat(),
+            "mode_base": "NORMAL",
+            "mode_final": "OBSERVE_ONLY",
+            "universe_size": 1,
+            "intents_planned_count": 0,
+            "intents_skipped_count": 0,
+            "oms_submitted_count": 0,
+            "oms_filled_count": 0,
+            "oms_rejected_count": 0,
+            "oms_canceled_count": 0,
+            "events_appended": 0,
+            "events_ignored": 0,
+            "equity_try": Decimal("1000"),
+            "gross_pnl_try": Decimal("0"),
+            "net_pnl_try": Decimal("0"),
+            "fees_try": Decimal("0"),
+            "slippage_try": Decimal("0"),
+            "max_drawdown_pct": Decimal("0"),
+            "turnover_try": Decimal("0"),
+            "latency_ms_total": 1,
+            "selection_ms": 1,
+            "planning_ms": 1,
+            "intents_ms": 1,
+            "oms_ms": 1,
+            "ledger_ms": 1,
+            "persist_ms": 1,
+            "quality_flags": {},
+            "alert_flags": {},
+            "run_id": "legacy-run",
+        },
+    )
+
+    with store._connect() as conn:
+        upgraded = conn.execute("PRAGMA table_info(stage7_cycle_trace)").fetchall()
+        names = {row["name"] for row in upgraded}
+        assert "active_param_version" in names
+        assert "param_change_json" in names
+        row = conn.execute(
+            "SELECT cycle_id, active_param_version, param_change_json FROM stage7_cycle_trace"
+        ).fetchone()
+        assert row is not None
+        assert row["cycle_id"] == "legacy-upgrade-1"
+
+
+def test_save_stage7_cycle_error_includes_substep_context(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "diag.sqlite"))
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        store.save_stage7_cycle(
+            cycle_id="diag-cycle",
+            ts=ts,
+            selected_universe=["BTCTRY"],
+            universe_scores=[],
+            intents_summary={"rules_stats": {}},
+            mode_payload={"final_mode": "NORMAL"},
+            order_decisions=[],
+            portfolio_plan={},
+            ledger_metrics={
+                "gross_pnl_try": Decimal("0"),
+                "realized_pnl_try": Decimal("0"),
+                "unrealized_pnl_try": Decimal("0"),
+                "net_pnl_try": Decimal("0"),
+                "fees_try": Decimal("0"),
+                "slippage_try": Decimal("0"),
+                "turnover_try": Decimal("0"),
+                "equity_try": Decimal("1000"),
+                "max_drawdown": Decimal("0"),
+            },
+            run_metrics={"run_id": "run-1"},
+        )
+
+    msg = str(exc_info.value)
+    assert "save_stage7_cycle failed at run_metrics_upsert" in msg
+    assert "cycle_id=diag-cycle run_id=run-1" in msg

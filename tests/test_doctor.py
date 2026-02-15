@@ -224,3 +224,19 @@ def test_doctor_exchange_rules_check_fails_for_invalid_rules_in_blocking_mode(
     assert not report.ok
     assert any("exchange rules unusable" in error for error in report.errors)
     assert any("exchangeinfo schema" in action.lower() for action in report.actions)
+
+
+def test_doctor_exchange_rules_reports_actionable_reason(patch_doctor_exchange) -> None:
+    patch_doctor_exchange(
+        [
+            {
+                "name": "BTCTRY",
+                "nameNormalized": "BTC_TRY",
+                "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0"}],
+            }
+        ]
+    )
+    report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
+
+    messages = [c.message for c in report.checks if c.category == "exchange_rules"]
+    assert any("status=invalid:metadata_invalid" in msg for msg in messages)

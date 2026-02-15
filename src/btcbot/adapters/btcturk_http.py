@@ -484,10 +484,13 @@ class BtcturkHttpClient(ExchangeClient):
                         tick_size = flt.get("tickSize", tick_size)
                         min_total = flt.get("minExchangeValue", min_total)
                         min_total = flt.get("minAmount", min_total)
-                    elif filter_type == "QUANTITY_FILTER":
+                    elif filter_type in {"QUANTITY_FILTER", "LOT_SIZE", "MARKET_LOT_SIZE"}:
                         min_qty = flt.get("minQuantity", min_qty)
+                        min_qty = flt.get("minQty", min_qty)
                         max_qty = flt.get("maxQuantity", max_qty)
+                        max_qty = flt.get("maxQty", max_qty)
                         step_size = flt.get("stepSize", step_size)
+                        step_size = flt.get("lotSize", step_size)
                     elif filter_type in {"MIN_TOTAL", "MIN_NOTIONAL", "NOTIONAL"}:
                         min_total = flt.get("minTotalAmount", min_total)
                         min_total = flt.get("minExchangeValue", min_total)
@@ -525,7 +528,13 @@ class BtcturkHttpClient(ExchangeClient):
                 pairSymbol=str(pair_symbol),
                 name=(str(item["name"]) if item.get("name") is not None else None),
                 nameNormalized=(
-                    str(item["nameNormalized"]) if item.get("nameNormalized") is not None else None
+                    str(item["nameNormalized"])
+                    if item.get("nameNormalized") is not None
+                    else (
+                        str(item["pairSymbolNormalized"])
+                        if item.get("pairSymbolNormalized") is not None
+                        else None
+                    )
                 ),
                 status=(str(item["status"]) if item.get("status") is not None else None),
                 numerator=(str(item["numerator"]) if item.get("numerator") is not None else None),
@@ -546,18 +555,23 @@ class BtcturkHttpClient(ExchangeClient):
             raise ValueError(f"Malformed exchange info pair item: {item}") from exc
 
     def _resolve_pair_symbol(self, item: dict[str, object]) -> str:
-        raw_symbol = item.get("pairSymbol") or item.get("nameNormalized") or item.get("name")
+        raw_symbol = (
+            item.get("pairSymbol")
+            or item.get("pairSymbolNormalized")
+            or item.get("nameNormalized")
+            or item.get("name")
+        )
         if raw_symbol is None:
             keys = sorted(item.keys())
             raise ValueError(
                 "exchangeinfo pair is missing symbol fields; expected one of "
-                "'pairSymbol', 'nameNormalized', 'name'; "
+                "'pairSymbol', 'pairSymbolNormalized', 'nameNormalized', 'name'; "
                 f"received keys={keys}"
             )
 
         symbol = str(raw_symbol).strip().replace("/", "_").upper()
 
-        normalized_name = item.get("nameNormalized")
+        normalized_name = item.get("nameNormalized") or item.get("pairSymbolNormalized")
         if normalized_name is not None:
             normalized_name_text = str(normalized_name).strip().replace("/", "_").upper()
             if "_" in normalized_name_text:
