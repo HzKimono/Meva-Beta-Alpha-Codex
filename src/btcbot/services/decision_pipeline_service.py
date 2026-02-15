@@ -41,6 +41,12 @@ class CycleDecisionReport:
     mapped_orders_count: int
     dropped_actions_count: int
     dropped_reasons: Mapping[str, int]
+    cash_try: Decimal
+    cash_target_try: Decimal
+    investable_try: Decimal
+    planned_total_try: Decimal
+    unused_investable_try: Decimal
+    investable_usage_reason: str
 
 
 class DecisionPipelineService:
@@ -105,6 +111,9 @@ class DecisionPipelineService:
                 max_total_notional_try_per_cycle=self._to_decimal(
                     self.settings.notional_cap_try_per_cycle
                 ),
+                investable_usage_mode=str(self.settings.investable_usage_mode),
+                investable_usage_fraction=self._to_decimal(self.settings.investable_usage_fraction),
+                max_try_per_cycle=self._to_decimal(self.settings.max_try_per_cycle),
             ),
         )
 
@@ -144,6 +153,12 @@ class DecisionPipelineService:
             mapped_orders_count=len(order_requests),
             dropped_actions_count=sum(dropped_reasons.values()),
             dropped_reasons=dropped_reasons,
+            cash_try=allocation.cash_try,
+            cash_target_try=allocation.cash_target_try,
+            investable_try=allocation.investable_try,
+            planned_total_try=allocation.planned_total_try,
+            unused_investable_try=allocation.unused_investable_try,
+            investable_usage_reason=allocation.investable_usage_reason,
         )
         self._log_report(report)
         return report

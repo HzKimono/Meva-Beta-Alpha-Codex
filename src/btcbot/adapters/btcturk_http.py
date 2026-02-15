@@ -6,7 +6,6 @@ import ssl
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from email.utils import parsedate_to_datetime
 from math import isfinite
 from random import Random
 from time import monotonic, sleep, time
@@ -14,7 +13,7 @@ from uuid import uuid4
 
 import httpx
 
-from btcbot.adapters.btcturk_auth import build_auth_headers
+from btcbot.adapters.btcturk_auth import MonotonicNonceGenerator, build_auth_headers
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4, OrderAck
 from btcbot.domain.accounting import TradeFill
@@ -37,6 +36,7 @@ from btcbot.domain.models import (
     parse_decimal,
 )
 from btcbot.domain.stage4 import Order as Stage4Order
+from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -65,34 +65,9 @@ def _is_permanent_transport_error(exc: httpx.TransportError) -> bool:
     return isinstance(cause, ssl.SSLCertVerificationError)
 
 
-def _parse_retry_after_seconds(value: str | None) -> float | None:
-    if value is None:
-        return None
-
-    candidate = value.strip()
-    if not candidate:
-        return None
-
-    try:
-        parsed = float(candidate)
-        return parsed if parsed >= 0 else None
-    except ValueError:
-        pass
-
-    try:
-        parsed_dt = parsedate_to_datetime(candidate)
-    except (TypeError, ValueError):
-        return None
-
-    now = datetime.now(UTC)
-    if parsed_dt.tzinfo is None:
-        parsed_dt = parsed_dt.replace(tzinfo=UTC)
-    return max(0.0, (parsed_dt - now).total_seconds())
-
-
 def _retry_delay_seconds(attempt: int, *, response: httpx.Response | None = None) -> float:
     if response is not None and response.status_code == 429:
-        retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
+        retry_after = parse_retry_after_seconds(response.headers.get("Retry-After"))
         if retry_after is not None:
             return min(retry_after, _RETRY_MAX_DELAY_SECONDS)
 
@@ -185,7 +160,7 @@ class BtcturkHttpClient(ExchangeClient):
             timeout=resolved_timeout,
             transport=transport,
         )
-        self._last_stamp_ms: int | None = None
+        self._nonce = MonotonicNonceGenerator()
 
     def __enter__(self) -> BtcturkHttpClient:
         return self
@@ -195,28 +170,15 @@ class BtcturkHttpClient(ExchangeClient):
         self.close()
 
     def _get(self, path: str, params: dict[str, str | int] | None = None) -> dict:
-        start = monotonic()
-        last_exc: BaseException | None = None
+        request_id = uuid4().hex
 
-        for attempt in range(1, _RETRY_ATTEMPTS + 1):
-            request_id = uuid4().hex
-            try:
-                response = self.client.get(
-                    path,
-                    params=params,
-                    headers={"X-Request-ID": request_id},
-                )
-                response.raise_for_status()
-            except BaseException as exc:  # noqa: BLE001
-                if not _should_retry(exc) or attempt >= _RETRY_ATTEMPTS:
-                    raise
-                delay = _retry_delay_seconds(attempt, response=getattr(exc, "response", None))
-                if monotonic() - start + delay > _RETRY_TOTAL_WAIT_CAP_SECONDS:
-                    raise
-                sleep(delay)
-                last_exc = exc
-                continue
-
+        def _call() -> dict:
+            response = self.client.get(
+                path,
+                params=params,
+                headers={"X-Request-ID": request_id},
+            )
+            response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
                 raise ValueError("BTCTurk response payload must be a JSON object")
@@ -227,16 +189,29 @@ class BtcturkHttpClient(ExchangeClient):
                 )
             return payload
 
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("Unexpected retry loop termination")
+        def _retry_after(exc: Exception) -> str | None:
+            response = getattr(exc, "response", None)
+            if response is None:
+                return None
+            return response.headers.get("Retry-After")
+
+        return retry_with_backoff(
+            _call,
+            max_attempts=_RETRY_ATTEMPTS,
+            base_delay_ms=int(_RETRY_BASE_DELAY_SECONDS * 1000),
+            max_delay_ms=int(_RETRY_MAX_DELAY_SECONDS * 1000),
+            jitter_seed=17,
+            retry_on_exceptions=(
+                httpx.TimeoutException,
+                httpx.TransportError,
+                httpx.HTTPStatusError,
+            ),
+            retry_after_getter=_retry_after,
+            sleep_fn=sleep,
+        )
 
     def _next_stamp_ms(self) -> str:
-        now_ms = int(time() * 1000)
-        if self._last_stamp_ms is not None:
-            now_ms = max(now_ms, self._last_stamp_ms + 1)
-        self._last_stamp_ms = now_ms
-        return str(now_ms)
+        return str(self._nonce.next_stamp_ms())
 
     def _private_request(
         self,

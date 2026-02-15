@@ -640,6 +640,16 @@ class Stage7CycleRunner:
                 "retry_excess": retry_count >= settings.stage7_retry_alert_threshold,
                 "retry_giveup": retry_giveup_count > 0,
             }
+            no_trades_reason = None
+            if settings.kill_switch:
+                no_trades_reason = "KILL_SWITCH"
+            elif settings.dry_run:
+                no_trades_reason = "DRY_RUN"
+            elif planned_count <= 0:
+                no_trades_reason = "NO_PRIVATE_DATA"
+            elif oms_filled <= 0:
+                no_trades_reason = "NO_FILLS"
+
             run_metrics_base = {
                 "ts": now.isoformat(),
                 "run_id": run_id,
@@ -672,6 +682,10 @@ class Stage7CycleRunner:
                 "retry_giveup_count": retry_giveup_count,
                 "quality_flags": quality_flags,
                 "alert_flags": alert_flags,
+                "no_trades_reason": no_trades_reason,
+                "no_metrics_reason": (
+                    "NO_TRADES" if planned_count == 0 and oms_submitted == 0 else None
+                ),
             }
             collector.start_timer("persist")
             try:

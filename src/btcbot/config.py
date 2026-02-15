@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     allocation_fee_buffer_bps: Decimal = Field(
         default=Decimal("20"), alias="ALLOCATION_FEE_BUFFER_BPS"
     )
+    investable_usage_mode: str = Field(default="use_all", alias="INVESTABLE_USAGE_MODE")
+    investable_usage_fraction: Decimal = Field(
+        default=Decimal("1"), alias="INVESTABLE_USAGE_FRACTION"
+    )
+    max_try_per_cycle: Decimal = Field(default=Decimal("0"), alias="MAX_TRY_PER_CYCLE")
     rules_cache_ttl_sec: int = Field(default=300, alias="RULES_CACHE_TTL_SEC")
     fills_poll_lookback_minutes: int = Field(default=30, alias="FILLS_POLL_LOOKBACK_MINUTES")
     stage4_bootstrap_intents: bool = Field(default=True, alias="STAGE4_BOOTSTRAP_INTENTS")
@@ -314,6 +319,25 @@ class Settings(BaseSettings):
     def validate_risk_max_fee_try_per_day(cls, value: Decimal | None) -> Decimal | None:
         if value is not None and value <= 0:
             raise ValueError("RISK_MAX_FEE_TRY_PER_DAY must be > 0 when configured")
+        return value
+
+    @field_validator("investable_usage_mode")
+    def validate_investable_usage_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"use_all", "fraction", "cap"}:
+            raise ValueError("INVESTABLE_USAGE_MODE must be one of: use_all,fraction,cap")
+        return normalized
+
+    @field_validator("investable_usage_fraction")
+    def validate_investable_usage_fraction(cls, value: Decimal) -> Decimal:
+        if value < 0 or value > 1:
+            raise ValueError("INVESTABLE_USAGE_FRACTION must be in [0, 1]")
+        return value
+
+    @field_validator("max_try_per_cycle")
+    def validate_max_try_per_cycle(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("MAX_TRY_PER_CYCLE must be >= 0")
         return value
 
     @field_validator("allocation_fee_buffer_bps")

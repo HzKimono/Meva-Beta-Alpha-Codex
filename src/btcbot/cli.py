@@ -38,6 +38,7 @@ from btcbot.services.parity import (
     find_missing_stage7_parity_tables,
 )
 from btcbot.services.portfolio_service import PortfolioService
+from btcbot.services.process_lock import single_instance_lock
 from btcbot.services.risk_service import RiskService
 from btcbot.services.stage4_cycle_runner import (
     Stage4ConfigurationError,
@@ -100,6 +101,11 @@ def main() -> int:
     )
     stage4_run_parser.add_argument(
         "--jitter-seconds", type=int, default=0, help="Optional random jitter added to cycle sleep"
+    )
+    stage4_run_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
     )
 
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
@@ -205,7 +211,9 @@ def main() -> int:
     )
 
     doctor_parser = subparsers.add_parser("doctor", help="Validate local config, env, and DB")
-    doctor_parser.add_argument("--db", default=None, help="Optional sqlite DB path to validate")
+    doctor_parser.add_argument(
+        "--db", default=None, help="Sqlite DB path (defaults to env STATE_DB_PATH)"
+    )
     doctor_parser.add_argument(
         "--dataset",
         default=None,
@@ -291,7 +299,9 @@ def main() -> int:
     if args.command == "stage4-run":
         return run_with_optional_loop(
             command="stage4-run",
-            cycle_fn=lambda: run_cycle_stage4(settings, force_dry_run=args.dry_run),
+            cycle_fn=lambda: run_cycle_stage4(
+                settings, force_dry_run=args.dry_run, db_path=args.db
+            ),
             loop_enabled=args.loop and not args.once,
             cycle_seconds=args.cycle_seconds,
             max_cycles=args.max_cycles,
@@ -363,9 +373,14 @@ def main() -> int:
         return run_stage7_db_count(settings=settings, db_path=args.db)
 
     if args.command == "doctor":
+        resolved_db_path = _resolve_stage7_db_path(
+            "doctor", db_path=args.db, settings_db_path=settings.state_db_path
+        )
+        if resolved_db_path is None:
+            return 2
         return run_doctor(
             settings=settings,
-            db_path=args.db,
+            db_path=resolved_db_path,
             dataset_path=args.dataset,
             json_output=args.json,
         )
@@ -641,7 +656,9 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
         _close_best_effort(exchange, "exchange")
 
 
-def run_cycle_stage4(settings: Settings, force_dry_run: bool = False) -> int:
+def run_cycle_stage4(
+    settings: Settings, force_dry_run: bool = False, db_path: str | None = None
+) -> int:
     dry_run = force_dry_run or settings.dry_run
     _log_arm_check(settings, dry_run=dry_run)
     live_block_reason = validate_live_side_effects_policy(
@@ -649,14 +666,21 @@ def run_cycle_stage4(settings: Settings, force_dry_run: bool = False) -> int:
         kill_switch=settings.kill_switch,
         live_trading_enabled=settings.is_live_trading_enabled(),
     )
+    resolved_db_path = _resolve_stage7_db_path(
+        "stage4-run", db_path=db_path, settings_db_path=settings.state_db_path
+    )
+    if resolved_db_path is None:
+        return 2
     cycle_runner = Stage4CycleRunner()
-    effective_settings = settings.model_copy(update={"dry_run": dry_run})
+    effective_settings = settings.model_copy(
+        update={"dry_run": dry_run, "state_db_path": resolved_db_path}
+    )
     cycle_id = uuid4().hex
     if not dry_run and live_block_reason is not None:
         block_message = policy_block_message(live_block_reason)
         logger.error(block_message, extra={"extra": {"reason": live_block_reason.value}})
         print(block_message)
-        StateStore(db_path=settings.state_db_path).record_cycle_audit(
+        StateStore(db_path=resolved_db_path).record_cycle_audit(
             cycle_id=cycle_id,
             counts={"blocked_by_policy": 1},
             decisions=[f"policy_block:{live_block_reason.value}"],
@@ -674,9 +698,10 @@ def run_cycle_stage4(settings: Settings, force_dry_run: bool = False) -> int:
         return 2
 
     try:
-        logger.info("Running Stage 4 cycle")
-        result = cycle_runner.run_one_cycle(effective_settings)
-        return result
+        with single_instance_lock(db_path=resolved_db_path, account_key="stage4"):
+            logger.info("Running Stage 4 cycle")
+            result = cycle_runner.run_one_cycle(effective_settings)
+            return result
     except Stage4ConfigurationError as exc:
         logger.exception(
             "Stage 4 cycle failed due to configuration error",
@@ -715,10 +740,11 @@ def run_cycle_stage7(
         update={"dry_run": True, "state_db_path": resolved_db_path}
     )
     try:
-        return runner.run_one_cycle(
-            effective_settings,
-            enable_adaptation=include_adaptation,
-        )
+        with single_instance_lock(db_path=resolved_db_path, account_key="stage7"):
+            return runner.run_one_cycle(
+                effective_settings,
+                enable_adaptation=include_adaptation,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Stage 7 cycle failed",
@@ -819,14 +845,44 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
         return 2
     store = StateStore(db_path=resolved_db_path)
     rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
-    print("cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled")
+    print("cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason")
     for row in rows:
+        no_trades_reason = row.get("no_trades_reason") or "-"
+        no_metrics_reason = row.get("no_metrics_reason") or "-"
         print(
             f"{row['cycle_id']} {row['ts']} {row['mode_final']} "
             f"{row['net_pnl_try']} {row['max_drawdown_pct']} {row['turnover_try']} "
             f"{row['intents_planned_count']} {row['oms_rejected_count']} "
-            f"{int(row.get('oms_throttled_count', 0))}"
+            f"{int(row.get('oms_throttled_count', 0))} {no_trades_reason}"
         )
+        print(f"  no_metrics_reason={no_metrics_reason}")
+
+        cycle_trace = store.get_stage7_cycle_trace(str(row["cycle_id"]))
+        if cycle_trace is not None:
+            summary = cycle_trace.get("intents_summary", {})
+            portfolio_plan = cycle_trace.get("portfolio_plan", {})
+            print(
+                "  stage7_plan_summary="
+                f"planned={summary.get('order_intents_planned', 0)} "
+                f"skipped={summary.get('order_intents_skipped', 0)} "
+                f"actions={summary.get('order_decisions_total', 0)}"
+            )
+            if isinstance(portfolio_plan, dict) and portfolio_plan:
+                print(
+                    "  portfolio_plan="
+                    f"cash_target_try={portfolio_plan.get('cash_target_try', '-')} "
+                    f"actions={len(portfolio_plan.get('actions', []) or [])}"
+                )
+
+        allocation_plan = store.get_allocation_plan(str(row["cycle_id"]))
+        if allocation_plan is not None:
+            print(
+                "  allocation_plan="
+                f"investable_try={allocation_plan.get('investable_try')} "
+                f"planned_total_try={allocation_plan.get('planned_total_try')} "
+                f"unused_investable_try={allocation_plan.get('unused_investable_try')} "
+                f"usage_reason={allocation_plan.get('usage_reason')}"
+            )
     return 0
 
 

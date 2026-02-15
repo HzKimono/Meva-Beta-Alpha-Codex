@@ -49,3 +49,17 @@ def test_build_auth_headers() -> None:
     assert headers["X-PCK"] == api_key
     assert headers["X-Stamp"] == "12345"
     assert headers["X-Signature"] == compute_signature(api_key, api_secret, 12345)
+
+
+def test_monotonic_nonce_increments_with_same_timestamp() -> None:
+    from btcbot.adapters.btcturk_auth import MonotonicNonceGenerator
+
+    gen = MonotonicNonceGenerator(now_ms_fn=lambda: 1700000000000)
+
+    first = gen.next_stamp_ms()
+    second = gen.next_stamp_ms()
+    third = gen.next_stamp_ms()
+
+    assert first == 1700000000000
+    assert second == 1700000000001
+    assert third == 1700000000002

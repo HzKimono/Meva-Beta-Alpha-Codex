@@ -421,3 +421,37 @@ def test_buy_respects_try_cash_max_cap() -> None:
     )
     assert len(result.actions) == 1
     assert result.actions[0].notional_try == Decimal("50")
+
+
+def test_investable_usage_fraction_limits_budget() -> None:
+    knobs = AllocationKnobs(
+        target_try_cash=Decimal("300"),
+        investable_usage_mode="fraction",
+        investable_usage_fraction=Decimal("0.5"),
+    )
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("500"))],
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        knobs=knobs,
+    )
+    assert result.planned_total_try <= Decimal("350")
+    assert result.unused_investable_try >= Decimal("300")
+
+
+def test_investable_usage_cap_limits_budget() -> None:
+    knobs = AllocationKnobs(
+        target_try_cash=Decimal("300"),
+        investable_usage_mode="cap",
+        max_try_per_cycle=Decimal("120"),
+    )
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("500"))],
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        knobs=knobs,
+    )
+    assert result.planned_total_try <= Decimal("120")
+    assert result.cash_try - result.planned_total_try >= result.cash_target_try

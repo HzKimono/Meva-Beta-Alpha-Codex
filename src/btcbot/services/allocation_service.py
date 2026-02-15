@@ -29,6 +29,9 @@ class AllocationKnobs:
     max_intent_notional_try: Decimal = Decimal("0")
     max_position_try_per_symbol: Decimal = Decimal("0")
     max_total_notional_try_per_cycle: Decimal = Decimal("0")
+    investable_usage_mode: str = "use_all"
+    investable_usage_fraction: Decimal = Decimal("1")
+    max_try_per_cycle: Decimal = Decimal("0")
 
 
 class AllocationService:
@@ -56,11 +59,16 @@ class AllocationService:
         counters: dict[str, int] = {}
 
         total_try_cash = normalized_balances.get("TRY", Decimal("0"))
-        available_cash = total_try_cash
-        if knobs.try_cash_max > Decimal("0"):
-            available_cash = min(available_cash, knobs.try_cash_max)
-        remaining_cash = max(available_cash - knobs.target_try_cash, Decimal("0"))
+        capped_cash = (
+            min(total_try_cash, knobs.try_cash_max)
+            if knobs.try_cash_max > Decimal("0")
+            else total_try_cash
+        )
+        investable_try = max(capped_cash - knobs.target_try_cash, Decimal("0"))
+        budgeted_investable, usage_reason = _resolve_investable_budget(investable_try, knobs)
+
         fee_multiplier = Decimal("1") + (knobs.fee_buffer_bps / Decimal("10000"))
+        remaining_cash = budgeted_investable
         remaining_cycle_notional = knobs.max_total_notional_try_per_cycle
 
         for intent_index, intent in enumerate(intents):
@@ -146,7 +154,6 @@ class AllocationService:
                 }
                 if knobs.max_intent_notional_try > Decimal("0"):
                     limits[REASON_MAX_INTENT_CAP] = knobs.max_intent_notional_try
-
                 precedence = [REASON_CASH_TARGET, REASON_MAX_POSITION_CAP, REASON_CYCLE_CAP]
                 if REASON_MAX_INTENT_CAP in limits:
                     precedence.append(REASON_MAX_INTENT_CAP)
@@ -300,9 +307,33 @@ class AllocationService:
             if knobs.max_total_notional_try_per_cycle > Decimal("0"):
                 remaining_cycle_notional -= allocated_notional
 
+        planned_total_try = sum(action.notional_try for action in actions if action.side == "buy")
+        unused_investable_try = max(Decimal("0"), investable_try - planned_total_try)
+
         return AllocationResult(
-            actions=tuple(actions), decisions=tuple(decisions), counters=counters
+            actions=tuple(actions),
+            decisions=tuple(decisions),
+            counters=counters,
+            cash_try=total_try_cash,
+            cash_target_try=knobs.target_try_cash,
+            investable_try=investable_try,
+            planned_total_try=planned_total_try,
+            unused_investable_try=unused_investable_try,
+            investable_usage_reason=usage_reason,
         )
+
+
+def _resolve_investable_budget(
+    investable_try: Decimal, knobs: AllocationKnobs
+) -> tuple[Decimal, str]:
+    mode = knobs.investable_usage_mode.strip().lower()
+    if mode == "fraction":
+        fraction = min(max(knobs.investable_usage_fraction, Decimal("0")), Decimal("1"))
+        return investable_try * fraction, f"fraction:{fraction}"
+    if mode == "cap":
+        cap = max(knobs.max_try_per_cycle, Decimal("0"))
+        return min(investable_try, cap), f"cap:{cap}"
+    return investable_try, "use_all"
 
 
 def _apply_optional_cap(
