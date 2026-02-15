@@ -952,7 +952,11 @@ class StateStore:
                             str(ledger_metrics["turnover_try"]),
                             str(ledger_metrics["equity_try"]),
                             str(ledger_metrics["max_drawdown"]),
-                            str(ledger_metrics.get("max_drawdown_ratio", ledger_metrics["max_drawdown"])),
+                            str(
+                                ledger_metrics.get(
+                                    "max_drawdown_ratio", ledger_metrics["max_drawdown"]
+                                )
+                            ),
                         ),
                     )
                 except Exception as exc:  # noqa: BLE001

@@ -149,7 +149,16 @@ def test_stage7_five_cycles_drawdown_and_reject_metrics(monkeypatch, tmp_path) -
     def _fake_process(self, **kwargs):
         del self, kwargs
         orders = [
-            SimpleNamespace(status=_Status("REJECTED"), client_order_id=f"r{i}", symbol="BTCTRY", side="BUY", qty=Decimal("1"), avg_fill_price_try=None, filled_qty=Decimal("0"), order_id=f"o{i}")
+            SimpleNamespace(
+                status=_Status("REJECTED"),
+                client_order_id=f"r{i}",
+                symbol="BTCTRY",
+                side="BUY",
+                qty=Decimal("1"),
+                avg_fill_price_try=None,
+                filled_qty=Decimal("0"),
+                order_id=f"o{i}",
+            )
             for i in range(3)
         ]
         return orders, []
@@ -177,16 +186,21 @@ def test_stage7_five_cycles_drawdown_and_reject_metrics(monkeypatch, tmp_path) -
     )
 
     for i in range(5):
-        runner = __import__("btcbot.services.stage7_cycle_runner", fromlist=["Stage7CycleRunner"]).Stage7CycleRunner()
-        assert runner.run_one_cycle(
-            settings,
-            now_utc=datetime(2024, 1, 2, tzinfo=UTC) + timedelta(minutes=i),
-            cycle_id=f"c{i}",
-            run_id=f"r{i}",
-            stage4_result=0,
-            enable_adaptation=False,
-            use_active_params=False,
-        ) == 0
+        runner = __import__(
+            "btcbot.services.stage7_cycle_runner", fromlist=["Stage7CycleRunner"]
+        ).Stage7CycleRunner()
+        assert (
+            runner.run_one_cycle(
+                settings,
+                now_utc=datetime(2024, 1, 2, tzinfo=UTC) + timedelta(minutes=i),
+                cycle_id=f"c{i}",
+                run_id=f"r{i}",
+                stage4_result=0,
+                enable_adaptation=False,
+                use_active_params=False,
+            )
+            == 0
+        )
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -201,6 +215,7 @@ def test_stage7_five_cycles_drawdown_and_reject_metrics(monkeypatch, tmp_path) -
     assert len(rows) == 5
     assert pnl_div == 0
     import json
+
     for row in rows:
         rejected = int(row["oms_rejected_count"])
         alerts = json.loads(str(row["alert_flags_json"]))

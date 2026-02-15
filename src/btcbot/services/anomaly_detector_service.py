@@ -158,7 +158,9 @@ class AnomalyDetectorService:
                         "mtm_try": "unknown_stage4",
                         "realized_try": str(pnl_report.realized_pnl_total),
                         "unrealized_try": str(pnl_report.unrealized_pnl_total),
-                        "fees_try": str(sum(pnl_report.fees_total_by_currency.values(), Decimal('0'))),
+                        "fees_try": str(
+                            sum(pnl_report.fees_total_by_currency.values(), Decimal("0"))
+                        ),
                         "slippage_try": "unknown_stage4",
                         "diff_try": str(diff),
                         "warn_threshold_try": str(self.config.pnl_divergence_try_warn),
