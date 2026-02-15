@@ -386,6 +386,20 @@ def test_reconcile_enrichment_and_missing_client_id() -> None:
     assert len(result.external_missing_client_id) == 1
 
 
+def test_accounting_fetch_new_fills_initializes_since_ms_with_lookback_when_cursor_missing(
+    store: StateStore,
+) -> None:
+    exchange = FakeExchangeStage4()
+    svc = AccountingService(exchange=exchange, state_store=store, lookback_minutes=30)
+
+    before_ms = int((datetime.now(UTC) - timedelta(minutes=30)).timestamp() * 1000)
+    svc.fetch_new_fills("BTC_TRY")
+    after_ms = int((datetime.now(UTC) - timedelta(minutes=30)).timestamp() * 1000)
+
+    assert exchange.last_since_ms is not None
+    assert before_ms <= exchange.last_since_ms <= after_ms
+
+
 def test_accounting_fetch_new_fills_applies_lookback_even_with_cursor(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
     svc = AccountingService(exchange=exchange, state_store=store, lookback_minutes=30)

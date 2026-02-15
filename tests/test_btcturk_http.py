@@ -453,6 +453,43 @@ def test_stage4_list_open_orders_does_not_bridge_to_stage3_list() -> None:
     client.close()
 
 
+def test_extract_fill_rows_accepts_empty_payload_variants() -> None:
+    client = BtcturkHttpClient()
+    payloads = [
+        {"success": True},
+        {"success": True, "data": []},
+        {"success": True, "data": None},
+        {"success": True, "data": {}},
+        {"success": True, "data": {"items": []}},
+    ]
+
+    for payload in payloads:
+        assert client._extract_fill_rows(payload, path="/api/v1/users/transactions/trade") == []
+
+
+def test_extract_fill_rows_treats_missing_list_keys_as_empty_for_fills() -> None:
+    client = BtcturkHttpClient()
+
+    assert (
+        client._extract_fill_rows(
+            {"success": True, "data": {"page": 1, "total": 0}},
+            path="/api/v1/users/transactions/trade",
+        )
+        == []
+    )
+
+
+def test_extract_fill_rows_parses_normal_payload() -> None:
+    client = BtcturkHttpClient()
+
+    rows = client._extract_fill_rows(
+        {"success": True, "data": [{"id": "1", "orderId": "2"}]},
+        path="/api/v1/users/transactions/trade",
+    )
+
+    assert rows == [{"id": "1", "orderId": "2"}]
+
+
 def test_stage4_recent_fills_uses_deterministic_fallback_when_unique_fill_id_missing() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v1/users/transactions/trade":
