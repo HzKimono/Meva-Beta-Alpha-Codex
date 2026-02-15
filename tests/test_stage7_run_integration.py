@@ -952,7 +952,9 @@ def test_stage7_materializes_fills_into_ledger_and_positions(monkeypatch, tmp_pa
     try:
         run_metrics = conn.execute("SELECT * FROM stage7_run_metrics").fetchone()
         ledger_metrics = conn.execute("SELECT * FROM stage7_ledger_metrics").fetchone()
-        ledger_events_count = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()["c"]
+        ledger_events_count = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()[
+            "c"
+        ]
         position = conn.execute("SELECT * FROM positions WHERE symbol='BTCTRY'").fetchone()
     finally:
         conn.close()
@@ -1043,7 +1045,9 @@ def test_stage7_fill_materialization_is_idempotent_for_same_cycle(monkeypatch, t
     conn.row_factory = sqlite3.Row
     try:
         fills_count = conn.execute("SELECT COUNT(*) AS c FROM fills").fetchone()["c"]
-        ledger_events_count = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()["c"]
+        ledger_events_count = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()[
+            "c"
+        ]
     finally:
         conn.close()
 
