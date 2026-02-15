@@ -3,11 +3,15 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from hashlib import sha256
 from uuid import uuid4
 
 from btcbot.config import Settings
+from btcbot.domain.accounting import Position, TradeFill
 from btcbot.domain.anomalies import combine_modes
+from btcbot.domain.ledger import LedgerEvent, LedgerEventType, LedgerState, apply_events
 from btcbot.domain.models import Balance, normalize_symbol
+from btcbot.domain.models import OrderSide as DomainOrderSide
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.logging_context import with_cycle_context
@@ -26,6 +30,11 @@ from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
 
 logger = logging.getLogger(__name__)
+
+
+def _deterministic_fill_id(cycle_id: str, client_order_id: str, symbol: str, side: str) -> str:
+    digest = sha256(f"{cycle_id}|{client_order_id}|{symbol}|{side}".encode()).hexdigest()[:16]
+    return f"s7f:{digest}"
 
 
 class Stage7CycleRunner:
@@ -337,6 +346,10 @@ class Stage7CycleRunner:
             slippage_try = Decimal("0")
             oms_orders = []
             oms_events = []
+            fills_written_count = 0
+            fills_applied_count = 0
+            ledger_events_inserted = 0
+            positions_updated_count = 0
 
             if final_mode != Mode.OBSERVE_ONLY:
                 filtered_actions: list[LifecycleAction] = []
@@ -435,10 +448,140 @@ class Stage7CycleRunner:
             else:
                 actions = [{"status": "skipped", "reason": "observe_only"}]
 
+            materialized_fills: list[TradeFill] = []
+            ledger_events: list[LedgerEvent] = []
+            for order in sorted(oms_orders, key=lambda item: item.client_order_id):
+                if order.status.value != "FILLED":
+                    continue
+                if order.avg_fill_price_try is None or order.filled_qty <= 0:
+                    continue
+                symbol = normalize_symbol(order.symbol)
+                side = order.side.upper()
+                fill_id = _deterministic_fill_id(cycle_id, order.client_order_id, symbol, side)
+                fee_try = (order.avg_fill_price_try * order.filled_qty) * (
+                    runtime.stage7_fees_bps / Decimal("10000")
+                )
+                trade_fill = TradeFill(
+                    fill_id=fill_id,
+                    order_id=order.order_id,
+                    symbol=symbol,
+                    side=(DomainOrderSide.BUY if side == "BUY" else DomainOrderSide.SELL),
+                    price=order.avg_fill_price_try,
+                    qty=order.filled_qty,
+                    fee=fee_try,
+                    fee_currency="TRY",
+                    ts=now,
+                )
+                materialized_fills.append(trade_fill)
+                slippage_component = abs(
+                    (order.avg_fill_price_try - order.price_try) * order.filled_qty
+                )
+                slippage_try += slippage_component
+                ledger_events.append(
+                    LedgerEvent(
+                        event_id=f"fill:{fill_id}",
+                        ts=now,
+                        symbol=symbol,
+                        type=LedgerEventType.FILL,
+                        side=side,
+                        qty=order.filled_qty,
+                        price=order.avg_fill_price_try,
+                        fee=None,
+                        fee_currency=None,
+                        exchange_trade_id=fill_id,
+                        exchange_order_id=order.order_id,
+                        client_order_id=order.client_order_id,
+                        meta={"source": "stage7_oms", "cycle_id": cycle_id},
+                    )
+                )
+                ledger_events.append(
+                    LedgerEvent(
+                        event_id=f"fee:{fill_id}",
+                        ts=now,
+                        symbol=symbol,
+                        type=LedgerEventType.FEE,
+                        side=None,
+                        qty=Decimal("0"),
+                        price=None,
+                        fee=fee_try,
+                        fee_currency="TRY",
+                        exchange_trade_id=f"fee:{fill_id}",
+                        exchange_order_id=order.order_id,
+                        client_order_id=order.client_order_id,
+                        meta={
+                            "source": "stage7_oms",
+                            "linked_fill_id": fill_id,
+                            "cycle_id": cycle_id,
+                        },
+                    )
+                )
+
+            for fill in materialized_fills:
+                if state_store.save_fill(fill):
+                    fills_written_count += 1
+            logger.info(
+                "stage7_fills_materialized",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "fills_written_count": fills_written_count,
+                        "fills_total": len(materialized_fills),
+                    }
+                },
+            )
+
+            for fill in materialized_fills:
+                if fill.fill_id is not None and state_store.mark_fill_applied(fill.fill_id):
+                    fills_applied_count += 1
+
+            append_result = state_store.append_ledger_events(ledger_events)
+            ledger_events_inserted = append_result.inserted
+            logger.info(
+                "stage7_ledger_ingested",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "ledger_events_inserted": ledger_events_inserted,
+                        "fills_applied_count": fills_applied_count,
+                    }
+                },
+            )
+
+            ledger_state = apply_events(LedgerState(), state_store.load_ledger_events())
+            for symbol in sorted(ledger_state.symbols):
+                symbol_state = ledger_state.symbols[symbol]
+                qty = sum((lot.qty for lot in symbol_state.lots), Decimal("0"))
+                notional = sum((lot.qty * lot.unit_cost for lot in symbol_state.lots), Decimal("0"))
+                avg_cost = (notional / qty) if qty > 0 else Decimal("0")
+                mark = mark_prices.get(symbol, avg_cost)
+                unrealized = sum((mark - lot.unit_cost) * lot.qty for lot in symbol_state.lots)
+                fees_paid = ledger_state.fees_by_currency.get("TRY", Decimal("0"))
+                state_store.save_position(
+                    Position(
+                        symbol=symbol,
+                        qty=qty,
+                        avg_cost=avg_cost,
+                        realized_pnl=symbol_state.realized_pnl,
+                        unrealized_pnl=unrealized,
+                        fees_paid=fees_paid,
+                        updated_at=now,
+                    )
+                )
+                positions_updated_count += 1
+            logger.info(
+                "stage7_positions_updated",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "positions_updated_count": positions_updated_count,
+                    }
+                },
+            )
+
             collector.start_timer("ledger")
             snapshot = ledger_service.snapshot(
                 mark_prices=mark_prices,
-                cash_try=Decimal(str(settings.dry_run_try_balance)),
+                cash_try=runtime.try_cash_target,
                 slippage_try=slippage_try,
                 ts=now,
             )
@@ -491,6 +634,10 @@ class Stage7CycleRunner:
                 "oms_filled_count": oms_filled,
                 "oms_rejected_count": oms_rejected,
                 "oms_canceled_count": oms_canceled,
+                "fills_written_count": fills_written_count,
+                "fills_applied_count": fills_applied_count,
+                "ledger_events_inserted": ledger_events_inserted,
+                "positions_updated_count": positions_updated_count,
                 "events_appended": len(oms_events),
                 "events_ignored": 0,
                 "equity_try": snapshot.equity_try,
