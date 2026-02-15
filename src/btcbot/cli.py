@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import random
 import sqlite3
 import sys
@@ -104,6 +105,11 @@ def main() -> int:
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
     stage7_run_parser.add_argument("--dry-run", action="store_true", help="Required for stage7")
     stage7_run_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+    stage7_run_parser.add_argument(
         "--include-adaptation",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -113,14 +119,29 @@ def main() -> int:
     subparsers.add_parser("health", help="Check exchange connectivity")
 
     report_parser = subparsers.add_parser("stage7-report", help="Print recent Stage 7 metrics")
+    report_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
     report_parser.add_argument("--last", type=int, default=10)
 
     export_parser = subparsers.add_parser("stage7-export", help="Export recent Stage 7 metrics")
+    export_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
     export_parser.add_argument("--last", type=int, default=50)
     export_parser.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
     export_parser.add_argument("--out", required=True)
 
     alerts_parser = subparsers.add_parser("stage7-alerts", help="Print recent Stage 7 alert cycles")
+    alerts_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
     alerts_parser.add_argument("--last", type=int, default=50)
 
     backtest_parser = subparsers.add_parser("stage7-backtest", help="Run Stage 7 replay backtest")
@@ -232,7 +253,12 @@ def main() -> int:
         aliases=["stage7-backtest-report"],
         help="Export backtest rows from a Stage 7 DB",
     )
-    backtest_export.add_argument("--db", required=True)
+    backtest_export.add_argument(
+        "--db",
+        required=False,
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
     backtest_export.add_argument("--out", required=True)
     backtest_export.add_argument("--last", type=int, default=50)
     backtest_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
@@ -241,7 +267,12 @@ def main() -> int:
         "stage7-db-count",
         help="Print row counts for Stage 7 tables in a sqlite DB",
     )
-    backtest_count.add_argument("--db", required=True)
+    backtest_count.add_argument(
+        "--db",
+        required=False,
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
 
     args = parser.parse_args()
     settings = Settings()
@@ -272,21 +303,26 @@ def main() -> int:
             settings,
             force_dry_run=args.dry_run,
             include_adaptation=args.include_adaptation,
+            db_path=args.db,
         )
 
     if args.command == "health":
         return run_health(settings)
 
     if args.command == "stage7-report":
-        return run_stage7_report(settings, last=args.last)
+        return run_stage7_report(settings, db_path=args.db, last=args.last)
 
     if args.command == "stage7-export":
         return run_stage7_export(
-            settings, last=args.last, export_format=args.format, out_path=args.out
+            settings,
+            db_path=args.db,
+            last=args.last,
+            export_format=args.format,
+            out_path=args.out,
         )
 
     if args.command == "stage7-alerts":
-        return run_stage7_alerts(settings, last=args.last)
+        return run_stage7_alerts(settings, db_path=args.db, last=args.last)
 
     if args.command == "stage7-backtest":
         return run_stage7_backtest(
@@ -315,6 +351,7 @@ def main() -> int:
 
     if args.command in {"stage7-backtest-export", "stage7-backtest-report"}:
         return run_stage7_backtest_export(
+            settings=settings,
             db_path=args.db,
             last=args.last,
             export_format=args.format,
@@ -323,7 +360,7 @@ def main() -> int:
         )
 
     if args.command == "stage7-db-count":
-        return run_stage7_db_count(db_path=args.db)
+        return run_stage7_db_count(settings=settings, db_path=args.db)
 
     if args.command == "doctor":
         return run_doctor(
@@ -658,6 +695,7 @@ def run_cycle_stage7(
     settings: Settings,
     force_dry_run: bool = False,
     include_adaptation: bool = True,
+    db_path: str | None = None,
 ) -> int:
     dry_run = force_dry_run or settings.dry_run
     if not dry_run:
@@ -667,8 +705,15 @@ def run_cycle_stage7(
         print("stage7-run is disabled; set STAGE7_ENABLED=true to run")
         logger.warning("stage7_disabled_in_settings")
         return 2
+    resolved_db_path = _resolve_stage7_db_path(
+        "stage7-run", db_path=db_path, settings_db_path=settings.state_db_path
+    )
+    if resolved_db_path is None:
+        return 2
     runner = Stage7CycleRunner()
-    effective_settings = settings.model_copy(update={"dry_run": True})
+    effective_settings = settings.model_copy(
+        update={"dry_run": True, "state_db_path": resolved_db_path}
+    )
     try:
         return runner.run_one_cycle(
             effective_settings,
@@ -748,8 +793,31 @@ def _csv_safe_value(value: object) -> object:
     return str(value)
 
 
-def run_stage7_report(settings: Settings, last: int) -> int:
-    store = StateStore(db_path=settings.state_db_path)
+def _resolve_stage7_db_path(
+    command: str, *, db_path: str | None, settings_db_path: str | None = None
+) -> str | None:
+    candidate = db_path.strip() if db_path and db_path.strip() else None
+    if candidate is None:
+        env_db = os.getenv("STATE_DB_PATH")
+        candidate = env_db.strip() if env_db and env_db.strip() else None
+    if candidate is None and settings_db_path and settings_db_path.strip():
+        candidate = settings_db_path.strip()
+    if candidate is not None:
+        return candidate
+
+    print(f"{command}: missing database path.")
+    print("Provide --db <path> or set STATE_DB_PATH.")
+    print(f"Example: btcbot {command} --db ./btcbot_state.db")
+    return None
+
+
+def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int:
+    resolved_db_path = _resolve_stage7_db_path(
+        "stage7-report", db_path=db_path, settings_db_path=settings.state_db_path
+    )
+    if resolved_db_path is None:
+        return 2
+    store = StateStore(db_path=resolved_db_path)
     rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
     print("cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled")
     for row in rows:
@@ -762,8 +830,15 @@ def run_stage7_report(settings: Settings, last: int) -> int:
     return 0
 
 
-def run_stage7_export(settings: Settings, last: int, export_format: str, out_path: str) -> int:
-    store = StateStore(db_path=settings.state_db_path)
+def run_stage7_export(
+    settings: Settings, db_path: str | None, last: int, export_format: str, out_path: str
+) -> int:
+    resolved_db_path = _resolve_stage7_db_path(
+        "stage7-export", db_path=db_path, settings_db_path=settings.state_db_path
+    )
+    if resolved_db_path is None:
+        return 2
+    store = StateStore(db_path=resolved_db_path)
     rows = store.fetch_stage7_cycles_for_export(limit=last)
     if export_format == "jsonl":
         with open(out_path, "w", encoding="utf-8") as handle:
@@ -781,8 +856,13 @@ def run_stage7_export(settings: Settings, last: int, export_format: str, out_pat
     return 0
 
 
-def run_stage7_alerts(settings: Settings, last: int) -> int:
-    store = StateStore(db_path=settings.state_db_path)
+def run_stage7_alerts(settings: Settings, db_path: str | None, last: int) -> int:
+    resolved_db_path = _resolve_stage7_db_path(
+        "stage7-alerts", db_path=db_path, settings_db_path=settings.state_db_path
+    )
+    if resolved_db_path is None:
+        return 2
+    store = StateStore(db_path=resolved_db_path)
     rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
     print("cycle_id ts alerts")
     for row in rows:
@@ -937,12 +1017,24 @@ def run_stage7_parity(
 
 
 def run_stage7_backtest_export(
-    *, db_path: str, last: int, export_format: str, out_path: str, explicit_last: bool = True
+    *,
+    settings: Settings,
+    db_path: str | None,
+    last: int,
+    export_format: str,
+    out_path: str,
+    explicit_last: bool = True,
 ) -> int:
     if not explicit_last:
         print("exporting last 50 rows", file=sys.stderr)
 
-    store = StateStore(db_path=db_path)
+    resolved_db_path = _resolve_stage7_db_path(
+        "stage7-backtest-export", db_path=db_path, settings_db_path=settings.state_db_path
+    )
+    if resolved_db_path is None:
+        return 2
+
+    store = StateStore(db_path=resolved_db_path)
     rows = store.fetch_stage7_cycles_for_export(limit=last)
     if export_format == "jsonl":
         with open(out_path, "w", encoding="utf-8") as handle:
@@ -992,7 +1084,13 @@ def _parse_optional_quantize(raw: str | None) -> Decimal | None:
     return quant
 
 
-def run_stage7_db_count(*, db_path: str) -> int:
+def run_stage7_db_count(*, settings: Settings, db_path: str | None) -> int:
+    resolved_db_path = _resolve_stage7_db_path(
+        "stage7-db-count", db_path=db_path, settings_db_path=settings.state_db_path
+    )
+    if resolved_db_path is None:
+        return 2
+
     tracked_tables = [
         "stage7_cycle_trace",
         "stage7_ledger_metrics",
@@ -1002,7 +1100,7 @@ def run_stage7_db_count(*, db_path: str) -> int:
         "stage7_params_active",
     ]
 
-    with sqlite3.connect(db_path) as connection:
+    with sqlite3.connect(resolved_db_path) as connection:
         cursor = connection.cursor()
         for table_name in tracked_tables:
             exists = cursor.execute(

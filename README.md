@@ -198,6 +198,12 @@ python -m btcbot.cli doctor --db .\backtest.db --dataset .\data
 
 `stage7-run` requires `STAGE7_ENABLED=true` and `--dry-run`; no live trading side effects are introduced.
 
+### DB path configuration (Stage 7 CLI)
+
+- Stage 7 commands that read/write the state DB accept `--db` (for example `stage7-run`, `stage7-report`, `stage7-export`, `stage7-alerts`, `stage7-backtest-report`, `stage7-db-count`).
+- If `--db` is omitted, they fall back to `STATE_DB_PATH`.
+- If neither is provided, the CLI prints an actionable error with an example command.
+
 SQLite inspection (PowerShell-friendly; avoids bash heredoc syntax):
 
 ```powershell

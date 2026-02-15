@@ -952,3 +952,75 @@ def test_run_with_optional_loop_runs_max_cycles() -> None:
     )
     assert code == 0
     assert calls["count"] == 3
+
+
+def test_main_stage7_run_accepts_db_flag(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "Settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+
+    def _fake_run_cycle_stage7(settings, **kwargs):
+        del settings
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_cycle_stage7", _fake_run_cycle_stage7)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["btcbot", "stage7-run", "--dry-run", "--db", "./btcbot_state.db"],
+    )
+
+    assert cli.main() == 0
+    assert captured["db_path"] == "./btcbot_state.db"
+
+
+def test_main_stage7_report_accepts_db_flag(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "Settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+
+    def _fake_run_stage7_report(settings, **kwargs):
+        del settings
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_stage7_report", _fake_run_stage7_report)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["btcbot", "stage7-report", "--db", "./btcbot_state.db", "--last", "50"],
+    )
+
+    assert cli.main() == 0
+    assert captured["db_path"] == "./btcbot_state.db"
+    assert captured["last"] == 50
+
+
+def test_main_stage7_db_count_supports_env_fallback(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "Settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+
+    def _fake_run_stage7_db_count(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_stage7_db_count", _fake_run_stage7_db_count)
+    monkeypatch.setenv("STATE_DB_PATH", "./btcbot_state.db")
+    monkeypatch.setattr(sys, "argv", ["btcbot", "stage7-db-count"])
+
+    assert cli.main() == 0
+    assert captured["db_path"] is None

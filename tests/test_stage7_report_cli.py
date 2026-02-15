@@ -50,14 +50,14 @@ def test_stage7_report_and_alerts(capsys, tmp_path: Path) -> None:
     store = StateStore(db_path=settings.state_db_path)
     _seed_metrics(store)
 
-    assert cli.run_stage7_report(settings, last=5) == 0
+    assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5) == 0
     report = capsys.readouterr().out
     assert "cycle_id" in report
     assert "net_pnl_try" in report
     assert "c1" in report
     assert "1" in report
 
-    assert cli.run_stage7_alerts(settings, last=5) == 0
+    assert cli.run_stage7_alerts(settings, db_path=settings.state_db_path, last=5) == 0
     alerts = capsys.readouterr().out
     assert "cycle_id ts alerts" in alerts
 
@@ -68,7 +68,16 @@ def test_stage7_export_jsonl(tmp_path: Path) -> None:
     _seed_metrics(store)
 
     out = tmp_path / "metrics.jsonl"
-    assert cli.run_stage7_export(settings, last=5, export_format="jsonl", out_path=str(out)) == 0
+    assert (
+        cli.run_stage7_export(
+            settings,
+            db_path=settings.state_db_path,
+            last=5,
+            export_format="jsonl",
+            out_path=str(out),
+        )
+        == 0
+    )
     assert out.exists()
     assert "cycle_id" in out.read_text(encoding="utf-8")
 
@@ -78,7 +87,7 @@ def test_stage7_alerts_all_false_only_header(capsys, tmp_path: Path) -> None:
     store = StateStore(db_path=settings.state_db_path)
     _seed_metrics(store)
 
-    assert cli.run_stage7_alerts(settings, last=5) == 0
+    assert cli.run_stage7_alerts(settings, db_path=settings.state_db_path, last=5) == 0
     lines = capsys.readouterr().out.strip().splitlines()
 
     assert lines == ["cycle_id ts alerts"]
@@ -104,7 +113,7 @@ def test_stage7_db_count_reports_existing_and_missing_tables(capsys, tmp_path: P
     store = StateStore(db_path=settings.state_db_path)
     _seed_metrics(store)
 
-    code = cli.run_stage7_db_count(db_path=settings.state_db_path)
+    code = cli.run_stage7_db_count(settings=settings, db_path=settings.state_db_path)
 
     assert code == 0
     lines = capsys.readouterr().out.strip().splitlines()
@@ -154,6 +163,7 @@ def test_stage7_backtest_export_warns_when_last_is_implicit(capsys, tmp_path: Pa
 
     out = tmp_path / "metrics.jsonl"
     code = cli.run_stage7_backtest_export(
+        settings=settings,
         db_path=settings.state_db_path,
         last=50,
         export_format="jsonl",
