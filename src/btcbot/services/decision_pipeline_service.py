@@ -158,6 +158,10 @@ class DecisionPipelineService:
         mark_prices: Mapping[str, Decimal],
         fallback_symbols: tuple[str, ...],
     ) -> list[str]:
+        configured_symbols = [canonical_symbol(symbol) for symbol in self.settings.symbols]
+        if configured_symbols:
+            return configured_symbols
+
         symbols: list[SymbolInfo]
         if pair_info:
             symbols = [SymbolInfo.from_pair_info(item) for item in pair_info]

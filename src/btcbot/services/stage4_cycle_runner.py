@@ -165,6 +165,7 @@ class Stage4CycleRunner:
                     "ingested_count": 0,
                     "last_seen_trade_id": None,
                     "last_seen_timestamp": None,
+                    "cursor_written": False,
                 }
                 for symbol in active_symbols
             }
@@ -201,6 +202,7 @@ class Stage4CycleRunner:
                         if symbol in failed_symbols:
                             continue
                         state_store.set_cursor(self._fills_cursor_key(symbol), cursor_after)
+                        cursor_diag[symbol]["cursor_written"] = True
             except Exception as exc:
                 logger.exception(
                     "cycle_failed",
@@ -362,12 +364,15 @@ class Stage4CycleRunner:
             prev_reject_count = int(degrade_state.get("last_reject_count", "0"))
 
             cursor_stall_by_symbol: dict[str, int] = {}
-            for symbol in cursor_before:
-                prev = int(prev_stall_cycles.get(symbol, 0))
-                if cursor_before.get(symbol) == cursor_after.get(symbol):
-                    cursor_stall_by_symbol[symbol] = prev + 1
-                else:
-                    cursor_stall_by_symbol[symbol] = 0
+            if not settings.dry_run:
+                for symbol in cursor_before:
+                    prev = int(prev_stall_cycles.get(symbol, 0))
+                    before_value = cursor_before.get(symbol)
+                    after_value = cursor_after.get(symbol)
+                    if before_value is not None and before_value == after_value:
+                        cursor_stall_by_symbol[symbol] = prev + 1
+                    else:
+                        cursor_stall_by_symbol[symbol] = 0
 
             cycle_duration_ms = int((datetime.now(UTC) - cycle_started_at).total_seconds() * 1000)
             anomalies = anomaly_detector.detect(

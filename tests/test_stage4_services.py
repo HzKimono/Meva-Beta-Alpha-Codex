@@ -152,9 +152,11 @@ def test_decimal_end_to_end_and_idempotent_submit(store: StateStore) -> None:
     assert svc.execute([action]) == 1
     assert svc.execute([action]) == 0
     assert len(exchange.submits) == 1
-    _, submitted_price, submitted_qty, _ = exchange.submits[0]
+    _, submitted_price, submitted_qty, submitted_client_id = exchange.submits[0]
     assert submitted_price == Decimal("123.4")
     assert submitted_qty == Decimal("1.2345")
+    assert len(submitted_client_id) <= 50
+    assert submitted_client_id != action.client_order_id
 
 
 def test_cancel_lookup_works_when_action_has_no_exchange_id(store: StateStore) -> None:
@@ -461,6 +463,73 @@ def test_submit_idempotency_persists_single_row(store: StateStore) -> None:
 
     assert row is not None
     assert row["c"] == 1
+
+
+def test_failed_submit_allows_retry(store: StateStore) -> None:
+    class FailingExchange(FakeExchangeStage4):
+        def submit_limit_order(self, symbol, side, price, qty, client_order_id):
+            del symbol, side, price, qty, client_order_id
+            raise RuntimeError("exchange down")
+
+    exchange = FailingExchange()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("150"),
+        qty=Decimal("1"),
+        reason="test",
+        client_order_id="cid-failed-retry",
+    )
+
+    with pytest.raises(RuntimeError):
+        svc.execute([action])
+    with pytest.raises(RuntimeError):
+        svc.execute([action])
+
+
+def test_open_order_dedupe_only_while_open(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("150"),
+        qty=Decimal("1"),
+        reason="test",
+        client_order_id="cid-open-dedupe",
+    )
+
+    assert svc.execute([action]) == 1
+    assert svc.execute([action]) == 0
+    store.record_stage4_order_canceled("cid-open-dedupe")
+    assert svc.execute([action]) == 1
 
 
 def test_execution_rejects_and_continues_when_rules_missing(store: StateStore) -> None:

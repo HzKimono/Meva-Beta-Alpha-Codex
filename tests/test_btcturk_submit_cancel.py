@@ -56,6 +56,25 @@ def test_submit_limit_order_payload_fields() -> None:
     client.close()
 
 
+def test_submit_payload_uses_btcturk_client_id_field() -> None:
+    client = BtcturkHttpClient(api_key="demo-key", api_secret="c2VjcmV0")
+    payload = client._build_submit_order_payload(
+        request=type(
+            "Req",
+            (),
+            {
+                "pair_symbol": "BTCTRY",
+                "price": 123.45,
+                "quantity": 0.01,
+                "side": type("S", (), {"value": "buy"})(),
+                "client_order_id": "safe-exchange-id",
+            },
+        )()
+    )
+    assert payload["newOrderClientId"] == "safe-exchange-id"
+    client.close()
+
+
 def test_cancel_order_payload_contains_id() -> None:
     seen: dict[str, str] = {}
 

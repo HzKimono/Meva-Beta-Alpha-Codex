@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Quantizer
+from btcbot.services.client_order_id_service import build_exchange_client_id
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.state_store import StateStore
 
@@ -60,10 +61,30 @@ class ExecutionService:
                         "submit_missing_client_order_id", extra={"symbol": action.symbol}
                     )
                     continue
-                if self.state_store.client_order_id_exists(action.client_order_id):
-                    logger.info("submit_deduped", extra={"client_order_id": action.client_order_id})
-                    continue
-                if self.state_store.is_order_terminal(action.client_order_id):
+                exchange_client_id = build_exchange_client_id(
+                    internal_client_id=action.client_order_id,
+                    symbol=action.symbol,
+                    side=action.side,
+                )
+                dedupe_decision = self.state_store.stage4_submit_dedupe_status(
+                    internal_client_order_id=action.client_order_id,
+                    exchange_client_order_id=exchange_client_id,
+                )
+                if dedupe_decision.should_dedupe:
+                    logger.info(
+                        "submit_deduped",
+                        extra={
+                            "extra": {
+                                "internal_client_order_id": action.client_order_id,
+                                "exchange_client_order_id": exchange_client_id,
+                                "dedupe_key": dedupe_decision.dedupe_key,
+                                "reason": dedupe_decision.reason,
+                                "age_s": dedupe_decision.age_seconds,
+                                "related_order_id": dedupe_decision.related_order_id,
+                                "related_status": dedupe_decision.related_status,
+                            }
+                        },
+                    )
                     continue
 
                 resolve_boundary = getattr(self.rules_service, "resolve_boundary", None)
@@ -128,11 +149,22 @@ class ExecutionService:
                     side=action.side,
                     price=q_price,
                     qty=q_qty,
-                    client_order_id=action.client_order_id,
+                    client_order_id=exchange_client_id,
+                )
+                logger.info(
+                    "submit_acknowledged",
+                    extra={
+                        "extra": {
+                            "internal_client_order_id": action.client_order_id,
+                            "exchange_client_order_id": exchange_client_id,
+                            "exchange_order_id": ack.exchange_order_id,
+                        }
+                    },
                 )
                 self.state_store.record_stage4_order_submitted(
                     symbol=action.symbol,
                     client_order_id=action.client_order_id,
+                    exchange_client_id=exchange_client_id,
                     exchange_order_id=ack.exchange_order_id,
                     side=action.side,
                     price=q_price,
@@ -141,6 +173,7 @@ class ExecutionService:
                     status="open",
                 )
                 submitted += 1
+                continue
 
             if action.action_type == LifecycleActionType.CANCEL:
                 client_id = action.client_order_id

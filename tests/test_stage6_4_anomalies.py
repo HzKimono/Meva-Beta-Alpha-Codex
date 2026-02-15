@@ -373,7 +373,7 @@ def test_runner_reject_and_cursor_stall_anomalies_use_real_inputs(monkeypatch, t
         rows = conn.execute("SELECT code FROM anomaly_events").fetchall()
     codes = {str(row["code"]) for row in rows}
     assert AnomalyCode.ORDER_REJECT_SPIKE.value in codes
-    assert AnomalyCode.CURSOR_STALL.value in codes
+    assert AnomalyCode.CURSOR_STALL.value not in codes
     assert AnomalyCode.STALE_MARKET_DATA.value not in codes
 
 

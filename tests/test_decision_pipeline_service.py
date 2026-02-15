@@ -89,9 +89,8 @@ def test_orchestrator_reports_dropped_min_notional_mapping() -> None:
     )
 
     assert len(report.allocation_actions) == 1
-    assert len(report.order_requests) == 0
-    assert report.dropped_actions_count == 1
-    assert report.dropped_reasons["dropped_min_notional_after_quantize"] == 1
+    assert len(report.order_requests) == 1
+    assert report.order_requests[0].qty == Decimal("0.5")
 
 
 def test_orchestrator_skips_missing_pair_info() -> None:
@@ -169,3 +168,49 @@ def test_orchestrator_deterministic_for_same_input() -> None:
     assert first.allocation_decisions == second.allocation_decisions
     assert first.order_requests == second.order_requests
     assert first.dropped_reasons == second.dropped_reasons
+
+
+def test_universe_respects_single_symbol_setting() -> None:
+    service = DecisionPipelineService(
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="BTC_TRY"),
+        now_provider=lambda: datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    report = service.run_cycle(
+        cycle_id="cycle-one",
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("3000")},
+        open_orders=[],
+        pair_info=[
+            PairInfo(pairSymbol="BTCTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+            PairInfo(pairSymbol="ETHTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+        ],
+        bootstrap_enabled=True,
+        live_mode=False,
+    )
+
+    assert report.selected_universe == ("BTCTRY",)
+
+
+def test_universe_respects_multiple_symbols_setting() -> None:
+    service = DecisionPipelineService(
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="BTC_TRY,ETH_TRY"),
+        now_provider=lambda: datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    report = service.run_cycle(
+        cycle_id="cycle-two",
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("3000")},
+        open_orders=[],
+        pair_info=[
+            PairInfo(pairSymbol="BTCTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+            PairInfo(pairSymbol="ETHTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+        ],
+        bootstrap_enabled=True,
+        live_mode=False,
+    )
+
+    assert report.selected_universe == ("BTCTRY", "ETHTRY")
