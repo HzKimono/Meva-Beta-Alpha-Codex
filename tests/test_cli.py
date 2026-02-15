@@ -933,3 +933,22 @@ def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
 
     assert cli.main() == 0
     assert captured["include_adaptation"] is True
+
+
+def test_run_with_optional_loop_runs_max_cycles() -> None:
+    calls = {"count": 0}
+
+    def cycle() -> int:
+        calls["count"] += 1
+        return 0
+
+    code = cli.run_with_optional_loop(
+        command="stage4-run",
+        cycle_fn=cycle,
+        loop_enabled=True,
+        cycle_seconds=0,
+        max_cycles=3,
+        jitter_seconds=0,
+    )
+    assert code == 0
+    assert calls["count"] == 3

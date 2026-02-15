@@ -262,3 +262,42 @@ def test_runner_uses_normalized_cursor_keys(monkeypatch, tmp_path) -> None:
             "SELECT key FROM cursors WHERE key LIKE 'fills_cursor:%' ORDER BY key"
         ).fetchall()
     assert [row["key"] for row in rows] == ["fills_cursor:BTCTRY"]
+
+
+def test_cursor_advances_when_new_fills_arrive(monkeypatch, tmp_path) -> None:
+    class AdvancingExchange(FakeExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self._seen = False
+
+        def get_recent_fills(self, symbol: str, since_ms: int | None = None):
+            del since_ms
+            if self._seen:
+                return []
+            self._seen = True
+            return super().get_recent_fills(symbol)
+
+    runner = Stage4CycleRunner()
+    exchange = AdvancingExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    db_path = tmp_path / "cursor_adv.sqlite"
+    settings = Settings(
+        DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path), SYMBOLS="BTC_TRY"
+    )
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(str(db_path))
+    before = store.get_cursor("fills_cursor:BTCTRY")
+    assert before is not None
+
+    assert runner.run_one_cycle(settings) == 0
+    after = store.get_cursor("fills_cursor:BTCTRY")
+    assert after == before
+
+    degrade = store.get_degrade_state_current()
+    payload = json.loads(degrade.get("cursor_stall_cycles_json") or "{}")
+    assert payload.get("BTCTRY") >= 1

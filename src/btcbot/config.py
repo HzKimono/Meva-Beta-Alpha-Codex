@@ -190,6 +190,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["BTCTRY", "ETHTRY", "SOLTRY"],
         alias="SYMBOLS",
     )
+    portfolio_targets: str | None = Field(default=None, alias="PORTFOLIO_TARGETS")
 
     @field_validator("symbols", mode="before")
     def parse_symbols(cls, value: str | list[str]) -> list[str]:

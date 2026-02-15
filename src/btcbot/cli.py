@@ -4,8 +4,11 @@ import argparse
 import csv
 import json
 import logging
+import random
 import sqlite3
 import sys
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -72,9 +75,31 @@ def main() -> int:
 
     run_parser = subparsers.add_parser("run", help="Run one decision cycle")
     run_parser.add_argument("--dry-run", action="store_true", help="Do not place orders")
+    run_parser.add_argument("--loop", action="store_true", help="Run continuously")
+    run_parser.add_argument("--once", action="store_true", help="Alias for single cycle")
+    run_parser.add_argument(
+        "--cycle-seconds", type=int, default=60, help="Sleep seconds between cycles"
+    )
+    run_parser.add_argument(
+        "--max-cycles", type=int, default=None, help="Optional maximum number of cycles"
+    )
+    run_parser.add_argument(
+        "--jitter-seconds", type=int, default=0, help="Optional random jitter added to cycle sleep"
+    )
 
     stage4_run_parser = subparsers.add_parser("stage4-run", help="Run one Stage 4 cycle")
     stage4_run_parser.add_argument("--dry-run", action="store_true", help="Do not place orders")
+    stage4_run_parser.add_argument("--loop", action="store_true", help="Run continuously")
+    stage4_run_parser.add_argument("--once", action="store_true", help="Alias for single cycle")
+    stage4_run_parser.add_argument(
+        "--cycle-seconds", type=int, default=60, help="Sleep seconds between cycles"
+    )
+    stage4_run_parser.add_argument(
+        "--max-cycles", type=int, default=None, help="Optional maximum number of cycles"
+    )
+    stage4_run_parser.add_argument(
+        "--jitter-seconds", type=int, default=0, help="Optional random jitter added to cycle sleep"
+    )
 
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
     stage7_run_parser.add_argument("--dry-run", action="store_true", help="Required for stage7")
@@ -223,10 +248,24 @@ def main() -> int:
     setup_logging(settings.log_level)
 
     if args.command == "run":
-        return run_cycle(settings, force_dry_run=args.dry_run)
+        return run_with_optional_loop(
+            command="run",
+            cycle_fn=lambda: run_cycle(settings, force_dry_run=args.dry_run),
+            loop_enabled=args.loop and not args.once,
+            cycle_seconds=args.cycle_seconds,
+            max_cycles=args.max_cycles,
+            jitter_seconds=args.jitter_seconds,
+        )
 
     if args.command == "stage4-run":
-        return run_cycle_stage4(settings, force_dry_run=args.dry_run)
+        return run_with_optional_loop(
+            command="stage4-run",
+            cycle_fn=lambda: run_cycle_stage4(settings, force_dry_run=args.dry_run),
+            loop_enabled=args.loop and not args.once,
+            cycle_seconds=args.cycle_seconds,
+            max_cycles=args.max_cycles,
+            jitter_seconds=args.jitter_seconds,
+        )
 
     if args.command == "stage7-run":
         return run_cycle_stage7(
@@ -312,8 +351,131 @@ def main() -> int:
     return 1
 
 
+def run_with_optional_loop(
+    *,
+    command: str,
+    cycle_fn: Callable[[], int],
+    loop_enabled: bool,
+    cycle_seconds: int,
+    max_cycles: int | None,
+    jitter_seconds: int,
+) -> int:
+    if cycle_seconds < 0 or jitter_seconds < 0:
+        print("cycle-seconds and jitter-seconds must be >= 0")
+        return 2
+    if max_cycles is not None and max_cycles < 1:
+        print("max-cycles must be >= 1")
+        return 2
+
+    if not loop_enabled:
+        return cycle_fn()
+
+    cycle = 0
+    last_rc = 0
+    logger.info(
+        "loop_runner_started",
+        extra={
+            "extra": {
+                "command": command,
+                "cycle_seconds": cycle_seconds,
+                "max_cycles": max_cycles,
+                "jitter_seconds": jitter_seconds,
+            }
+        },
+    )
+    try:
+        while True:
+            cycle += 1
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    last_rc = cycle_fn()
+                    break
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if attempt >= 3:
+                        logger.exception(
+                            "loop_cycle_failed",
+                            extra={
+                                "extra": {
+                                    "command": command,
+                                    "cycle": cycle,
+                                    "attempt": attempt,
+                                    "error_type": type(exc).__name__,
+                                }
+                            },
+                        )
+                        last_rc = 1
+                        break
+                    backoff = min(8, 2 ** (attempt - 1))
+                    logger.warning(
+                        "loop_cycle_retrying",
+                        extra={
+                            "extra": {
+                                "command": command,
+                                "cycle": cycle,
+                                "attempt": attempt,
+                                "sleep_seconds": backoff,
+                                "error_type": type(exc).__name__,
+                            }
+                        },
+                    )
+                    time.sleep(backoff)
+
+            if max_cycles is not None and cycle >= max_cycles:
+                logger.info(
+                    "loop_runner_completed",
+                    extra={"extra": {"command": command, "cycles": cycle, "last_rc": last_rc}},
+                )
+                return last_rc
+
+            sleep_for = cycle_seconds + (
+                random.randint(0, jitter_seconds) if jitter_seconds > 0 else 0
+            )
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        logger.info(
+            "loop_runner_stopped",
+            extra={
+                "extra": {
+                    "command": command,
+                    "cycles": cycle,
+                    "last_rc": last_rc,
+                    "reason": "keyboard_interrupt",
+                }
+            },
+        )
+        return last_rc
+
+
+def _log_arm_check(settings: Settings, *, dry_run: bool) -> None:
+    api_key_present = settings.btcturk_api_key is not None
+    api_secret_present = settings.btcturk_api_secret is not None
+    summary = {
+        "dry_run": dry_run,
+        "LIVE_TRADING": settings.live_trading,
+        "LIVE_TRADING_ACK": settings.live_trading_ack == "I_UNDERSTAND",
+        "KILL_SWITCH": settings.kill_switch,
+        "api_key_present": api_key_present,
+        "api_secret_present": api_secret_present,
+        "armed": (
+            not dry_run
+            and settings.live_trading
+            and settings.live_trading_ack == "I_UNDERSTAND"
+            and not settings.kill_switch
+            and api_key_present
+            and api_secret_present
+        ),
+    }
+    logger.info("arm_check", extra={"extra": summary})
+
+
 def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
     dry_run = force_dry_run or settings.dry_run
+    _log_arm_check(settings, dry_run=dry_run)
     live_block_reason = validate_live_side_effects_policy(
         dry_run=dry_run,
         kill_switch=settings.kill_switch,
@@ -444,6 +606,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
 
 def run_cycle_stage4(settings: Settings, force_dry_run: bool = False) -> int:
     dry_run = force_dry_run or settings.dry_run
+    _log_arm_check(settings, dry_run=dry_run)
     live_block_reason = validate_live_side_effects_policy(
         dry_run=dry_run,
         kill_switch=settings.kill_switch,

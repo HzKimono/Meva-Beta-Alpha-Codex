@@ -51,3 +51,13 @@ def test_setup_logging_debug_enables_http_debug() -> None:
 
     assert logging.getLogger("httpx").level == logging.DEBUG
     assert logging.getLogger("httpcore").level == logging.DEBUG
+
+
+def test_setup_logging_respects_http_env_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("HTTPX_LOG_LEVEL", "ERROR")
+    monkeypatch.setenv("HTTPCORE_LOG_LEVEL", "CRITICAL")
+
+    setup_logging("INFO")
+
+    assert logging.getLogger("httpx").level == logging.ERROR
+    assert logging.getLogger("httpcore").level == logging.CRITICAL

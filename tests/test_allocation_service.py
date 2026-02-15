@@ -339,3 +339,46 @@ def test_counters_include_status_and_reason_breakdown() -> None:
     assert result.counters["rejected_min_notional"] == 1
     assert result.counters["rejected_no_position"] == 1
     assert result.counters["rejected_not_implemented_in_pr3"] == 1
+
+
+def test_small_try_balance_ceil_to_min_notional_when_caps_allow() -> None:
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("20"))],
+        balances={"TRY": Decimal("1712")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100000")},
+        knobs=AllocationKnobs(
+            target_try_cash=Decimal("0"),
+            min_order_notional_try=Decimal("50"),
+            max_total_notional_try_per_cycle=Decimal("100"),
+            max_position_try_per_symbol=Decimal("100"),
+        ),
+    )
+
+    assert len(result.actions) == 1
+    assert result.actions[0].notional_try == Decimal("50")
+    assert result.decisions[0].status in {"scaled", "accepted"}
+
+
+def test_small_try_balance_rejects_with_blocking_cap_diagnostics() -> None:
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("20"))],
+        balances={"TRY": Decimal("1712")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100000")},
+        knobs=AllocationKnobs(
+            target_try_cash=Decimal("1700"),
+            min_order_notional_try=Decimal("50"),
+            max_total_notional_try_per_cycle=Decimal("30"),
+            max_position_try_per_symbol=Decimal("100"),
+        ),
+    )
+
+    assert len(result.actions) == 0
+    assert result.decisions[0].reason in {"cash_target", "min_notional"}
+    assert result.decisions[0].diagnostics is not None
+    assert result.decisions[0].diagnostics["blocking_cap"] in {
+        "cash_target",
+        "cycle_notional_cap",
+        "max_position_exposure_cap",
+    }

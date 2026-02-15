@@ -47,6 +47,14 @@ def _resolve_log_level(level: str | int | None) -> int:
     return resolved if isinstance(resolved, int) else logging.INFO
 
 
+def _resolve_named_level_from_env(env_name: str, default_level: int) -> int:
+    raw = os.getenv(env_name)
+    if raw is None or not raw.strip():
+        return default_level
+    resolved = logging.getLevelName(raw.strip().upper())
+    return resolved if isinstance(resolved, int) else default_level
+
+
 def setup_logging(level: str | int | None = None) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
@@ -57,11 +65,14 @@ def setup_logging(level: str | int | None = None) -> None:
     root.setLevel(resolved_level)
 
     if resolved_level <= logging.DEBUG:
-        httpx_level = logging.DEBUG
-        httpcore_level = logging.DEBUG
+        default_httpx_level = logging.DEBUG
+        default_httpcore_level = logging.DEBUG
     else:
-        httpx_level = logging.INFO
-        httpcore_level = logging.WARNING
+        default_httpx_level = logging.INFO
+        default_httpcore_level = logging.WARNING
+
+    httpx_level = _resolve_named_level_from_env("HTTPX_LOG_LEVEL", default_httpx_level)
+    httpcore_level = _resolve_named_level_from_env("HTTPCORE_LOG_LEVEL", default_httpcore_level)
 
     logging.getLogger("httpx").setLevel(httpx_level)
     logging.getLogger("httpcore").setLevel(httpcore_level)
