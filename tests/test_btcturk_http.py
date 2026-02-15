@@ -18,9 +18,11 @@ from btcbot.adapters.btcturk_http import (
 )
 from btcbot.domain.models import ExchangeError, OrderSide
 
+
 class DummyResponse:
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
+
 
 def test_should_retry_on_429_and_5xx() -> None:
     req = httpx.Request("GET", "https://example.com")
@@ -45,6 +47,7 @@ def test_should_retry_on_429_and_5xx() -> None:
     assert _should_retry(server_error) is True
     assert _should_retry(client_error) is False
 
+
 def test_get_orderbook_parses_valid_payload(monkeypatch) -> None:
     client = BtcturkHttpClient()
 
@@ -60,6 +63,7 @@ def test_get_orderbook_parses_valid_payload(monkeypatch) -> None:
     assert bid == 100.25
     assert ask == 100.5
     client.close()
+
 
 @pytest.mark.parametrize(
     "payload",
@@ -78,6 +82,7 @@ def test_get_orderbook_rejects_malformed_payloads(monkeypatch, payload: dict) ->
     with pytest.raises(ValueError):
         client.get_orderbook("BTC_TRY")
     client.close()
+
 
 def test_get_balances_parses_comma_decimal_values() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -117,6 +122,7 @@ def test_get_balances_parses_comma_decimal_values() -> None:
     assert Decimal(str(balances[0].free)) == Decimal("95.25")
     assert Decimal(str(balances[0].locked)) == Decimal("5.25")
     client.close()
+
 
 def test_get_open_orders_parses_bids_and_asks() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -183,6 +189,7 @@ def test_get_open_orders_parses_bids_and_asks() -> None:
     assert str(open_orders.asks[0].quantity) == "0.02"
     client.close()
 
+
 def test_private_methods_raise_configuration_error_when_credentials_missing() -> None:
     client = BtcturkHttpClient()
 
@@ -193,6 +200,7 @@ def test_private_methods_raise_configuration_error_when_credentials_missing() ->
 
     client.close()
 
+
 def test_write_private_endpoints_require_credentials() -> None:
     client = BtcturkHttpClient()
 
@@ -202,6 +210,7 @@ def test_write_private_endpoints_require_credentials() -> None:
         client.place_limit_order("BTC_TRY", side=OrderSide.BUY, price=1.0, quantity=1.0)
 
     client.close()
+
 
 def test_private_get_uses_deterministic_signature_headers() -> None:
     api_key = "demo-key"
@@ -244,6 +253,7 @@ def test_private_get_uses_deterministic_signature_headers() -> None:
     assert seen_headers["x-signature"] == expected_signature
     client.close()
 
+
 def test_next_stamp_ms_is_monotonic(monkeypatch) -> None:
     client = BtcturkHttpClient(api_key="k", api_secret="c2VjcmV0")
 
@@ -257,6 +267,7 @@ def test_next_stamp_ms_is_monotonic(monkeypatch) -> None:
     assert second == first + 1
     assert third >= second + 1
     client.close()
+
 
 def test_order_snapshot_side_prefers_order_method_over_method() -> None:
     client = BtcturkHttpClient()
@@ -274,6 +285,7 @@ def test_order_snapshot_side_prefers_order_method_over_method() -> None:
     )
     assert snapshot.side == OrderSide.BUY
 
+
 def test_order_snapshot_side_unknown_when_fields_absent() -> None:
     client = BtcturkHttpClient()
     snapshot = client._to_order_snapshot(
@@ -289,6 +301,7 @@ def test_order_snapshot_side_unknown_when_fields_absent() -> None:
     )
     assert snapshot.side is None
 
+
 def test_should_retry_on_timeout_and_transport_errors() -> None:
     req = httpx.Request("GET", "https://example.com")
 
@@ -298,8 +311,10 @@ def test_should_retry_on_timeout_and_transport_errors() -> None:
     assert _should_retry(timeout) is True
     assert _should_retry(transport) is True
 
+
 def test_should_not_retry_on_non_transient_errors() -> None:
     assert _should_retry(ValueError("bad payload")) is False
+
 
 def test_public_get_retries_429_using_retry_after_header(monkeypatch) -> None:
     calls = {"count": 0}
@@ -334,6 +349,7 @@ def test_public_get_retries_429_using_retry_after_header(monkeypatch) -> None:
     assert sleeps == [1.5]
     client.close()
 
+
 def test_private_write_request_is_not_retried() -> None:
     calls = {"count": 0}
 
@@ -356,12 +372,14 @@ def test_private_write_request_is_not_retried() -> None:
     assert calls["count"] == 1
     client.close()
 
+
 def test_should_not_retry_on_permanent_transport_error() -> None:
     req = httpx.Request("GET", "https://example.com")
     cert_error = httpx.ConnectError("cert failed", request=req)
     cert_error.__cause__ = ssl.SSLCertVerificationError("hostname mismatch")
 
     assert _should_retry(cert_error) is False
+
 
 def test_stage4_open_order_parser_is_decimal_native() -> None:
     client = BtcturkHttpClient()
@@ -385,6 +403,7 @@ def test_stage4_open_order_parser_is_decimal_native() -> None:
     assert isinstance(parsed.qty, Decimal)
     assert parsed.price == Decimal("27223.7283")
     assert parsed.qty == Decimal("0.0100")
+
 
 def test_stage4_list_open_orders_does_not_bridge_to_stage3_list() -> None:
     class SpyClient(BtcturkHttpClient):
@@ -433,6 +452,7 @@ def test_stage4_list_open_orders_does_not_bridge_to_stage3_list() -> None:
     assert orders[0].qty == Decimal("0.2")
     client.close()
 
+
 def test_extract_fill_rows_accepts_empty_payload_variants() -> None:
     client = BtcturkHttpClient()
     payloads = [
@@ -446,13 +466,18 @@ def test_extract_fill_rows_accepts_empty_payload_variants() -> None:
     for payload in payloads:
         assert client._extract_fill_rows(payload, path="/api/v1/users/transactions/trade") == []
 
+
 def test_extract_fill_rows_treats_missing_list_keys_as_empty_for_fills() -> None:
     client = BtcturkHttpClient()
 
-    assert client._extract_fill_rows(
-        {"success": True, "data": {"page": 1, "total": 0}},
-        path="/api/v1/users/transactions/trade",
-    ) == []
+    assert (
+        client._extract_fill_rows(
+            {"success": True, "data": {"page": 1, "total": 0}},
+            path="/api/v1/users/transactions/trade",
+        )
+        == []
+    )
+
 
 def test_extract_fill_rows_parses_normal_payload() -> None:
     client = BtcturkHttpClient()
@@ -463,6 +488,7 @@ def test_extract_fill_rows_parses_normal_payload() -> None:
     )
 
     assert rows == [{"id": "1", "orderId": "2"}]
+
 
 def test_stage4_recent_fills_uses_deterministic_fallback_when_unique_fill_id_missing() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -503,6 +529,7 @@ def test_stage4_recent_fills_uses_deterministic_fallback_when_unique_fill_id_mis
     assert len(fills[0].fill_id) == 64
     client.close()
 
+
 def test_stage4_open_order_parser_handles_side_variants() -> None:
     client = BtcturkHttpClient()
     for payload in (
@@ -541,15 +568,18 @@ def test_stage4_open_order_parser_handles_side_variants() -> None:
         )
         assert parsed is not None
 
+
 def test_stage4_list_open_orders_requires_symbol() -> None:
     client = BtcturkHttpClientStage4(BtcturkHttpClient())
     with pytest.raises(ConfigurationError):
         client.list_open_orders()
 
+
 def test_cancel_order_by_exchange_id_rejects_non_numeric() -> None:
     client = BtcturkHttpClient(api_key="k", api_secret="c2VjcmV0")
     with pytest.raises(ExchangeError):
         client.cancel_order_by_exchange_id("not-a-number")
+
 
 def test_stage4_recent_fills_fallback_id_is_deterministic() -> None:
     def handler(request: httpx.Request) -> httpx.Response:

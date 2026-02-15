@@ -11,6 +11,7 @@ from btcbot.domain.models import OrderSide, PairInfo
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
+
 class FakeExchange:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -73,6 +74,7 @@ class FakeExchange:
     def close(self) -> None:
         self.calls.append("close")
 
+
 def test_runner_writes_audit_with_mandatory_counts(monkeypatch, tmp_path) -> None:
     runner = Stage4CycleRunner()
     exchange = FakeExchange()
@@ -119,6 +121,7 @@ def test_runner_writes_audit_with_mandatory_counts(monkeypatch, tmp_path) -> Non
     assert envelope["command"] == "stage4-run"
     assert envelope["symbols"] == ["BTCTRY"]
 
+
 def test_runner_per_symbol_failure_is_non_fatal(monkeypatch, tmp_path) -> None:
     runner = Stage4CycleRunner()
     exchange = FakeExchange()
@@ -141,6 +144,7 @@ def test_runner_per_symbol_failure_is_non_fatal(monkeypatch, tmp_path) -> None:
         SYMBOLS="BTC_TRY,ETH_TRY",
     )
     assert runner.run_one_cycle(settings) == 0
+
 
 def test_runner_order_of_stage4_pipeline(monkeypatch, tmp_path) -> None:
     order: list[str] = []
@@ -236,6 +240,7 @@ def test_runner_order_of_stage4_pipeline(monkeypatch, tmp_path) -> None:
         "execution",
     ]
 
+
 def test_no_fill_history_does_not_warn_or_mark_cursor_stall(monkeypatch, tmp_path, caplog) -> None:
     class NoFillsExchange(FakeExchange):
         def get_recent_fills(self, symbol: str, since_ms: int | None = None):
@@ -269,6 +274,7 @@ def test_no_fill_history_does_not_warn_or_mark_cursor_stall(monkeypatch, tmp_pat
     codes = {str(row["code"]) for row in rows}
     assert "CURSOR_STALL" not in codes
 
+
 def test_runner_uses_normalized_cursor_keys(monkeypatch, tmp_path) -> None:
     runner = Stage4CycleRunner()
     exchange = FakeExchange()
@@ -291,6 +297,7 @@ def test_runner_uses_normalized_cursor_keys(monkeypatch, tmp_path) -> None:
             "SELECT key FROM cursors WHERE key LIKE 'fills_cursor:%' ORDER BY key"
         ).fetchall()
     assert [row["key"] for row in rows] == ["fills_cursor:BTCTRY"]
+
 
 def test_cursor_advances_when_new_fills_arrive(monkeypatch, tmp_path) -> None:
     class AdvancingExchange(FakeExchange):
