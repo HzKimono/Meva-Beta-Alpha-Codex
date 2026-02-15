@@ -214,7 +214,9 @@ Evidence basis for table scope: gate logic, risk, OMS, ledger invariants, and sa
 9. **Secret redaction tests green** for adapter errors. (`src/btcbot/adapters/btcturk_http.py` L136-L155, L291-L293)
 10. **Default env remains safe** in templates/docs (`DRY_RUN=true`, `KILL_SWITCH=true`). (`.env.example` L6-L11)
 
----
+**External Integrations**
+- BTCTurk HTTP (public + private endpoints via `BtcturkHttpClient`)
+- Replay file datasets (`candles/`, `orderbook/`, `ticker/`) for backtest/replay modes
 
 ## GAP Summary + Minimal Fix Approach (no code edits here)
 
