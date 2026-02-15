@@ -25,8 +25,8 @@ class AllocationKnobs:
     # Definitions:
     # - cash_try: available TRY from balances
     # - target_try_cash: reserve floor that should remain after estimated fees
-    # - try_cash_max: optional guardrail for maximum TRY considered for deployment
-    # - investable_total_try: max(0, min(cash_try, try_cash_max?) - target_try_cash)
+    # - try_cash_max: optional guardrail for maximum TRY deployable in this cycle
+    # - investable_total_try: max(0, cash_try - target_try_cash)
     # - investable_this_cycle_try: policy-constrained portion of investable_total_try
     # - deploy_budget_try: notional budget that can be spent while keeping fee buffer
     target_try_cash: Decimal = Decimal("300")
@@ -67,10 +67,7 @@ class AllocationService:
         counters: dict[str, int] = {}
 
         cash_try = normalized_balances.get("TRY", Decimal("0"))
-        effective_cash_try = (
-            min(cash_try, knobs.try_cash_max) if knobs.try_cash_max > Decimal("0") else cash_try
-        )
-        investable_total_try = max(effective_cash_try - knobs.target_try_cash, Decimal("0"))
+        investable_total_try = max(cash_try - knobs.target_try_cash, Decimal("0"))
         investable_this_cycle_try, usage_reason = _resolve_investable_budget(
             investable_total_try, knobs
         )
@@ -340,14 +337,29 @@ class AllocationService:
 def _resolve_investable_budget(
     investable_total_try: Decimal, knobs: AllocationKnobs
 ) -> tuple[Decimal, str]:
+    investable_this_cycle_try = investable_total_try
+    usage_parts: list[str] = []
+
     mode = knobs.investable_usage_mode.strip().lower()
     if mode == "fraction":
         fraction = min(max(knobs.investable_usage_fraction, Decimal("0")), Decimal("1"))
-        return investable_total_try * fraction, f"fraction:{fraction}"
-    if mode == "cap":
+        investable_this_cycle_try = investable_this_cycle_try * fraction
+        usage_parts.append(f"fraction:{fraction}")
+    elif mode == "cap":
         cap = max(knobs.max_try_per_cycle, Decimal("0"))
-        return min(investable_total_try, cap), f"cap:{cap}"
-    return investable_total_try, "use_all"
+        investable_this_cycle_try = min(investable_this_cycle_try, cap)
+        usage_parts.append(f"cap:{cap}")
+    else:
+        usage_parts.append("use_all")
+
+    if knobs.try_cash_max > Decimal("0"):
+        try_cash_max_investable = max(knobs.try_cash_max - knobs.target_try_cash, Decimal("0"))
+        capped = min(investable_this_cycle_try, try_cash_max_investable)
+        if capped != investable_this_cycle_try:
+            usage_parts.append(f"try_cash_max:{knobs.try_cash_max}")
+        investable_this_cycle_try = capped
+
+    return investable_this_cycle_try, ",".join(usage_parts)
 
 
 def _resolve_fee_buffer_ratio(knobs: AllocationKnobs) -> Decimal:

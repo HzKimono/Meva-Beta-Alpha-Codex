@@ -2558,6 +2558,19 @@ class StateStore:
         payload["decisions"] = json.loads(str(payload.pop("decisions_json")))
         return payload
 
+    def get_latest_allocation_plan(self) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM allocation_plans ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        payload = {key: row[key] for key in row.keys()}
+        payload["plan"] = json.loads(str(payload.pop("plan_json")))
+        payload["deferred"] = json.loads(str(payload.pop("deferred_json") or "[]"))
+        payload["decisions"] = json.loads(str(payload.pop("decisions_json")))
+        return payload
+
     def record_cycle_audit(
         self,
         cycle_id: str,
