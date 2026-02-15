@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from btcbot import cli
 from btcbot.config import Settings
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType
-from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, PnLSnapshot
+from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.services.anomaly_detector_service import AnomalyDetectorService
 from btcbot.services.ledger_service import LedgerService, PnlReport
 from btcbot.services.state_store import StateStore
