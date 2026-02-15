@@ -3,14 +3,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+
+@dataclass
+class MonotonicNonceGenerator:
+    now_ms_fn: Callable[[], int] = field(default_factory=lambda: (lambda: int(time.time() * 1000)))
+    _last_stamp_ms: int | None = None
+
+    def next_stamp_ms(self) -> int:
+        now_ms = int(self.now_ms_fn())
+        if self._last_stamp_ms is not None:
+            now_ms = max(now_ms, self._last_stamp_ms + 1)
+        self._last_stamp_ms = now_ms
+        return now_ms
 
 
 def compute_signature(api_key: str, api_secret: str, stamp_ms: int | str) -> str:
-    """Compute BTCTurk V1 HMAC-SHA256 signature.
-
-    Signature message is ``api_key + stamp_ms`` where stamp_ms is nonce milliseconds.
-    The API secret is expected as base64 text.
-    """
     try:
         secret = base64.b64decode(api_secret, validate=True)
     except Exception as exc:  # noqa: BLE001
@@ -22,7 +33,6 @@ def compute_signature(api_key: str, api_secret: str, stamp_ms: int | str) -> str
 
 
 def build_auth_headers(api_key: str, api_secret: str, stamp_ms: int | str) -> dict[str, str]:
-    """Build BTCTurk V1 auth headers for private endpoints (placeholder for Stage 1)."""
     stamp = str(stamp_ms)
     return {
         "X-PCK": api_key,

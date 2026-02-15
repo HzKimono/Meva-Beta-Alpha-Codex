@@ -51,6 +51,12 @@ class AllocationResult:
     actions: tuple[SizedAction, ...]
     decisions: tuple[AllocationDecision, ...]
     counters: Mapping[str, int]
+    cash_try: Decimal = Decimal("0")
+    cash_target_try: Decimal = Decimal("0")
+    investable_try: Decimal = Decimal("0")
+    planned_total_try: Decimal = Decimal("0")
+    unused_investable_try: Decimal = Decimal("0")
+    investable_usage_reason: str = "none"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "actions", tuple(self.actions))

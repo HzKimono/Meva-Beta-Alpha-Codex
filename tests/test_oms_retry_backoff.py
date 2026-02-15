@@ -49,3 +49,31 @@ def test_non_retryable_has_no_retries() -> None:
         )
 
     assert calls["count"] == 1
+
+
+def test_retry_honors_retry_after_header_on_429() -> None:
+    class RetryAfterError(Exception):
+        pass
+
+    calls = {"count": 0}
+    sleeps: list[float] = []
+
+    def _fn() -> str:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RetryAfterError("429")
+        return "ok"
+
+    value = retry_with_backoff(
+        _fn,
+        max_attempts=3,
+        base_delay_ms=100,
+        max_delay_ms=5000,
+        jitter_seed=1,
+        retry_on_exceptions=(RetryAfterError,),
+        retry_after_getter=lambda _exc: "2",
+        sleep_fn=sleeps.append,
+    )
+
+    assert value == "ok"
+    assert sleeps == [2.0]

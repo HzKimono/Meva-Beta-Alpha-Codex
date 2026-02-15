@@ -215,3 +215,64 @@ def test_stage7_parity_missing_tables_does_not_crash(tmp_path: Path, capsys) -> 
     out = capsys.readouterr().out
     assert code == 0
     assert "missing Stage7 parity tables" in out
+
+
+def test_stage7_report_prints_no_trade_reason_and_allocation_summary(
+    capsys, tmp_path: Path
+) -> None:
+    settings = Settings(STATE_DB_PATH=str(tmp_path / "s7.db"))
+    store = StateStore(db_path=settings.state_db_path)
+    _seed_metrics(store)
+    store.save_stage7_run_metrics(
+        "c2",
+        {
+            "ts": "2024-01-01T00:01:00+00:00",
+            "run_id": "r2",
+            "mode_base": "NORMAL",
+            "mode_final": "NORMAL",
+            "universe_size": 1,
+            "intents_planned_count": 0,
+            "intents_skipped_count": 1,
+            "oms_submitted_count": 0,
+            "oms_filled_count": 0,
+            "oms_rejected_count": 0,
+            "oms_canceled_count": 0,
+            "events_appended": 0,
+            "events_ignored": 0,
+            "equity_try": "100",
+            "gross_pnl_try": "0",
+            "net_pnl_try": "0",
+            "fees_try": "0",
+            "slippage_try": "0",
+            "max_drawdown_pct": "0",
+            "turnover_try": "0",
+            "latency_ms_total": 1,
+            "selection_ms": 0,
+            "planning_ms": 0,
+            "intents_ms": 0,
+            "oms_ms": 0,
+            "ledger_ms": 0,
+            "persist_ms": 0,
+            "quality_flags": {},
+            "alert_flags": {},
+            "no_trades_reason": "DRY_RUN",
+            "no_metrics_reason": "NO_TRADES",
+        },
+    )
+    store.save_allocation_plan(
+        cycle_id="c2",
+        ts=__import__("datetime").datetime.now(__import__("datetime").UTC),
+        cash_try=__import__("decimal").Decimal("500"),
+        cash_target_try=__import__("decimal").Decimal("300"),
+        investable_try=__import__("decimal").Decimal("200"),
+        planned_total_try=__import__("decimal").Decimal("0"),
+        unused_investable_try=__import__("decimal").Decimal("200"),
+        usage_reason="use_all",
+        plan=[],
+        decisions=[],
+    )
+
+    assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5) == 0
+    out = capsys.readouterr().out
+    assert "DRY_RUN" in out
+    assert "allocation_plan=investable_try=200" in out

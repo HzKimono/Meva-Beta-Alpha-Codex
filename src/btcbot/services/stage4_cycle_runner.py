@@ -283,46 +283,56 @@ class Stage4CycleRunner:
                 bootstrap_enabled=settings.stage4_bootstrap_intents,
                 live_mode=live_mode,
             )
-            total_try_cash = try_cash
-            capped_cash = (
-                min(total_try_cash, settings.try_cash_max)
-                if settings.try_cash_max > Decimal("0")
-                else total_try_cash
-            )
-            investable_try = max(Decimal("0"), capped_cash - settings.try_cash_target)
+            planned_payload = [
+                {
+                    "symbol": item.symbol,
+                    "side": item.side,
+                    "notional_try": str(item.notional_try),
+                    "qty": str(item.qty),
+                    "reason": item.rationale,
+                }
+                for item in decision_report.allocation_actions
+            ]
+            decisions_payload = [
+                {
+                    "symbol": item.symbol,
+                    "status": item.status,
+                    "reason": item.reason,
+                    "requested_notional_try": (
+                        str(item.requested_notional_try)
+                        if item.requested_notional_try is not None
+                        else None
+                    ),
+                }
+                for item in decision_report.allocation_decisions
+            ]
             logger.info(
                 "stage4_allocation_plan",
                 extra={
                     "extra": {
                         "cycle_id": cycle_id,
-                        "cash_target": str(settings.try_cash_target),
-                        "cash_try": str(total_try_cash),
-                        "investable_try": str(investable_try),
-                        "planned": [
-                            {
-                                "symbol": item.symbol,
-                                "side": item.side,
-                                "notional_try": str(item.notional_try),
-                                "qty": str(item.qty),
-                                "reason": item.rationale,
-                            }
-                            for item in decision_report.allocation_actions
-                        ],
-                        "decisions": [
-                            {
-                                "symbol": item.symbol,
-                                "status": item.status,
-                                "reason": item.reason,
-                                "requested_notional_try": (
-                                    str(item.requested_notional_try)
-                                    if item.requested_notional_try is not None
-                                    else None
-                                ),
-                            }
-                            for item in decision_report.allocation_decisions
-                        ],
+                        "cash_target": str(decision_report.cash_target_try),
+                        "cash_try": str(decision_report.cash_try),
+                        "investable_try": str(decision_report.investable_try),
+                        "planned_total_try": str(decision_report.planned_total_try),
+                        "unused_investable_try": str(decision_report.unused_investable_try),
+                        "unused_reason": decision_report.investable_usage_reason,
+                        "planned": planned_payload,
+                        "decisions": decisions_payload,
                     }
                 },
+            )
+            state_store.save_allocation_plan(
+                cycle_id=cycle_id,
+                ts=datetime.now(UTC),
+                cash_try=decision_report.cash_try,
+                cash_target_try=decision_report.cash_target_try,
+                investable_try=decision_report.investable_try,
+                planned_total_try=decision_report.planned_total_try,
+                unused_investable_try=decision_report.unused_investable_try,
+                usage_reason=decision_report.investable_usage_reason,
+                plan=planned_payload,
+                decisions=decisions_payload,
             )
             pipeline_orders = [
                 order

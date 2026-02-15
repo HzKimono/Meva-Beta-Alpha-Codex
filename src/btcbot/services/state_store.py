@@ -448,6 +448,8 @@ class StateStore:
                 persist_ms INTEGER NOT NULL,
                 quality_flags_json TEXT NOT NULL,
                 alert_flags_json TEXT NOT NULL,
+                no_trades_reason TEXT,
+                no_metrics_reason TEXT,
                 run_id TEXT
             )
             """
@@ -486,6 +488,10 @@ class StateStore:
             )
         if "run_id" not in run_metric_columns:
             conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN run_id TEXT")
+        if "no_trades_reason" not in run_metric_columns:
+            conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN no_trades_reason TEXT")
+        if "no_metrics_reason" not in run_metric_columns:
+            conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN no_metrics_reason TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_stage7_run_metrics_ts ON stage7_run_metrics(ts)"
         )
@@ -652,12 +658,12 @@ class StateStore:
                 max_drawdown_pct, max_drawdown_ratio, turnover_try,
                 latency_ms_total, selection_ms, planning_ms, intents_ms,
                 oms_ms, ledger_ms, persist_ms,
-                quality_flags_json, alert_flags_json, run_id
+                quality_flags_json, alert_flags_json, no_trades_reason, no_metrics_reason, run_id
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(cycle_id) DO UPDATE SET
                 ts=excluded.ts,
@@ -693,6 +699,8 @@ class StateStore:
                 persist_ms=excluded.persist_ms,
                 quality_flags_json=excluded.quality_flags_json,
                 alert_flags_json=excluded.alert_flags_json,
+                no_trades_reason=excluded.no_trades_reason,
+                no_metrics_reason=excluded.no_metrics_reason,
                 run_id=excluded.run_id
             """,
             (
@@ -730,6 +738,16 @@ class StateStore:
                 int(metrics_dict["persist_ms"]),
                 json.dumps(metrics_dict["quality_flags"], sort_keys=True),
                 json.dumps(metrics_dict["alert_flags"], sort_keys=True),
+                (
+                    str(metrics_dict.get("no_trades_reason"))
+                    if metrics_dict.get("no_trades_reason") not in (None, "")
+                    else None
+                ),
+                (
+                    str(metrics_dict.get("no_metrics_reason"))
+                    if metrics_dict.get("no_metrics_reason") not in (None, "")
+                    else None
+                ),
                 (
                     str(metrics_dict["run_id"])
                     if metrics_dict.get("run_id") not in (None, "")
@@ -780,6 +798,26 @@ class StateStore:
             record["mode_payload"] = json.loads(str(record.get("mode_json") or "{}"))
             exports.append(record)
         return exports
+
+    def get_stage7_cycle_trace(self, cycle_id: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage7_cycle_trace WHERE cycle_id = ?",
+                (cycle_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = {key: row[key] for key in row.keys()}
+        payload["selected_universe"] = json.loads(
+            str(payload.pop("selected_universe_json") or "[]")
+        )
+        payload["universe_scores"] = json.loads(str(payload.pop("universe_scores_json") or "[]"))
+        payload["intents_summary"] = json.loads(str(payload.pop("intents_summary_json") or "{}"))
+        payload["mode_payload"] = json.loads(str(payload.pop("mode_json") or "{}"))
+        payload["order_decisions"] = json.loads(str(payload.pop("order_decisions_json") or "[]"))
+        payload["portfolio_plan"] = json.loads(str(payload.pop("portfolio_plan_json") or "{}"))
+        payload["order_intents"] = json.loads(str(payload.pop("order_intents_json") or "[]"))
+        return payload
 
     def save_stage7_cycle(
         self,
@@ -1447,6 +1485,23 @@ class StateStore:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS allocation_plans (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                cash_try TEXT NOT NULL,
+                cash_target_try TEXT NOT NULL,
+                investable_try TEXT NOT NULL,
+                planned_total_try TEXT NOT NULL,
+                unused_investable_try TEXT NOT NULL,
+                usage_reason TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                decisions_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_allocation_plans_ts ON allocation_plans(ts)")
         cycle_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(cycle_audit)")}
         if "envelope_json" not in cycle_columns:
             conn.execute("ALTER TABLE cycle_audit ADD COLUMN envelope_json TEXT")
@@ -2395,6 +2450,66 @@ class StateStore:
         if peak <= 0:
             return Decimal("0")
         return max(Decimal("0"), ((peak - equity_now) / peak) * Decimal("100"))
+
+    def save_allocation_plan(
+        self,
+        *,
+        cycle_id: str,
+        ts: datetime,
+        cash_try: Decimal,
+        cash_target_try: Decimal,
+        investable_try: Decimal,
+        planned_total_try: Decimal,
+        unused_investable_try: Decimal,
+        usage_reason: str,
+        plan: list[dict[str, object]],
+        decisions: list[dict[str, object]],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO allocation_plans(
+                    cycle_id, ts, cash_try, cash_target_try, investable_try,
+                    planned_total_try, unused_investable_try, usage_reason,
+                    plan_json, decisions_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts=excluded.ts,
+                    cash_try=excluded.cash_try,
+                    cash_target_try=excluded.cash_target_try,
+                    investable_try=excluded.investable_try,
+                    planned_total_try=excluded.planned_total_try,
+                    unused_investable_try=excluded.unused_investable_try,
+                    usage_reason=excluded.usage_reason,
+                    plan_json=excluded.plan_json,
+                    decisions_json=excluded.decisions_json
+                """,
+                (
+                    cycle_id,
+                    ensure_utc(ts).isoformat(),
+                    str(cash_try),
+                    str(cash_target_try),
+                    str(investable_try),
+                    str(planned_total_try),
+                    str(unused_investable_try),
+                    usage_reason,
+                    json.dumps(plan, sort_keys=True),
+                    json.dumps(decisions, sort_keys=True),
+                ),
+            )
+
+    def get_allocation_plan(self, cycle_id: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM allocation_plans WHERE cycle_id = ?",
+                (cycle_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = {key: row[key] for key in row.keys()}
+        payload["plan"] = json.loads(str(payload.pop("plan_json")))
+        payload["decisions"] = json.loads(str(payload.pop("decisions_json")))
+        return payload
 
     def record_cycle_audit(
         self,
