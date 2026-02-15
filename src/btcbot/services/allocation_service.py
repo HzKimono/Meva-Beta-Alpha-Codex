@@ -22,10 +22,18 @@ REASON_POSITION_VALUE_CAP: ReasonCode = "position_value_cap"
 
 @dataclass(frozen=True)
 class AllocationKnobs:
+    # Definitions:
+    # - cash_try: available TRY from balances
+    # - target_try_cash: reserve floor that should remain after estimated fees
+    # - try_cash_max: optional guardrail for maximum TRY considered for deployment
+    # - investable_total_try: max(0, min(cash_try, try_cash_max?) - target_try_cash)
+    # - investable_this_cycle_try: policy-constrained portion of investable_total_try
+    # - deploy_budget_try: notional budget that can be spent while keeping fee buffer
     target_try_cash: Decimal = Decimal("300")
     try_cash_max: Decimal = Decimal("0")
     min_order_notional_try: Decimal = Decimal("10")
     fee_buffer_bps: Decimal = Decimal("0")
+    fee_buffer_ratio: Decimal = Decimal("0")
     max_intent_notional_try: Decimal = Decimal("0")
     max_position_try_per_symbol: Decimal = Decimal("0")
     max_total_notional_try_per_cycle: Decimal = Decimal("0")
@@ -58,17 +66,23 @@ class AllocationService:
         actions: list[SizedAction] = []
         counters: dict[str, int] = {}
 
-        total_try_cash = normalized_balances.get("TRY", Decimal("0"))
-        capped_cash = (
-            min(total_try_cash, knobs.try_cash_max)
-            if knobs.try_cash_max > Decimal("0")
-            else total_try_cash
+        cash_try = normalized_balances.get("TRY", Decimal("0"))
+        effective_cash_try = (
+            min(cash_try, knobs.try_cash_max) if knobs.try_cash_max > Decimal("0") else cash_try
         )
-        investable_try = max(capped_cash - knobs.target_try_cash, Decimal("0"))
-        budgeted_investable, usage_reason = _resolve_investable_budget(investable_try, knobs)
+        investable_total_try = max(effective_cash_try - knobs.target_try_cash, Decimal("0"))
+        investable_this_cycle_try, usage_reason = _resolve_investable_budget(
+            investable_total_try, knobs
+        )
+        fee_buffer_ratio = _resolve_fee_buffer_ratio(knobs)
+        fee_multiplier = Decimal("1") + fee_buffer_ratio
+        deploy_budget_try = (
+            investable_this_cycle_try / fee_multiplier
+            if fee_multiplier > 0
+            else investable_this_cycle_try
+        )
 
-        fee_multiplier = Decimal("1") + (knobs.fee_buffer_bps / Decimal("10000"))
-        remaining_cash = budgeted_investable
+        remaining_deploy_budget_try = deploy_budget_try
         remaining_cycle_notional = knobs.max_total_notional_try_per_cycle
 
         for intent_index, intent in enumerate(intents):
@@ -140,9 +154,7 @@ class AllocationService:
                     current_position_notional = position.qty * mark_price
 
                 limits = {
-                    REASON_CASH_TARGET: (
-                        remaining_cash / fee_multiplier if fee_multiplier > 0 else remaining_cash
-                    ),
+                    REASON_CASH_TARGET: remaining_deploy_budget_try,
                     REASON_MAX_POSITION_CAP: _max_new_position_notional(
                         current_position_notional, knobs.max_position_try_per_symbol
                     ),
@@ -229,7 +241,7 @@ class AllocationService:
                 "price_used": str(mark_price),
                 "cap_limits": {k: str(v) for k, v in limits.items()},
                 "blocking_cap": None,
-                "fee_buffer_bps": str(knobs.fee_buffer_bps),
+                "fee_buffer_ratio": str(fee_buffer_ratio),
             }
 
             if allocated_notional < knobs.min_order_notional_try:
@@ -303,37 +315,45 @@ class AllocationService:
                 )
             )
             if intent.side == "buy":
-                remaining_cash -= allocated_notional * fee_multiplier
+                remaining_deploy_budget_try -= allocated_notional
             if knobs.max_total_notional_try_per_cycle > Decimal("0"):
                 remaining_cycle_notional -= allocated_notional
 
         planned_total_try = sum(action.notional_try for action in actions if action.side == "buy")
-        unused_investable_try = max(Decimal("0"), investable_try - planned_total_try)
+        unused_budget_try = max(Decimal("0"), deploy_budget_try - planned_total_try)
 
         return AllocationResult(
             actions=tuple(actions),
             decisions=tuple(decisions),
             counters=counters,
-            cash_try=total_try_cash,
-            cash_target_try=knobs.target_try_cash,
-            investable_try=investable_try,
+            cash_try=cash_try,
+            try_cash_target=knobs.target_try_cash,
+            investable_total_try=investable_total_try,
+            investable_this_cycle_try=investable_this_cycle_try,
+            deploy_budget_try=deploy_budget_try,
             planned_total_try=planned_total_try,
-            unused_investable_try=unused_investable_try,
+            unused_budget_try=unused_budget_try,
             investable_usage_reason=usage_reason,
         )
 
 
 def _resolve_investable_budget(
-    investable_try: Decimal, knobs: AllocationKnobs
+    investable_total_try: Decimal, knobs: AllocationKnobs
 ) -> tuple[Decimal, str]:
     mode = knobs.investable_usage_mode.strip().lower()
     if mode == "fraction":
         fraction = min(max(knobs.investable_usage_fraction, Decimal("0")), Decimal("1"))
-        return investable_try * fraction, f"fraction:{fraction}"
+        return investable_total_try * fraction, f"fraction:{fraction}"
     if mode == "cap":
         cap = max(knobs.max_try_per_cycle, Decimal("0"))
-        return min(investable_try, cap), f"cap:{cap}"
-    return investable_try, "use_all"
+        return min(investable_total_try, cap), f"cap:{cap}"
+    return investable_total_try, "use_all"
+
+
+def _resolve_fee_buffer_ratio(knobs: AllocationKnobs) -> Decimal:
+    if knobs.fee_buffer_ratio > Decimal("0"):
+        return max(knobs.fee_buffer_ratio, Decimal("0"))
+    return max(knobs.fee_buffer_bps, Decimal("0")) / Decimal("10000")
 
 
 def _apply_optional_cap(

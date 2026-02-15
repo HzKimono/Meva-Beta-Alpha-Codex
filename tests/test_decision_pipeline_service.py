@@ -214,3 +214,69 @@ def test_universe_respects_multiple_symbols_setting() -> None:
     )
 
     assert report.selected_universe == ("BTCTRY", "ETHTRY")
+
+
+def test_stage4_order_requests_respect_max_orders_per_cycle() -> None:
+    fixed_now = datetime(2024, 1, 1, tzinfo=UTC)
+    service = DecisionPipelineService(
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="BTC_TRY,ETH_TRY,SOL_TRY",
+            MAX_ORDERS_PER_CYCLE=2,
+        ),
+        now_provider=lambda: fixed_now,
+    )
+
+    pair_info = [
+        PairInfo(pairSymbol="BTCTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+        PairInfo(pairSymbol="ETHTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+        PairInfo(pairSymbol="SOLTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+    ]
+
+    report = service.run_cycle(
+        cycle_id="cycle-cap",
+        balances={"TRY": Decimal("2000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("100"), "SOLTRY": Decimal("100")},
+        open_orders=[],
+        pair_info=pair_info,
+        bootstrap_enabled=True,
+        live_mode=False,
+    )
+
+    assert report.mapped_orders_count == 3
+    assert len(report.order_requests) == 2
+    assert len(report.deferred_order_requests) == 1
+
+
+def test_stage4_order_selection_is_deterministic() -> None:
+    fixed_now = datetime(2024, 1, 1, tzinfo=UTC)
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        SYMBOLS="BTC_TRY,ETH_TRY,SOL_TRY",
+        MAX_ORDERS_PER_CYCLE=2,
+    )
+    service = DecisionPipelineService(settings=settings, now_provider=lambda: fixed_now)
+    pair_info = [
+        PairInfo(pairSymbol="BTCTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+        PairInfo(pairSymbol="ETHTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+        PairInfo(pairSymbol="SOLTRY", numeratorScale=4, denominatorScale=2, minTotalAmount=10),
+    ]
+    kwargs = dict(
+        cycle_id="cycle-cap",
+        balances={"TRY": Decimal("2000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("100"), "SOLTRY": Decimal("100")},
+        open_orders=[],
+        pair_info=pair_info,
+        bootstrap_enabled=True,
+        live_mode=False,
+    )
+
+    first = service.run_cycle(**kwargs)
+    second = service.run_cycle(**kwargs)
+
+    assert first.order_requests == second.order_requests
+    assert first.deferred_order_requests == second.deferred_order_requests

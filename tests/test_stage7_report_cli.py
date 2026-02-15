@@ -263,16 +263,21 @@ def test_stage7_report_prints_no_trade_reason_and_allocation_summary(
         cycle_id="c2",
         ts=__import__("datetime").datetime.now(__import__("datetime").UTC),
         cash_try=__import__("decimal").Decimal("500"),
-        cash_target_try=__import__("decimal").Decimal("300"),
-        investable_try=__import__("decimal").Decimal("200"),
+        try_cash_target=__import__("decimal").Decimal("300"),
+        investable_total_try=__import__("decimal").Decimal("200"),
+        investable_this_cycle_try=__import__("decimal").Decimal("200"),
+        deploy_budget_try=__import__("decimal").Decimal("200"),
         planned_total_try=__import__("decimal").Decimal("0"),
-        unused_investable_try=__import__("decimal").Decimal("200"),
+        unused_budget_try=__import__("decimal").Decimal("200"),
         usage_reason="use_all",
-        plan=[],
+        plan=[{"symbol": "BTCTRY", "notional_try": "150", "side": "buy"}],
+        deferred=[{"symbol": "ETHTRY", "reason": "max_orders_per_cycle"}],
         decisions=[],
     )
 
     assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5) == 0
     out = capsys.readouterr().out
     assert "DRY_RUN" in out
-    assert "allocation_plan=investable_try=200" in out
+    assert "allocation_selection=selected=1 deferred=1" in out
+    assert "selected_symbols=BTCTRY:150" in out
+    assert "allocation_plan=investable_total_try=200" in out

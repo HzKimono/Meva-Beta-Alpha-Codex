@@ -876,13 +876,39 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
 
         allocation_plan = store.get_allocation_plan(str(row["cycle_id"]))
         if allocation_plan is not None:
+            plan_items = allocation_plan.get("plan") or []
+            deferred_items = allocation_plan.get("deferred") or []
+            investable_total = allocation_plan.get("investable_total_try") or allocation_plan.get(
+                "investable_try"
+            )
+            unused_budget = allocation_plan.get("unused_budget_try") or allocation_plan.get(
+                "unused_investable_try"
+            )
             print(
                 "  allocation_plan="
-                f"investable_try={allocation_plan.get('investable_try')} "
+                f"investable_total_try={investable_total} "
+                f"investable_this_cycle_try={allocation_plan.get('investable_this_cycle_try')} "
+                f"deploy_budget_try={allocation_plan.get('deploy_budget_try')} "
                 f"planned_total_try={allocation_plan.get('planned_total_try')} "
-                f"unused_investable_try={allocation_plan.get('unused_investable_try')} "
+                f"unused_budget_try={unused_budget} "
                 f"usage_reason={allocation_plan.get('usage_reason')}"
             )
+            print(
+                f"  allocation_selection=selected={len(plan_items)} deferred={len(deferred_items)}"
+            )
+            if plan_items:
+                selected = ", ".join(
+                    f"{item.get('symbol')}:{item.get('notional_try', '-')}" for item in plan_items
+                )
+                print(f"  selected_symbols={selected}")
+            if deferred_items:
+                deferred = ", ".join(
+                    f"{item.get('symbol')}:{item.get('reason', 'deferred')}"
+                    for item in deferred_items
+                )
+                print(f"  deferred_symbols={deferred}")
+            if no_trades_reason in {"-", None, ""} and plan_items:
+                print("  no_trades_reason=NOT_ARMED")
     return 0
 
 

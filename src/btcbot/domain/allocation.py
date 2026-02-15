@@ -52,10 +52,12 @@ class AllocationResult:
     decisions: tuple[AllocationDecision, ...]
     counters: Mapping[str, int]
     cash_try: Decimal = Decimal("0")
-    cash_target_try: Decimal = Decimal("0")
-    investable_try: Decimal = Decimal("0")
+    try_cash_target: Decimal = Decimal("0")
+    investable_total_try: Decimal = Decimal("0")
+    investable_this_cycle_try: Decimal = Decimal("0")
+    deploy_budget_try: Decimal = Decimal("0")
     planned_total_try: Decimal = Decimal("0")
-    unused_investable_try: Decimal = Decimal("0")
+    unused_budget_try: Decimal = Decimal("0")
     investable_usage_reason: str = "none"
 
     def __post_init__(self) -> None:
@@ -66,3 +68,15 @@ class AllocationResult:
             "counters",
             MappingProxyType(dict(sorted(dict(self.counters).items()))),
         )
+
+    @property
+    def cash_target_try(self) -> Decimal:
+        return self.try_cash_target
+
+    @property
+    def investable_try(self) -> Decimal:
+        return self.investable_total_try
+
+    @property
+    def unused_investable_try(self) -> Decimal:
+        return max(Decimal("0"), self.investable_total_try - self.planned_total_try)
