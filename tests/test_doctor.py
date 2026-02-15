@@ -239,4 +239,5 @@ def test_doctor_exchange_rules_reports_actionable_reason(patch_doctor_exchange) 
     report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
 
     messages = [c.message for c in report.checks if c.category == "exchange_rules"]
-    assert any("status=invalid:metadata_invalid" in msg for msg in messages)
+    assert any("status=invalid_metadata:" in msg for msg in messages)
+    assert any("invalid=" in msg and "tick_size" in msg for msg in messages)

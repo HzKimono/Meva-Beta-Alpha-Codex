@@ -87,6 +87,17 @@ class OrderBuilderService:
                 now_utc=now_utc,
             )
 
+        decision = rules.resolve_boundary(symbol)
+        if decision.rules is None:
+            return self._skipped(
+                cycle_id=cycle_id,
+                symbol=symbol,
+                side=side,
+                reason=action.reason,
+                skip_reason=f"rules_unavailable:{decision.resolution.status}",
+                now_utc=now_utc,
+            )
+
         offset_multiplier = Decimal("1") + (offset_bps / Decimal("10000"))
         if side == "BUY":
             offset_multiplier = Decimal("1") - (offset_bps / Decimal("10000"))

@@ -12,6 +12,7 @@ from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.order_state import Stage7Order
 from btcbot.domain.risk_models import RiskDecision, RiskMode
 from btcbot.services import state_store as state_store_module
+from btcbot.services.parity import compute_run_fingerprint
 from btcbot.services.state_store import IdempotencyConflictError, StateStore
 
 
@@ -669,3 +670,78 @@ def test_save_stage7_cycle_error_includes_substep_context(tmp_path) -> None:
     msg = str(exc_info.value)
     assert "save_stage7_cycle failed at run_metrics_upsert" in msg
     assert "cycle_id=diag-cycle run_id=run-1" in msg
+
+
+def test_stage7_schema_upgrade_from_minimal_legacy_db_supports_parity(tmp_path) -> None:
+    db_path = tmp_path / "legacy_minimal.sqlite"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+
+    store = StateStore(db_path=str(db_path))
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+
+    store.save_stage7_cycle(
+        cycle_id="legacy-minimal-1",
+        ts=ts,
+        selected_universe=["BTCTRY"],
+        universe_scores=[],
+        intents_summary={"rules_stats": {}},
+        mode_payload={"base_mode": "NORMAL", "final_mode": "OBSERVE_ONLY"},
+        order_decisions=[],
+        portfolio_plan={},
+        ledger_metrics={
+            "gross_pnl_try": Decimal("0"),
+            "realized_pnl_try": Decimal("0"),
+            "unrealized_pnl_try": Decimal("0"),
+            "net_pnl_try": Decimal("0"),
+            "fees_try": Decimal("0"),
+            "slippage_try": Decimal("0"),
+            "turnover_try": Decimal("0"),
+            "equity_try": Decimal("1000"),
+            "max_drawdown": Decimal("0"),
+        },
+        run_metrics={
+            "ts": ts.isoformat(),
+            "mode_base": "NORMAL",
+            "mode_final": "OBSERVE_ONLY",
+            "universe_size": 1,
+            "intents_planned_count": 0,
+            "intents_skipped_count": 0,
+            "oms_submitted_count": 0,
+            "oms_filled_count": 0,
+            "oms_rejected_count": 0,
+            "oms_canceled_count": 0,
+            "events_appended": 0,
+            "events_ignored": 0,
+            "equity_try": Decimal("1000"),
+            "gross_pnl_try": Decimal("0"),
+            "net_pnl_try": Decimal("0"),
+            "fees_try": Decimal("0"),
+            "slippage_try": Decimal("0"),
+            "max_drawdown_pct": Decimal("0"),
+            "turnover_try": Decimal("0"),
+            "latency_ms_total": 1,
+            "selection_ms": 1,
+            "planning_ms": 1,
+            "intents_ms": 1,
+            "oms_ms": 1,
+            "ledger_ms": 1,
+            "persist_ms": 1,
+            "quality_flags": {},
+            "alert_flags": {},
+            "run_id": "legacy-minimal-run",
+        },
+    )
+
+    exports = store.fetch_stage7_cycles_for_export(limit=5)
+    assert len(exports) == 1
+    assert exports[0]["cycle_id"] == "legacy-minimal-1"
+
+    fingerprint = compute_run_fingerprint(
+        db_path,
+        from_ts=datetime(2024, 1, 1, tzinfo=UTC),
+        to_ts=datetime(2024, 1, 3, tzinfo=UTC),
+    )
+    assert isinstance(fingerprint, str)
+    assert len(fingerprint) == 64
