@@ -411,6 +411,10 @@ class StateStore:
                 oms_filled_count INTEGER NOT NULL,
                 oms_rejected_count INTEGER NOT NULL,
                 oms_canceled_count INTEGER NOT NULL,
+                fills_written_count INTEGER NOT NULL DEFAULT 0,
+                fills_applied_count INTEGER NOT NULL DEFAULT 0,
+                ledger_events_inserted INTEGER NOT NULL DEFAULT 0,
+                positions_updated_count INTEGER NOT NULL DEFAULT 0,
                 events_appended INTEGER NOT NULL,
                 events_ignored INTEGER NOT NULL,
                 equity_try TEXT NOT NULL,
@@ -436,6 +440,26 @@ class StateStore:
         run_metric_columns = {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_run_metrics)")
         }
+        if "fills_written_count" not in run_metric_columns:
+            conn.execute(
+                "ALTER TABLE stage7_run_metrics "
+                "ADD COLUMN fills_written_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "fills_applied_count" not in run_metric_columns:
+            conn.execute(
+                "ALTER TABLE stage7_run_metrics "
+                "ADD COLUMN fills_applied_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "ledger_events_inserted" not in run_metric_columns:
+            conn.execute(
+                "ALTER TABLE stage7_run_metrics "
+                "ADD COLUMN ledger_events_inserted INTEGER NOT NULL DEFAULT 0"
+            )
+        if "positions_updated_count" not in run_metric_columns:
+            conn.execute(
+                "ALTER TABLE stage7_run_metrics "
+                "ADD COLUMN positions_updated_count INTEGER NOT NULL DEFAULT 0"
+            )
         if "run_id" not in run_metric_columns:
             conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN run_id TEXT")
         conn.execute(
@@ -597,6 +621,8 @@ class StateStore:
                 cycle_id, ts, mode_base, mode_final, universe_size,
                 intents_planned_count, intents_skipped_count,
                 oms_submitted_count, oms_filled_count, oms_rejected_count, oms_canceled_count,
+                fills_written_count, fills_applied_count,
+                ledger_events_inserted, positions_updated_count,
                 events_appended, events_ignored,
                 equity_try, gross_pnl_try, net_pnl_try, fees_try, slippage_try,
                 max_drawdown_pct, turnover_try,
@@ -606,7 +632,8 @@ class StateStore:
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?
             )
             ON CONFLICT(cycle_id) DO UPDATE SET
                 ts=excluded.ts,
@@ -619,6 +646,10 @@ class StateStore:
                 oms_filled_count=excluded.oms_filled_count,
                 oms_rejected_count=excluded.oms_rejected_count,
                 oms_canceled_count=excluded.oms_canceled_count,
+                fills_written_count=excluded.fills_written_count,
+                fills_applied_count=excluded.fills_applied_count,
+                ledger_events_inserted=excluded.ledger_events_inserted,
+                positions_updated_count=excluded.positions_updated_count,
                 events_appended=excluded.events_appended,
                 events_ignored=excluded.events_ignored,
                 equity_try=excluded.equity_try,
@@ -651,6 +682,10 @@ class StateStore:
                 int(metrics_dict["oms_filled_count"]),
                 int(metrics_dict["oms_rejected_count"]),
                 int(metrics_dict["oms_canceled_count"]),
+                int(metrics_dict.get("fills_written_count", 0)),
+                int(metrics_dict.get("fills_applied_count", 0)),
+                int(metrics_dict.get("ledger_events_inserted", 0)),
+                int(metrics_dict.get("positions_updated_count", 0)),
                 int(metrics_dict["events_appended"]),
                 int(metrics_dict["events_ignored"]),
                 str(metrics_dict["equity_try"]),
