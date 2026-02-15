@@ -43,6 +43,7 @@ class AllocationDecision:
     reason: ReasonCode
     strategy_id: str
     intent_index: int
+    diagnostics: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

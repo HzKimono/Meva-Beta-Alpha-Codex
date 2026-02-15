@@ -18,6 +18,8 @@ class AccountingIntegrityError(RuntimeError):
 class FetchFillsResult:
     fills: list[Fill]
     cursor_after: str | None
+    last_seen_fill_id: str | None
+    last_seen_ts_ms: int | None
 
 
 class AccountingService:
@@ -37,8 +39,9 @@ class AccountingService:
         since_ms: int | None = None
         lookback_ms = self.lookback_minutes * 60 * 1000
         stored_cursor = self.state_store.get_cursor(cursor_key)
+        cursor_floor_ms = int(stored_cursor) if stored_cursor is not None else 0
         if stored_cursor is not None:
-            since_ms = max(0, int(stored_cursor) - lookback_ms)
+            since_ms = max(0, cursor_floor_ms - lookback_ms)
 
         incoming = self.exchange.get_recent_fills(symbol, since_ms=since_ms)
         if since_ms is None:
@@ -46,7 +49,9 @@ class AccountingService:
             incoming = [fill for fill in incoming if fill.ts >= since_dt]
 
         fills: list[Fill] = []
-        max_ts_ms = since_ms or 0
+        max_ts_ms = cursor_floor_ms
+        last_seen_fill_id: str | None = None
+        last_seen_ts_ms: int | None = None
         for trade_fill in incoming:
             fill_id = (trade_fill.fill_id or "").strip()
             if not fill_id:
@@ -67,10 +72,17 @@ class AccountingService:
                 ts=trade_fill.ts,
             )
             fills.append(fill)
-            max_ts_ms = max(max_ts_ms, int(trade_fill.ts.timestamp() * 1000))
+            ts_ms = int(trade_fill.ts.timestamp() * 1000)
+            max_ts_ms = max(max_ts_ms, ts_ms)
+            if last_seen_ts_ms is None or ts_ms >= last_seen_ts_ms:
+                last_seen_fill_id = fill_id
+                last_seen_ts_ms = ts_ms
 
         return FetchFillsResult(
-            fills=fills, cursor_after=(str(max_ts_ms) if max_ts_ms > 0 else None)
+            fills=fills,
+            cursor_after=(str(max_ts_ms) if max_ts_ms > 0 else None),
+            last_seen_fill_id=last_seen_fill_id,
+            last_seen_ts_ms=last_seen_ts_ms,
         )
 
     def apply_fills(

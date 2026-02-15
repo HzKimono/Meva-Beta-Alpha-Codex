@@ -172,8 +172,8 @@ class DecisionPipelineService:
             knobs=self.settings.universe_knobs(),
         )
         if selected:
-            return selected
-        return list(fallback_symbols)
+            return self._apply_portfolio_targets(selected)
+        return self._apply_portfolio_targets(list(fallback_symbols))
 
     def _generate_intents(
         self,
@@ -267,12 +267,27 @@ class DecisionPipelineService:
                             "reason": item.reason,
                             "strategy_id": item.strategy_id,
                             "intent_index": item.intent_index,
+                            "diagnostics": dict(item.diagnostics) if item.diagnostics else None,
                         }
                         for item in report.allocation_decisions
                     ],
                 }
             },
         )
+
+    def _apply_portfolio_targets(self, selected: list[str]) -> list[str]:
+        raw = self.settings.portfolio_targets
+        if not raw:
+            return selected
+        token = str(raw).strip().lower()
+        if token.startswith("max_n="):
+            try:
+                max_n = int(token.split("=", 1)[1])
+            except ValueError:
+                return selected
+            if max_n > 0:
+                return selected[:max_n]
+        return selected
 
     @staticmethod
     def _to_decimal(value: Decimal | float | int | str) -> Decimal:

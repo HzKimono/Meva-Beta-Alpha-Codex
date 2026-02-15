@@ -66,13 +66,15 @@ class Stage4CycleRunner:
         cycle_id = uuid4().hex
         cycle_now = datetime.now(UTC)
         cycle_started_at = cycle_now
+        pair_info = self._resolve_pair_info(exchange) or []
+        active_symbols = [self.norm(symbol) for symbol in settings.symbols]
 
         envelope = {
             "cycle_id": cycle_id,
             "command": self.command,
             "dry_run": settings.dry_run,
             "live_mode": live_mode,
-            "symbols": sorted(self.norm(symbol) for symbol in settings.symbols),
+            "symbols": sorted(self.norm(symbol) for symbol in active_symbols),
             "timestamp_utc": cycle_now.isoformat(),
         }
 
@@ -116,7 +118,7 @@ class Stage4CycleRunner:
                 ),
             )
 
-            mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, settings.symbols)
+            mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, active_symbols)
             try_cash = self._resolve_try_cash(
                 exchange, fallback=Decimal(str(settings.dry_run_try_balance))
             )
@@ -124,7 +126,7 @@ class Stage4CycleRunner:
             exchange_open_orders: list[Order] = []
             open_order_failures = 0
             failed_symbols: set[str] = set(mark_price_errors)
-            for symbol in settings.symbols:
+            for symbol in active_symbols:
                 normalized = self.norm(symbol)
                 try:
                     exchange_open_orders.extend(exchange.list_open_orders(symbol))
@@ -154,15 +156,31 @@ class Stage4CycleRunner:
             fills_failures = 0
             cursor_before = {
                 self.norm(symbol): state_store.get_cursor(self._fills_cursor_key(symbol))
-                for symbol in settings.symbols
+                for symbol in active_symbols
             }
             cursor_after_by_symbol: dict[str, str] = {}
-            for symbol in settings.symbols:
+            cursor_diag: dict[str, dict[str, object]] = {
+                self.norm(symbol): {
+                    "cursor_before": cursor_before.get(self.norm(symbol)),
+                    "ingested_count": 0,
+                    "last_seen_trade_id": None,
+                    "last_seen_timestamp": None,
+                }
+                for symbol in active_symbols
+            }
+            for symbol in active_symbols:
                 normalized = self.norm(symbol)
                 try:
                     fetched = accounting_service.fetch_new_fills(symbol)
                     fills.extend(fetched.fills)
                     fills_fetched += len(fetched.fills)
+                    cursor_diag[normalized]["ingested_count"] = len(fetched.fills)
+                    cursor_diag[normalized]["last_seen_trade_id"] = getattr(
+                        fetched, "last_seen_fill_id", None
+                    )
+                    cursor_diag[normalized]["last_seen_timestamp"] = getattr(
+                        fetched, "last_seen_ts_ms", None
+                    )
                     if fetched.cursor_after is not None:
                         cursor_after_by_symbol[normalized] = fetched.cursor_after
                 except Exception as exc:  # noqa: BLE001
@@ -197,8 +215,19 @@ class Stage4CycleRunner:
                 raise
             cursor_after = {
                 self.norm(symbol): state_store.get_cursor(self._fills_cursor_key(symbol))
-                for symbol in settings.symbols
+                for symbol in active_symbols
             }
+            for symbol, diag in cursor_diag.items():
+                diag["cursor_after"] = cursor_after.get(symbol)
+                ingested_count = int(diag.get("ingested_count", 0) or 0)
+                diag["deduped_count"] = (
+                    int(ledger_ingest.events_ignored) if ingested_count > 0 else 0
+                )
+                diag["persisted_count"] = max(0, ingested_count - int(diag["deduped_count"]))
+            logger.info(
+                "fills_cursor_diagnostics",
+                extra={"extra": {"cycle_id": cycle_id, "cursor": cursor_diag}},
+            )
             if ledger_ingest.events_ignored > 0:
                 logger.info(
                     "ledger_events_deduped",
@@ -216,8 +245,6 @@ class Stage4CycleRunner:
             current_open_orders = state_store.list_stage4_open_orders()
             positions = state_store.list_stage4_positions()
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}
-            pair_info = self._resolve_pair_info(exchange)
-
             decision_report = decision_pipeline.run_cycle(
                 cycle_id=cycle_id,
                 balances={"TRY": try_cash},
@@ -239,7 +266,7 @@ class Stage4CycleRunner:
             bootstrap_intents, bootstrap_drop_reasons = self._build_intents(
                 cycle_id=cycle_id,
                 symbols=[
-                    symbol for symbol in settings.symbols if self.norm(symbol) not in failed_symbols
+                    symbol for symbol in active_symbols if self.norm(symbol) not in failed_symbols
                 ],
                 mark_prices=mark_prices,
                 try_cash=try_cash,
@@ -653,6 +680,31 @@ class Stage4CycleRunner:
                         }
                     },
                 )
+            reject_breakdown = {
+                key: value
+                for key, value in dict(decision_report.counters).items()
+                if key.startswith("rejected") or key.startswith("scaled")
+            }
+            logger.info(
+                "stage4_cycle_summary",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "mode": ("dry_run" if settings.dry_run else "live"),
+                        "selected_universe": list(decision_report.selected_universe),
+                        "equity_estimate_try": str(pnl_report.equity_estimate),
+                        "intent_count": len(decision_report.intents),
+                        "action_count": len(decision_report.allocation_actions),
+                        "order_request_count": len(decision_report.order_requests),
+                        "submitted": execution_report.submitted,
+                        "canceled": execution_report.canceled,
+                        "simulated": execution_report.simulated,
+                        "rejects_breakdown": reject_breakdown,
+                        "cursor_diagnostics": cursor_diag,
+                        "cycle_duration_ms": updated_cycle_duration_ms,
+                    }
+                },
+            )
             logger.info(
                 "Stage 4 cycle completed", extra={"extra": {"cycle_id": cycle_id, **counts}}
             )

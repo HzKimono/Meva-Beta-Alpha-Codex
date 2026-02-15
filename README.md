@@ -152,6 +152,36 @@ To arm Stage 4 live writes, all of the following must be set:
 
 Canary recommendation: keep low limits (`MAX_OPEN_ORDERS`, `MAX_POSITION_NOTIONAL_TRY`) and start in dry-run first.
 
+## Operator quickstart (Windows PowerShell)
+
+```powershell
+# doctor
+python -m btcbot.cli doctor --db .\btcbot_state.db --dataset .\data
+
+# dry-run single cycle
+python -m btcbot.cli stage4-run --dry-run --once
+
+# dry-run loop (identical planning path, no side effects)
+python -m btcbot.cli stage4-run --dry-run --loop --cycle-seconds 30 --max-cycles 20 --jitter-seconds 2
+
+# live single cycle (all safety gates required)
+$env:DRY_RUN="false"
+$env:KILL_SWITCH="false"
+$env:LIVE_TRADING="true"
+$env:LIVE_TRADING_ACK="I_UNDERSTAND"
+$env:BTCTURK_API_KEY="<key>"
+$env:BTCTURK_API_SECRET="<secret>"
+python -m btcbot.cli stage4-run --once
+
+# live loop
+python -m btcbot.cli stage4-run --loop --cycle-seconds 30 --jitter-seconds 2
+```
+
+Notes:
+- Startup logs include an explicit `arm_check` summary for each live gate.
+- `--once` forces a single cycle (alias behavior for loop-capable commands).
+- No DB migration is required for this update.
+
 ## Stage 7 backtest/parity quick checks
 
 ```powershell
