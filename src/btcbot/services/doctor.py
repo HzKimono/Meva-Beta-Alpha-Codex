@@ -162,7 +162,6 @@ def _check_exchange_rules(
                     "exchange info unavailable; could not validate symbol rules",
                 )
             )
-            warnings.append("exchange info unavailable; skipped exchange_rules validation")
             actions.extend(
                 [
                     "Check BTCTurk public API connectivity and base URL.",
@@ -174,7 +173,12 @@ def _check_exchange_rules(
         for symbol in settings.symbols:
             resolution = rules_service.resolve_symbol_rules(symbol)
             status = resolution.status
-            if status in {"missing", "invalid", "error"}:
+            if status in {
+                "missing",
+                "invalid_metadata",
+                "unsupported_schema_variant",
+                "upstream_fetch_failure",
+            }:
                 detail = resolution.reason or status
                 bad_symbols.append((symbol, f"{status}:{detail}"))
             if status == "fallback" and not allow_fallback:
@@ -188,6 +192,8 @@ def _check_exchange_rules(
     if bad_symbols:
         for symbol, status in bad_symbols:
             message = f"exchange rules unusable for symbol={symbol} status={status}"
+            if not blocking:
+                message += " safe_behavior=reject_and_continue"
             check_status = "fail" if blocking else "warn"
             checks.append(
                 DoctorCheck("exchange_rules", f"rules_{symbol.lower()}", check_status, message)
@@ -199,7 +205,7 @@ def _check_exchange_rules(
         actions.extend(
             [
                 "Verify BTCTurk /api/v2/server/exchangeinfo schema and symbol names.",
-                "Update exchange rules parser for current payload fields/filters.",
+                "Review invalid_fields/missing_fields details and map new schema variants.",
                 "Set STAGE7_RULES_REQUIRE_METADATA=false only as temporary fallback.",
             ]
         )

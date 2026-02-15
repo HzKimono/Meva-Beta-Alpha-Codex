@@ -512,7 +512,9 @@ def test_stage7_policy_skip_symbol(monkeypatch, tmp_path) -> None:
     summary = json.loads(str(cycle["intents_summary_json"]))
     assert (
         summary["rules_stats"]["rules_missing_count"]
-        + summary["rules_stats"]["rules_invalid_count"]
+        + summary["rules_stats"].get(
+            "rules_invalid_metadata_count", summary["rules_stats"].get("rules_invalid_count", 0)
+        )
     ) >= 1
 
     conn = sqlite3.connect(str(db_path))
@@ -618,7 +620,9 @@ def test_stage7_policy_observe_only_cycle(monkeypatch, tmp_path) -> None:
     summary = json.loads(str(cycle["intents_summary_json"]))
     assert (
         summary["rules_stats"]["rules_missing_count"]
-        + summary["rules_stats"]["rules_invalid_count"]
+        + summary["rules_stats"].get(
+            "rules_invalid_metadata_count", summary["rules_stats"].get("rules_invalid_count", 0)
+        )
     ) >= 1
 
 
@@ -785,7 +789,9 @@ def test_stage7_lifecycle_symbols_included_in_rules_coverage(monkeypatch, tmp_pa
     summary = json.loads(str(cycle["intents_summary_json"]))
     assert (
         summary["rules_stats"]["rules_missing_count"]
-        + summary["rules_stats"]["rules_invalid_count"]
+        + summary["rules_stats"].get(
+            "rules_invalid_metadata_count", summary["rules_stats"].get("rules_invalid_count", 0)
+        )
     ) >= 1
 
     decisions = json.loads(str(cycle["order_decisions_json"]))

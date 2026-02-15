@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     stage7_rules_fallback_min_notional_try: Decimal = Field(
         default=Decimal("10"), alias="STAGE7_RULES_FALLBACK_MIN_NOTIONAL_TRY"
     )
+    stage7_rules_safe_min_notional_try: Decimal = Field(
+        default=Decimal("100"), alias="STAGE7_RULES_SAFE_MIN_NOTIONAL_TRY"
+    )
     stage7_rules_require_metadata: bool = Field(
         default=True,
         alias="STAGE7_RULES_REQUIRE_METADATA",

@@ -245,36 +245,37 @@ class Stage7CycleRunner:
             symbols_needed = sorted(universe_syms | lifecycle_syms)
             mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
             rules_symbols_fallback: set[str] = set()
-            rules_symbols_invalid: set[str] = set()
+            rules_symbols_invalid_metadata: set[str] = set()
             rules_symbols_missing: set[str] = set()
             rules_symbols_error: set[str] = set()
             rules_unavailable: dict[str, str] = {}
             rules_unavailable_details: dict[str, str] = {}
             for symbol in symbols_needed:
-                resolution = rules_service.resolve_symbol_rules(symbol)
-                if resolution.status == "fallback":
+                decision = rules_service.resolve_boundary(symbol)
+                if decision.outcome == "DEGRADE":
                     rules_symbols_fallback.add(symbol)
                     continue
-                if resolution.status == "ok":
+                if decision.outcome == "OK":
                     continue
 
-                detail = resolution.reason or resolution.status
-                rules_unavailable[symbol] = resolution.status
+                status = decision.resolution.status
+                detail = decision.reason or status
+                rules_unavailable[symbol] = status
                 rules_unavailable_details[symbol] = detail
-                if resolution.status == "invalid":
-                    rules_symbols_invalid.add(symbol)
-                elif resolution.status == "missing":
+                if status == "invalid_metadata":
+                    rules_symbols_invalid_metadata.add(symbol)
+                elif status == "missing":
                     rules_symbols_missing.add(symbol)
                 else:
                     rules_symbols_error.add(symbol)
 
             rules_stats = {
                 "rules_fallback_used_count": len(rules_symbols_fallback),
-                "rules_invalid_count": len(rules_symbols_invalid),
+                "rules_invalid_metadata_count": len(rules_symbols_invalid_metadata),
                 "rules_missing_count": len(rules_symbols_missing),
                 "rules_error_count": len(rules_symbols_error),
                 "rules_symbols_fallback": sorted(rules_symbols_fallback),
-                "rules_symbols_invalid": sorted(rules_symbols_invalid),
+                "rules_symbols_invalid_metadata": sorted(rules_symbols_invalid_metadata),
                 "rules_symbols_missing": sorted(rules_symbols_missing),
                 "rules_symbols_error": sorted(rules_symbols_error),
                 "rules_unavailable_details": dict(sorted(rules_unavailable_details.items())),
@@ -286,7 +287,7 @@ class Stage7CycleRunner:
             final_mode = combine_modes(final_mode, stage7_mode)
             invalid_policy = settings.stage7_rules_invalid_metadata_policy
             if invalid_policy == "observe_only_cycle" and (
-                rules_stats["rules_invalid_count"] > 0
+                rules_stats["rules_invalid_metadata_count"] > 0
                 or rules_stats["rules_missing_count"] > 0
                 or rules_stats["rules_error_count"] > 0
             ):

@@ -78,6 +78,15 @@ def _to_int(value: object) -> int | None:
         return None
 
 
+def _positive_decimal_values(values: list[object]) -> list[Decimal]:
+    parsed: list[Decimal] = []
+    for value in values:
+        dec = _to_decimal(value)
+        if dec is not None and dec > 0:
+            parsed.append(dec)
+    return parsed
+
+
 @dataclass(frozen=True)
 class SymbolRules:
     tick_size: Decimal
@@ -103,9 +112,17 @@ class _CachedRules:
 @dataclass(frozen=True)
 class SymbolRulesResolution:
     symbol: str
-    status: Literal["ok", "fallback", "missing", "invalid", "error"]
+    status: Literal[
+        "ok",
+        "fallback",
+        "missing",
+        "invalid_metadata",
+        "unsupported_schema_variant",
+        "upstream_fetch_failure",
+    ]
     rules: SymbolRules | None
     reason: str | None = None
+    details: dict[str, object] | None = None
 
     @property
     def usable(self) -> bool:
@@ -149,23 +166,119 @@ class ExchangeRulesService:
     def _is_valid_rules(rules: SymbolRules) -> bool:
         return rules.tick_size > 0 and rules.lot_size > 0 and rules.min_notional_try > 0
 
-    def _extract_rules(self, pair: object) -> SymbolRules:
-        tick_size = _to_decimal(_read_field(pair, "tick_size", "tickSize"))
-        lot_size = _to_decimal(_read_field(pair, "step_size", "stepSize", "lotSize"))
-        min_notional_try = _to_decimal(
-            _read_field(
-                pair,
-                "min_total_amount",
+    @staticmethod
+    def _serialize_issues(*, missing: list[str], invalid: list[str], source: str) -> str:
+        parts = [f"source={source}"]
+        if missing:
+            parts.append(f"missing={','.join(sorted(set(missing)))}")
+        if invalid:
+            parts.append(f"invalid={','.join(sorted(set(invalid)))}")
+        return ";".join(parts)
+
+    @staticmethod
+    def _status_to_boundary(
+        status: str,
+        *,
+        require_metadata: bool,
+    ) -> tuple[str, str]:
+        if status == "ok":
+            return "OK", "ok"
+        if status == "fallback":
+            return "DEGRADE", "fallback_rules"
+        if status in {"missing", "invalid_metadata", "unsupported_schema_variant"}:
+            return "SKIP", status if require_metadata else "fallback_blocked"
+        return "SKIP", "upstream_fetch_failure"
+
+    @dataclass(frozen=True)
+    class RulesBoundaryDecision:
+        symbol: str
+        outcome: Literal["OK", "SKIP", "DEGRADE"]
+        rules: SymbolRules | None
+        reason: str
+        resolution: SymbolRulesResolution
+
+    def _collect_min_notional_candidates(self, pair: object) -> list[Decimal]:
+        candidate_fields = [
+            "min_total_amount",
+            "minTotalAmount",
+            "minExchangeValue",
+            "minTotal",
+            "minNotional",
+            "minNotionalValue",
+            "minOrderAmount",
+            "minimumOrderAmount",
+            "minQuoteAmount",
+            "min_trade_amount",
+        ]
+        raw_values = [_read_field(pair, field) for field in candidate_fields]
+
+        filters = _read_field(pair, "filters")
+        if isinstance(filters, Mapping):
+            filters = list(filters.values())
+        if isinstance(filters, list):
+            for raw_filter in filters:
+                if not isinstance(raw_filter, Mapping):
+                    continue
+                for field in (
+                    "minTotalAmount",
+                    "minExchangeValue",
+                    "minAmount",
+                    "minNotional",
+                    "minNotionalValue",
+                    "minOrderAmount",
+                    "minQuoteAmount",
+                ):
+                    raw_values.append(raw_filter.get(field))
+
+        constraints = _read_field(pair, "constraints", "ruleSet", "tradingRules")
+        if isinstance(constraints, Mapping):
+            for field in (
                 "minTotalAmount",
                 "minExchangeValue",
                 "minNotional",
-                "minimumOrderAmount",
-            )
+                "minNotionalValue",
+                "minOrderAmount",
+                "minQuoteAmount",
+            ):
+                raw_values.append(constraints.get(field))
+
+        return _positive_decimal_values(raw_values)
+
+    def _is_try_quote_pair(self, pair: object) -> bool:
+        quote = _read_field(pair, "denominator", "quoteAsset", "quote")
+        if isinstance(quote, str) and quote.strip().upper() == "TRY":
+            return True
+        for candidate in _pair_symbol_candidates(pair):
+            normalized = _norm_symbol(candidate)
+            if normalized.endswith("TRY"):
+                return True
+        return False
+
+    def _derive_safe_min_notional_try(self) -> Decimal:
+        configured = Decimal(
+            str(getattr(self.settings, "stage7_rules_safe_min_notional_try", Decimal("100")))
         )
+        fallback = Decimal(
+            str(getattr(self.settings, "stage7_rules_fallback_min_notional_try", Decimal("10")))
+        )
+        minimum_order = Decimal(str(getattr(self.settings, "min_order_notional_try", 0)))
+        return max(configured, fallback, minimum_order, Decimal("100"))
+
+    def _extract_rules(self, pair: object) -> tuple[SymbolRules | None, str, dict[str, object]]:
+        source = type(pair).__name__
+        missing_fields: list[str] = []
+        invalid_fields: list[str] = []
+
+        tick_size = _to_decimal(_read_field(pair, "tick_size", "tickSize"))
+        lot_size = _to_decimal(_read_field(pair, "step_size", "stepSize", "lotSize"))
+        min_notional_candidates = self._collect_min_notional_candidates(pair)
+        min_notional_try = max(min_notional_candidates) if min_notional_candidates else None
         min_qty = _to_decimal(_read_field(pair, "min_quantity", "minQuantity", "minQty"))
         max_qty = _to_decimal(_read_field(pair, "max_quantity", "maxQuantity", "maxQty"))
 
         filters = _read_field(pair, "filters")
+        if isinstance(filters, Mapping):
+            filters = list(filters.values())
         if isinstance(filters, list):
             for raw_filter in filters:
                 if not isinstance(raw_filter, Mapping):
@@ -199,6 +312,31 @@ class ExchangeRulesService:
                     min_notional_try = min_notional_try or _to_decimal(
                         raw_filter.get("minNotional")
                     )
+        elif filters is not None:
+            return (
+                None,
+                "unsupported_schema_variant",
+                {
+                    "source": source,
+                    "reason": "filters_not_list",
+                },
+            )
+
+        constraints = _read_field(pair, "constraints", "ruleSet", "tradingRules")
+        if isinstance(constraints, Mapping):
+            tick_size = tick_size or _to_decimal(
+                constraints.get("tickSize") or constraints.get("tick_size")
+            )
+            lot_size = lot_size or _to_decimal(
+                constraints.get("stepSize") or constraints.get("step_size")
+            )
+            min_notional_try = min_notional_try or _to_decimal(
+                constraints.get("minNotional")
+                or constraints.get("min_total_amount")
+                or constraints.get("minExchangeValue")
+            )
+            min_qty = min_qty if min_qty is not None else _to_decimal(constraints.get("minQty"))
+            max_qty = max_qty if max_qty is not None else _to_decimal(constraints.get("maxQty"))
 
         numerator_scale = _to_int(_read_field(pair, "numerator_scale", "numeratorScale"))
         denominator_scale = _to_int(_read_field(pair, "denominator_scale", "denominatorScale"))
@@ -214,7 +352,12 @@ class ExchangeRulesService:
             numerator_scale if numerator_scale is not None else _infer_precision(lot_size)
         )
 
-        return SymbolRules(
+        min_notional_source = "metadata"
+        if min_notional_try is None and self._is_try_quote_pair(pair):
+            min_notional_try = self._derive_safe_min_notional_try()
+            min_notional_source = "safe_default_try_quote"
+
+        rules = SymbolRules(
             tick_size=tick_size or Decimal("0"),
             lot_size=lot_size or Decimal("0"),
             min_notional_try=min_notional_try or Decimal("0"),
@@ -223,6 +366,32 @@ class ExchangeRulesService:
             price_precision=price_precision,
             qty_precision=qty_precision,
         )
+
+        if tick_size is None:
+            missing_fields.append("tick_size")
+        if lot_size is None:
+            missing_fields.append("lot_size")
+        if min_notional_try is None:
+            missing_fields.append("min_notional_try")
+        if rules.tick_size <= 0:
+            invalid_fields.append("tick_size")
+        if rules.lot_size <= 0:
+            invalid_fields.append("lot_size")
+        if rules.min_notional_try <= 0:
+            invalid_fields.append("min_notional_try")
+
+        if missing_fields or invalid_fields:
+            return (
+                None,
+                "invalid_metadata",
+                {
+                    "source": source,
+                    "missing_fields": sorted(set(missing_fields)),
+                    "invalid_fields": sorted(set(invalid_fields)),
+                },
+            )
+
+        return rules, "ok", {"source": source, "min_notional_source": min_notional_source}
 
     def resolve_symbol_rules(self, symbol: str) -> SymbolRulesResolution:
         key = _norm_symbol(symbol)
@@ -243,8 +412,9 @@ class ExchangeRulesService:
                 return SymbolRulesResolution(
                     symbol=key,
                     rules=None,
-                    status="error",
-                    reason=f"exchange_info_error:{type(exc).__name__}",
+                    status="upstream_fetch_failure",
+                    reason=f"upstream_fetch_failure:{type(exc).__name__}",
+                    details={"error_type": type(exc).__name__},
                 )
             for pair in pairs:
                 for candidate in _pair_symbol_candidates(pair):
@@ -265,12 +435,21 @@ class ExchangeRulesService:
             )
             return SymbolRulesResolution(symbol=key, rules=fallback, status="fallback")
 
-        converted = self._extract_rules(match)
-        if not self._is_valid_rules(converted):
+        converted, parse_status, parse_details = self._extract_rules(match)
+        if parse_status != "ok" or converted is None:
             require_metadata = bool(getattr(self.settings, "stage7_rules_require_metadata", True))
             if require_metadata:
+                detail_reason = self._serialize_issues(
+                    missing=list(parse_details.get("missing_fields") or []),
+                    invalid=list(parse_details.get("invalid_fields") or []),
+                    source=str(parse_details.get("source") or type(match).__name__),
+                )
                 return SymbolRulesResolution(
-                    symbol=key, rules=None, status="invalid", reason="metadata_invalid"
+                    symbol=key,
+                    rules=None,
+                    status=parse_status,
+                    reason=detail_reason,
+                    details=parse_details,
                 )
             fallback = self._fallback_rules()
             self._cache[key] = _CachedRules(
@@ -292,7 +471,7 @@ class ExchangeRulesService:
 
     def get_symbol_rules_status(self, symbol: str) -> tuple[SymbolRules | None, str]:
         result = self.resolve_symbol_rules(symbol)
-        status = result.status if result.status != "error" else "missing"
+        status = result.status if result.status != "upstream_fetch_failure" else "missing"
         return result.rules, status
 
     def get_symbol_rules_or_none(self, symbol: str) -> SymbolRules | None:
@@ -307,6 +486,22 @@ class ExchangeRulesService:
                 f"No usable exchange rules for symbol={symbol} status={resolution.status}{reason}"
             )
         return resolution.rules
+
+    def resolve_boundary(self, symbol: str) -> RulesBoundaryDecision:
+        normalized = _norm_symbol(symbol)
+        resolution = self.resolve_symbol_rules(normalized)
+        require_metadata = bool(getattr(self.settings, "stage7_rules_require_metadata", True))
+        outcome, reason = self._status_to_boundary(
+            resolution.status,
+            require_metadata=require_metadata,
+        )
+        return self.RulesBoundaryDecision(
+            symbol=normalized,
+            outcome=outcome,
+            rules=resolution.rules,
+            reason=reason if resolution.reason is None else resolution.reason,
+            resolution=resolution,
+        )
 
     def quantize_price(self, symbol: str, price: Decimal) -> Decimal:
         rules = self.get_rules(symbol)
