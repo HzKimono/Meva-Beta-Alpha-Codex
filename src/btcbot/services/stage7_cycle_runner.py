@@ -33,9 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def _deterministic_fill_id(cycle_id: str, client_order_id: str, symbol: str, side: str) -> str:
-    digest = sha256(f"{cycle_id}|{client_order_id}|{symbol}|{side}".encode("utf-8")).hexdigest()[
-        :16
-    ]
+    digest = sha256(f"{cycle_id}|{client_order_id}|{symbol}|{side}".encode()).hexdigest()[:16]
     return f"s7f:{digest}"
 
 
