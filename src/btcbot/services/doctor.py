@@ -162,7 +162,6 @@ def _check_exchange_rules(
                     "exchange info unavailable; could not validate symbol rules",
                 )
             )
-            warnings.append("exchange info unavailable; skipped exchange_rules validation")
             actions.extend(
                 [
                     "Check BTCTurk public API connectivity and base URL.",

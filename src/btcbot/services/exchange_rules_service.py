@@ -78,6 +78,15 @@ def _to_int(value: object) -> int | None:
         return None
 
 
+def _positive_decimal_values(values: list[object]) -> list[Decimal]:
+    parsed: list[Decimal] = []
+    for value in values:
+        dec = _to_decimal(value)
+        if dec is not None and dec > 0:
+            parsed.append(dec)
+    return parsed
+
+
 @dataclass(frozen=True)
 class SymbolRules:
     tick_size: Decimal
@@ -188,6 +197,73 @@ class ExchangeRulesService:
         reason: str
         resolution: SymbolRulesResolution
 
+    def _collect_min_notional_candidates(self, pair: object) -> list[Decimal]:
+        candidate_fields = [
+            "min_total_amount",
+            "minTotalAmount",
+            "minExchangeValue",
+            "minTotal",
+            "minNotional",
+            "minNotionalValue",
+            "minOrderAmount",
+            "minimumOrderAmount",
+            "minQuoteAmount",
+            "min_trade_amount",
+        ]
+        raw_values = [_read_field(pair, field) for field in candidate_fields]
+
+        filters = _read_field(pair, "filters")
+        if isinstance(filters, Mapping):
+            filters = list(filters.values())
+        if isinstance(filters, list):
+            for raw_filter in filters:
+                if not isinstance(raw_filter, Mapping):
+                    continue
+                for field in (
+                    "minTotalAmount",
+                    "minExchangeValue",
+                    "minAmount",
+                    "minNotional",
+                    "minNotionalValue",
+                    "minOrderAmount",
+                    "minQuoteAmount",
+                ):
+                    raw_values.append(raw_filter.get(field))
+
+        constraints = _read_field(pair, "constraints", "ruleSet", "tradingRules")
+        if isinstance(constraints, Mapping):
+            for field in (
+                "minTotalAmount",
+                "minExchangeValue",
+                "minNotional",
+                "minNotionalValue",
+                "minOrderAmount",
+                "minQuoteAmount",
+            ):
+                raw_values.append(constraints.get(field))
+
+        return _positive_decimal_values(raw_values)
+
+    def _is_try_quote_pair(self, pair: object) -> bool:
+        quote = _read_field(pair, "denominator", "quoteAsset", "quote")
+        if isinstance(quote, str) and quote.strip().upper() == "TRY":
+            return True
+        for candidate in _pair_symbol_candidates(pair):
+            normalized = _norm_symbol(candidate)
+            if normalized.endswith("TRY"):
+                return True
+        return False
+
+    def _derive_safe_min_notional_try(self) -> Decimal:
+        configured = Decimal(
+            str(getattr(self.settings, "stage7_rules_safe_min_notional_try", Decimal("100")))
+        )
+        fallback = Decimal(
+            str(getattr(self.settings, "stage7_rules_fallback_min_notional_try", Decimal("10")))
+        )
+        minimum_order = Decimal(str(getattr(self.settings, "min_order_notional_try", 0)))
+        return max(configured, fallback, minimum_order, Decimal("100"))
+
     def _extract_rules(self, pair: object) -> tuple[SymbolRules | None, str, dict[str, object]]:
         source = type(pair).__name__
         missing_fields: list[str] = []
@@ -195,16 +271,8 @@ class ExchangeRulesService:
 
         tick_size = _to_decimal(_read_field(pair, "tick_size", "tickSize"))
         lot_size = _to_decimal(_read_field(pair, "step_size", "stepSize", "lotSize"))
-        min_notional_try = _to_decimal(
-            _read_field(
-                pair,
-                "min_total_amount",
-                "minTotalAmount",
-                "minExchangeValue",
-                "minNotional",
-                "minimumOrderAmount",
-            )
-        )
+        min_notional_candidates = self._collect_min_notional_candidates(pair)
+        min_notional_try = max(min_notional_candidates) if min_notional_candidates else None
         min_qty = _to_decimal(_read_field(pair, "min_quantity", "minQuantity", "minQty"))
         max_qty = _to_decimal(_read_field(pair, "max_quantity", "maxQuantity", "maxQty"))
 
@@ -284,6 +352,11 @@ class ExchangeRulesService:
             numerator_scale if numerator_scale is not None else _infer_precision(lot_size)
         )
 
+        min_notional_source = "metadata"
+        if min_notional_try is None and self._is_try_quote_pair(pair):
+            min_notional_try = self._derive_safe_min_notional_try()
+            min_notional_source = "safe_default_try_quote"
+
         rules = SymbolRules(
             tick_size=tick_size or Decimal("0"),
             lot_size=lot_size or Decimal("0"),
@@ -318,7 +391,7 @@ class ExchangeRulesService:
                 },
             )
 
-        return rules, "ok", {"source": source}
+        return rules, "ok", {"source": source, "min_notional_source": min_notional_source}
 
     def resolve_symbol_rules(self, symbol: str) -> SymbolRulesResolution:
         key = _norm_symbol(symbol)

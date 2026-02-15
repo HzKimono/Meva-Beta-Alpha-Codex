@@ -11,6 +11,11 @@ from btcbot.config import Settings
 from btcbot.services.doctor import DoctorCheck, DoctorReport, run_health_checks
 
 
+def _fixture_symbols(name: str) -> list[dict[str, object]]:
+    payload = json.loads((Path("tests/fixtures") / name).read_text(encoding="utf-8"))
+    return list(payload["data"]["symbols"])
+
+
 def _debug_checks(report: DoctorReport) -> None:
     rendered = [f"{check.category}/{check.name}:{check.status}" for check in report.checks]
     print(f"doctor checks => {rendered}", file=sys.stderr)
@@ -241,3 +246,26 @@ def test_doctor_exchange_rules_reports_actionable_reason(patch_doctor_exchange) 
     messages = [c.message for c in report.checks if c.category == "exchange_rules"]
     assert any("status=invalid_metadata:" in msg for msg in messages)
     assert any("invalid=" in msg and "tick_size" in msg for msg in messages)
+
+
+def test_doctor_exchange_rules_passes_with_fixture_min_notional_variant(
+    patch_doctor_exchange,
+) -> None:
+    patch_doctor_exchange(_fixture_symbols("btcturk_exchangeinfo_min_notional_present.json"))
+
+    report = run_health_checks(Settings(SYMBOLS=["BTC_TRY"]), db_path=None, dataset_path=None)
+
+    exchange_checks = [c for c in report.checks if c.category == "exchange_rules"]
+    assert any(c.status == "pass" for c in exchange_checks)
+
+
+def test_doctor_exchange_rules_warns_explicitly_for_absent_non_try_min_notional(
+    patch_doctor_exchange,
+) -> None:
+    patch_doctor_exchange(_fixture_symbols("btcturk_exchangeinfo_min_notional_absent.json"))
+
+    report = run_health_checks(Settings(SYMBOLS=["BTC_USDT"]), db_path=None, dataset_path=None)
+
+    messages = [c.message for c in report.checks if c.category == "exchange_rules"]
+    assert any("status=invalid_metadata:" in msg for msg in messages)
+    assert any("safe_behavior=reject_and_continue" in msg for msg in messages)

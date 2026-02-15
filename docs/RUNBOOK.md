@@ -47,3 +47,14 @@ python -m btcbot.cli stage7-db-count --db .\a.db
 ```powershell
 $env:STAGE7_ENABLED="true"; python -m btcbot.cli stage7-run --dry-run --include-adaptation; Remove-Item Env:STAGE7_ENABLED
 ```
+
+
+## 6) Exchange rules diagnostics (PowerShell)
+```powershell
+python scripts/capture_exchangeinfo_fixture.py
+python -m btcbot.cli doctor --db .\btcbot_state.db --json
+```
+
+Doctor exchange-rules statuses:
+- `PASS`: normalized rules usable (including verified conservative TRY min-notional fallback).
+- `WARN`: explicit reason (for example non-TRY symbol missing min-notional) with `safe_behavior=reject_and_continue`.

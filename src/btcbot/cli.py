@@ -913,9 +913,14 @@ def run_doctor(
     for check in report.checks:
         print(f"doctor: {check.status.upper()} [{check.category}] {check.name} - {check.message}")
 
+    check_messages = {check.message for check in report.checks}
     for message in report.warnings:
+        if message in check_messages:
+            continue
         print(f"doctor: WARN - {message}")
     for message in report.errors:
+        if message in check_messages:
+            continue
         print(f"doctor: FAIL - {message}")
 
     if report.actions:

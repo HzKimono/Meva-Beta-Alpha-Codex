@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
+from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
 from btcbot.services.exchange_rules_service import ExchangeRulesService
+
+
+def _load_fixture_symbols(name: str) -> list[dict[str, object]]:
+    payload = json.loads((Path("tests/fixtures") / name).read_text(encoding="utf-8"))
+    return list(payload["data"]["symbols"])
 
 
 class FakeExchangeClient:
@@ -309,3 +316,57 @@ def test_invalid_metadata_reason_lists_fields() -> None:
     assert resolution.status == "invalid_metadata"
     assert resolution.reason is not None
     assert "invalid=tick_size" in resolution.reason
+
+
+def test_rules_parser_recognizes_min_quote_amount_variant_from_fixture() -> None:
+    class FixtureClient:
+        def get_exchange_info(self):
+            return _load_fixture_symbols("btcturk_exchangeinfo_min_notional_present.json")
+
+    service = ExchangeRulesService(FixtureClient())
+
+    resolution = service.resolve_symbol_rules("BTC_TRY")
+
+    assert resolution.status == "ok"
+    assert resolution.rules is not None
+    assert resolution.rules.min_notional_try == Decimal("125")
+
+
+def test_rules_parser_uses_safe_try_fallback_when_min_notional_absent() -> None:
+    class PairInfoLikeClient:
+        def get_exchange_info(self):
+            return [
+                {
+                    "pairSymbol": "ETHTRY",
+                    "denominator": "TRY",
+                    "numeratorScale": 6,
+                    "denominatorScale": 2,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                    ],
+                }
+            ]
+
+    service = ExchangeRulesService(PairInfoLikeClient())
+
+    resolution = service.resolve_symbol_rules("ETH_TRY")
+
+    assert resolution.status == "ok"
+    assert resolution.rules is not None
+    assert resolution.rules.min_notional_try >= Decimal("100")
+
+
+def test_non_try_pair_without_min_notional_remains_invalid() -> None:
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_RULES_REQUIRE_METADATA=True)
+
+    class FixtureClient:
+        def get_exchange_info(self):
+            return _load_fixture_symbols("btcturk_exchangeinfo_min_notional_absent.json")
+
+    service = ExchangeRulesService(FixtureClient(), settings=settings)
+
+    resolution = service.resolve_symbol_rules("BTC_USDT")
+
+    assert resolution.status == "invalid_metadata"
+    assert resolution.rules is None

@@ -186,3 +186,18 @@ make check
 ```
 
 This runs compile checks, formatting/linting, tests, and guard scripts in the same order used by CI.
+
+
+## Exchange rules min-notional derivation
+
+- The rules normalizer checks multiple BTCTurk variants (`minTotalAmount`, `minExchangeValue`, `minNotional`, `minQuoteAmount`, etc.) across top-level and filter/constraint payloads.
+- If no reliable min-notional exists for TRY-quote pairs, it applies a conservative safe floor (`STAGE7_RULES_SAFE_MIN_NOTIONAL_TRY`, default `100`) and still enforces reject+continue semantics.
+- Non-TRY pairs without reliable min-notional remain explicit `invalid_metadata` and are rejected safely.
+
+### Optional fixture capture (dev)
+
+```powershell
+python scripts/capture_exchangeinfo_fixture.py
+```
+
+This writes a sanitized payload to `tests/fixtures/btcturk_exchangeinfo_live_capture.json` for parser regression tests.
