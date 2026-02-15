@@ -1043,7 +1043,10 @@ class StateStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT COALESCE(max_drawdown_ratio, max_drawdown) as max_drawdown_ratio, net_pnl_try, equity_try
+                SELECT
+                    COALESCE(max_drawdown_ratio, max_drawdown) AS max_drawdown_ratio,
+                    net_pnl_try,
+                    equity_try
                 FROM stage7_ledger_metrics
                 ORDER BY ts DESC
                 LIMIT 1
