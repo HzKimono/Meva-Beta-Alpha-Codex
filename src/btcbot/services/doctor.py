@@ -172,11 +172,14 @@ def _check_exchange_rules(
             return
 
         for symbol in settings.symbols:
-            _, status = rules_service.get_symbol_rules_status(symbol)
-            if status in {"missing", "invalid"}:
-                bad_symbols.append((symbol, status))
+            resolution = rules_service.resolve_symbol_rules(symbol)
+            status = resolution.status
+            if status in {"missing", "invalid", "error"}:
+                detail = resolution.reason or status
+                bad_symbols.append((symbol, f"{status}:{detail}"))
             if status == "fallback" and not allow_fallback:
-                bad_symbols.append((symbol, status))
+                detail = resolution.reason or status
+                bad_symbols.append((symbol, f"{status}:{detail}"))
     finally:
         close = getattr(exchange, "close", None)
         if callable(close):

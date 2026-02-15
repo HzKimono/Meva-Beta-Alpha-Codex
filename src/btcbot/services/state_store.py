@@ -27,6 +27,12 @@ if TYPE_CHECKING:
     from btcbot.domain.risk_models import RiskDecision as Stage7RiskDecision
 
 
+def _stage7_ctx(cycle_id: str, run_id: str | None = None) -> str:
+    if run_id:
+        return f"cycle_id={cycle_id} run_id={run_id}"
+    return f"cycle_id={cycle_id}"
+
+
 @dataclass
 class StoredOrder:
     order_id: str
@@ -417,6 +423,11 @@ class StateStore:
             )
             """
         )
+        run_metric_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_run_metrics)")
+        }
+        if "run_id" not in run_metric_columns:
+            conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN run_id TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_stage7_run_metrics_ts ON stage7_run_metrics(ts)"
         )
@@ -718,119 +729,168 @@ class StateStore:
         active_param_version: int = 0,
         param_change: ParamChange | None = None,
     ) -> None:
-        with self.transaction() as conn:
-            derived_trace = (
-                [
-                    {
-                        "client_order_id": intent.client_order_id,
-                        "symbol": intent.symbol,
-                        "side": intent.side,
-                        "skipped": intent.skipped,
-                        "skip_reason": intent.skip_reason,
+        run_id = None
+        if run_metrics is not None and run_metrics.get("run_id"):
+            run_id = str(run_metrics.get("run_id"))
+
+        try:
+            with self.transaction() as conn:
+                derived_trace = (
+                    [
+                        {
+                            "client_order_id": intent.client_order_id,
+                            "symbol": intent.symbol,
+                            "side": intent.side,
+                            "skipped": intent.skipped,
+                            "skip_reason": intent.skip_reason,
+                        }
+                        for intent in order_intents
+                    ]
+                    if order_intents is not None
+                    else []
+                )
+                if order_intents is not None and order_intents_trace is not None:
+                    domain_ids = {item["client_order_id"] for item in derived_trace}
+                    trace_ids = {
+                        str(item.get("client_order_id"))
+                        for item in order_intents_trace
+                        if item.get("client_order_id")
                     }
-                    for intent in order_intents
-                ]
-                if order_intents is not None
-                else []
-            )
-            if order_intents is not None and order_intents_trace is not None:
-                domain_ids = {item["client_order_id"] for item in derived_trace}
-                trace_ids = {
-                    str(item.get("client_order_id"))
-                    for item in order_intents_trace
-                    if item.get("client_order_id")
-                }
-                if domain_ids != trace_ids:
-                    msg = "order_intents and order_intents_trace client_order_id mismatch"
-                    raise ValueError(msg)
-            trace_payload = (
-                order_intents_trace if order_intents_trace is not None else derived_trace
-            )
-            conn.execute(
-                """
-                INSERT INTO stage7_cycle_trace(
-                    cycle_id, ts, selected_universe_json,
-                    universe_scores_json, intents_summary_json,
-                    mode_json, order_decisions_json, portfolio_plan_json, order_intents_json,
-                    active_param_version, param_change_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(cycle_id) DO UPDATE SET
-                    ts=excluded.ts,
-                    selected_universe_json=excluded.selected_universe_json,
-                    universe_scores_json=excluded.universe_scores_json,
-                    intents_summary_json=excluded.intents_summary_json,
-                    mode_json=excluded.mode_json,
-                    order_decisions_json=excluded.order_decisions_json,
-                    portfolio_plan_json=excluded.portfolio_plan_json,
-                    order_intents_json=excluded.order_intents_json,
-                    active_param_version=excluded.active_param_version,
-                    param_change_json=excluded.param_change_json
-                """,
-                (
-                    cycle_id,
-                    ensure_utc(ts).isoformat(),
-                    json.dumps(selected_universe, sort_keys=True),
-                    json.dumps(universe_scores, sort_keys=True),
-                    json.dumps(intents_summary, sort_keys=True),
-                    json.dumps(mode_payload, sort_keys=True),
-                    json.dumps(order_decisions, sort_keys=True),
-                    json.dumps(portfolio_plan, sort_keys=True),
-                    json.dumps(trace_payload, sort_keys=True),
-                    int(active_param_version),
-                    json.dumps(param_change.to_dict(), sort_keys=True) if param_change else "{}",
-                ),
-            )
-            if order_intents:
-                self._save_stage7_order_intents(
-                    conn=conn,
-                    cycle_id=cycle_id,
-                    ts=ts,
-                    intents=order_intents,
+                    if domain_ids != trace_ids:
+                        msg = "order_intents and order_intents_trace client_order_id mismatch"
+                        raise ValueError(msg)
+                trace_payload = (
+                    order_intents_trace if order_intents_trace is not None else derived_trace
                 )
-            if risk_decision is not None:
-                self._save_stage7_risk_decision_with_conn(
-                    conn=conn,
-                    cycle_id=cycle_id,
-                    decision=risk_decision,
-                )
-            if run_metrics is not None:
-                self._save_stage7_run_metrics_with_conn(
-                    conn=conn,
-                    cycle_id=cycle_id,
-                    metrics_dict=run_metrics,
-                )
-            conn.execute(
-                """
-                INSERT INTO stage7_ledger_metrics(
-                    cycle_id, ts, gross_pnl_try, realized_pnl_try, unrealized_pnl_try,
-                    net_pnl_try, fees_try, slippage_try, turnover_try, equity_try, max_drawdown
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(cycle_id) DO UPDATE SET
-                    ts=excluded.ts,
-                    gross_pnl_try=excluded.gross_pnl_try,
-                    realized_pnl_try=excluded.realized_pnl_try,
-                    unrealized_pnl_try=excluded.unrealized_pnl_try,
-                    net_pnl_try=excluded.net_pnl_try,
-                    fees_try=excluded.fees_try,
-                    slippage_try=excluded.slippage_try,
-                    turnover_try=excluded.turnover_try,
-                    equity_try=excluded.equity_try,
-                    max_drawdown=excluded.max_drawdown
-                """,
-                (
-                    cycle_id,
-                    ensure_utc(ts).isoformat(),
-                    str(ledger_metrics["gross_pnl_try"]),
-                    str(ledger_metrics["realized_pnl_try"]),
-                    str(ledger_metrics["unrealized_pnl_try"]),
-                    str(ledger_metrics["net_pnl_try"]),
-                    str(ledger_metrics["fees_try"]),
-                    str(ledger_metrics["slippage_try"]),
-                    str(ledger_metrics["turnover_try"]),
-                    str(ledger_metrics["equity_try"]),
-                    str(ledger_metrics["max_drawdown"]),
-                ),
-            )
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO stage7_cycle_trace(
+                            cycle_id, ts, selected_universe_json,
+                            universe_scores_json, intents_summary_json,
+                            mode_json, order_decisions_json,
+                            portfolio_plan_json, order_intents_json,
+                            active_param_version, param_change_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(cycle_id) DO UPDATE SET
+                            ts=excluded.ts,
+                            selected_universe_json=excluded.selected_universe_json,
+                            universe_scores_json=excluded.universe_scores_json,
+                            intents_summary_json=excluded.intents_summary_json,
+                            mode_json=excluded.mode_json,
+                            order_decisions_json=excluded.order_decisions_json,
+                            portfolio_plan_json=excluded.portfolio_plan_json,
+                            order_intents_json=excluded.order_intents_json,
+                            active_param_version=excluded.active_param_version,
+                            param_change_json=excluded.param_change_json
+                        """,
+                        (
+                            cycle_id,
+                            ensure_utc(ts).isoformat(),
+                            json.dumps(selected_universe, sort_keys=True),
+                            json.dumps(universe_scores, sort_keys=True),
+                            json.dumps(intents_summary, sort_keys=True),
+                            json.dumps(mode_payload, sort_keys=True),
+                            json.dumps(order_decisions, sort_keys=True),
+                            json.dumps(portfolio_plan, sort_keys=True),
+                            json.dumps(trace_payload, sort_keys=True),
+                            int(active_param_version),
+                            json.dumps(param_change.to_dict(), sort_keys=True)
+                            if param_change
+                            else "{}",
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"save_stage7_cycle failed at cycle_trace_upsert "
+                        f"{_stage7_ctx(cycle_id, run_id)}"
+                    ) from exc
+
+                if order_intents:
+                    try:
+                        self._save_stage7_order_intents(
+                            conn=conn,
+                            cycle_id=cycle_id,
+                            ts=ts,
+                            intents=order_intents,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        raise RuntimeError(
+                            f"save_stage7_cycle failed at order_intents_upsert "
+                            f"{_stage7_ctx(cycle_id, run_id)}"
+                        ) from exc
+
+                if risk_decision is not None:
+                    try:
+                        self._save_stage7_risk_decision_with_conn(
+                            conn=conn,
+                            cycle_id=cycle_id,
+                            decision=risk_decision,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        raise RuntimeError(
+                            f"save_stage7_cycle failed at risk_decision_insert "
+                            f"{_stage7_ctx(cycle_id, run_id)}"
+                        ) from exc
+
+                if run_metrics is not None:
+                    try:
+                        self._save_stage7_run_metrics_with_conn(
+                            conn=conn,
+                            cycle_id=cycle_id,
+                            metrics_dict=run_metrics,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        raise RuntimeError(
+                            f"save_stage7_cycle failed at run_metrics_upsert "
+                            f"{_stage7_ctx(cycle_id, run_id)}"
+                        ) from exc
+
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO stage7_ledger_metrics(
+                            cycle_id, ts, gross_pnl_try, realized_pnl_try, unrealized_pnl_try,
+                            net_pnl_try, fees_try, slippage_try,
+                            turnover_try, equity_try, max_drawdown
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(cycle_id) DO UPDATE SET
+                            ts=excluded.ts,
+                            gross_pnl_try=excluded.gross_pnl_try,
+                            realized_pnl_try=excluded.realized_pnl_try,
+                            unrealized_pnl_try=excluded.unrealized_pnl_try,
+                            net_pnl_try=excluded.net_pnl_try,
+                            fees_try=excluded.fees_try,
+                            slippage_try=excluded.slippage_try,
+                            turnover_try=excluded.turnover_try,
+                            equity_try=excluded.equity_try,
+                            max_drawdown=excluded.max_drawdown
+                        """,
+                        (
+                            cycle_id,
+                            ensure_utc(ts).isoformat(),
+                            str(ledger_metrics["gross_pnl_try"]),
+                            str(ledger_metrics["realized_pnl_try"]),
+                            str(ledger_metrics["unrealized_pnl_try"]),
+                            str(ledger_metrics["net_pnl_try"]),
+                            str(ledger_metrics["fees_try"]),
+                            str(ledger_metrics["slippage_try"]),
+                            str(ledger_metrics["turnover_try"]),
+                            str(ledger_metrics["equity_try"]),
+                            str(ledger_metrics["max_drawdown"]),
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"save_stage7_cycle failed at ledger_metrics_upsert "
+                        f"{_stage7_ctx(cycle_id, run_id)}"
+                    ) from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"save_stage7_cycle failed at transaction {_stage7_ctx(cycle_id, run_id)}"
+            ) from exc
 
     def save_stage7_risk_decision(
         self,

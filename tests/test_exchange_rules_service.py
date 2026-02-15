@@ -201,3 +201,79 @@ def test_dict_payload_aliasing_uses_same_cached_rules() -> None:
 
     assert a == b
     assert exchange.exchange_info_calls == 1
+
+
+class ExchangeInfoErrorClient:
+    def get_exchange_info(self):
+        raise TimeoutError("boom")
+
+
+def test_resolve_symbol_rules_returns_error_without_throwing() -> None:
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_RULES_REQUIRE_METADATA=True)
+    service = ExchangeRulesService(ExchangeInfoErrorClient(), settings=settings)
+
+    resolution = service.resolve_symbol_rules("BTC_TRY")
+
+    assert resolution.usable is False
+    assert resolution.status == "error"
+    assert resolution.reason == "exchange_info_error:TimeoutError"
+
+
+def test_rules_parser_supports_min_notional_filter_variants() -> None:
+    class MinNotionalClient:
+        def get_exchange_info(self):
+            return [
+                {
+                    "pairSymbol": "BTCTRY",
+                    "numeratorScale": "8",
+                    "denominatorScale": "2",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "250"},
+                    ],
+                }
+            ]
+
+    service = ExchangeRulesService(MinNotionalClient())
+    rules, status = service.get_symbol_rules_status("BTC_TRY")
+
+    assert status == "ok"
+    assert rules is not None
+    assert rules.min_notional_try == Decimal("250")
+
+
+class FlakyExchangeInfoClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_exchange_info(self):
+        self.calls += 1
+        if self.calls % 2 == 1:
+            raise ConnectionError("temporary")
+        return [
+            {
+                "pairSymbol": "BTCTRY",
+                "numeratorScale": 8,
+                "denominatorScale": 2,
+                "filters": [
+                    {
+                        "filterType": "PRICE_FILTER",
+                        "tickSize": "0.1",
+                        "minExchangeValue": "100",
+                    }
+                ],
+            }
+        ]
+
+
+def test_flaky_exchangeinfo_never_raises_from_resolve() -> None:
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_RULES_REQUIRE_METADATA=True)
+    service = ExchangeRulesService(FlakyExchangeInfoClient(), settings=settings)
+
+    first = service.resolve_symbol_rules("BTC_TRY")
+    second = service.resolve_symbol_rules("BTC_TRY")
+
+    assert first.status == "error"
+    assert first.rules is None
+    assert second.status == "ok"
+    assert second.rules is not None

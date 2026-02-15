@@ -800,3 +800,74 @@ def test_stage7_lifecycle_symbols_included_in_rules_coverage(monkeypatch, tmp_pa
         and str(trace.get("skip_reason", "")).startswith("rules_unavailable:")
         for trace in traces
     )
+
+
+def test_stage7_policy_observe_only_on_exchange_rules_error(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_observe_rules_error.db"
+
+    def _fake_stage4(self, settings):
+        del self, settings
+        return 0
+
+    class _Exchange:
+        def get_exchange_info(self):
+            raise TimeoutError("temporary_exchangeinfo_outage")
+
+        def get_ticker_stats(self):
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "100",
+                    "high": "101",
+                    "low": "99",
+                }
+            ]
+
+        def get_orderbook(self, symbol):
+            del symbol
+            return Decimal("99"), Decimal("100")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle", _fake_stage4
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.UniverseSelectionService.select_universe",
+        _selected_btc_universe,
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE7_RULES_REQUIRE_METADATA=True,
+        STAGE7_RULES_INVALID_METADATA_POLICY="observe_only_cycle",
+    )
+
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        cycle = conn.execute(
+            "SELECT mode_json, intents_summary_json FROM stage7_cycle_trace"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    mode_payload = json.loads(str(cycle["mode_json"]))
+    summary = json.loads(str(cycle["intents_summary_json"]))
+    assert mode_payload["final_mode"] == "OBSERVE_ONLY"
+    assert summary["rules_stats"]["rules_error_count"] >= 1
