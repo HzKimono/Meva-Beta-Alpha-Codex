@@ -875,6 +875,10 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
                 )
 
         allocation_plan = store.get_allocation_plan(str(row["cycle_id"]))
+        plan_source = "cycle_id"
+        if allocation_plan is None:
+            allocation_plan = store.get_latest_allocation_plan()
+            plan_source = "latest"
         if allocation_plan is not None:
             plan_items = allocation_plan.get("plan") or []
             deferred_items = allocation_plan.get("deferred") or []
@@ -886,6 +890,8 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
             )
             print(
                 "  allocation_plan="
+                f"source={plan_source} "
+                f"cycle_id={allocation_plan.get('cycle_id')} "
                 f"investable_total_try={investable_total} "
                 f"investable_this_cycle_try={allocation_plan.get('investable_this_cycle_try')} "
                 f"deploy_budget_try={allocation_plan.get('deploy_budget_try')} "
@@ -894,17 +900,21 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
                 f"usage_reason={allocation_plan.get('usage_reason')}"
             )
             print(
-                f"  allocation_selection=selected={len(plan_items)} deferred={len(deferred_items)}"
+                "  stage4_plan_summary="
+                f"planned_total_try={allocation_plan.get('planned_total_try')} "
+                f"unused_budget_try={unused_budget} "
+                f"actions={len(plan_items)} deferred={len(deferred_items)}"
             )
             if plan_items:
                 selected = ", ".join(
-                    f"{item.get('symbol')}:{item.get('notional_try', '-')}" for item in plan_items
+                    f"{item.get('symbol')}:{item.get('notional_try', '-')}"
+                    for item in plan_items[:5]
                 )
                 print(f"  selected_symbols={selected}")
             if deferred_items:
                 deferred = ", ".join(
                     f"{item.get('symbol')}:{item.get('reason', 'deferred')}"
-                    for item in deferred_items
+                    for item in deferred_items[:5]
                 )
                 print(f"  deferred_symbols={deferred}")
             if no_trades_reason in {"-", None, ""} and plan_items:

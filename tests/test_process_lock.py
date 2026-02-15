@@ -29,8 +29,11 @@ def test_single_instance_lock_writes_pid(tmp_path: Path) -> None:
     lock_path = None
     with single_instance_lock(db_path=db_path, account_key="acct") as lock:
         lock_path = Path(lock.path)
-        pid_raw = lock_path.read_text(encoding="utf-8").strip()
-        assert pid_raw.isdigit()
+        assert isinstance(lock.pid, int)
+        assert lock.pid > 0
 
     assert lock_path is not None
+    pid_raw = lock_path.read_text(encoding="utf-8").strip()
+    assert pid_raw == str(lock.pid)
+
     assert lock_path.exists()
