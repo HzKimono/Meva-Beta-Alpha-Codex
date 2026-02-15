@@ -2560,9 +2560,7 @@ class StateStore:
 
     def get_latest_allocation_plan(self) -> dict[str, object] | None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM allocation_plans ORDER BY ts DESC LIMIT 1"
-            ).fetchone()
+            row = conn.execute("SELECT * FROM allocation_plans ORDER BY ts DESC LIMIT 1").fetchone()
         if row is None:
             return None
         payload = {key: row[key] for key in row.keys()}
