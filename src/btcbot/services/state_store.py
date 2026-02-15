@@ -65,6 +65,16 @@ class IdempotencyConflictError(ValueError):
     """Raised when an idempotency key is re-used with a conflicting payload."""
 
 
+@dataclass(frozen=True)
+class SubmitDedupeDecision:
+    should_dedupe: bool
+    dedupe_key: str
+    reason: str | None = None
+    age_seconds: int | None = None
+    related_order_id: str | None = None
+    related_status: str | None = None
+
+
 class StateStore:
     def __init__(self, db_path: str = "btcbot_state.db") -> None:
         self.db_path = db_path
@@ -1262,6 +1272,7 @@ class StateStore:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
                 client_order_id TEXT,
+                exchange_client_id TEXT,
                 exchange_order_id TEXT,
                 side TEXT NOT NULL,
                 price TEXT NOT NULL,
@@ -1293,6 +1304,15 @@ class StateStore:
             conn.execute("ALTER TABLE stage4_orders ADD COLUMN last_error TEXT")
         if "exchange_order_id" not in order_columns:
             conn.execute("ALTER TABLE stage4_orders ADD COLUMN exchange_order_id TEXT")
+        if "exchange_client_id" not in order_columns:
+            conn.execute("ALTER TABLE stage4_orders ADD COLUMN exchange_client_id TEXT")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_stage4_orders_exchange_client_id_unique
+            ON stage4_orders(exchange_client_id)
+            WHERE exchange_client_id IS NOT NULL
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS stage4_fills (
@@ -1800,6 +1820,9 @@ class StateStore:
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
             exchange_order_id=(str(row["exchange_order_id"]) if row["exchange_order_id"] else None),
             client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+            exchange_client_id=(
+                str(row["exchange_client_id"]) if row["exchange_client_id"] else None
+            ),
             mode=str(row["mode"]),
         )
 
@@ -1837,6 +1860,9 @@ class StateStore:
                     str(row["exchange_order_id"]) if row["exchange_order_id"] else None
                 ),
                 client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+                exchange_client_id=(
+                    str(row["exchange_client_id"]) if row["exchange_client_id"] else None
+                ),
                 mode=str(row["mode"]),
             )
             for row in rows
@@ -1857,11 +1883,52 @@ class StateStore:
             "unknown_closed",
         }
 
+    def stage4_submit_dedupe_status(
+        self,
+        *,
+        internal_client_order_id: str,
+        exchange_client_order_id: str,
+    ) -> SubmitDedupeDecision:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, status, created_at
+                FROM stage4_orders
+                WHERE client_order_id = ? OR exchange_client_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (internal_client_order_id, exchange_client_order_id),
+            ).fetchone()
+        if row is None:
+            return SubmitDedupeDecision(should_dedupe=False, dedupe_key=exchange_client_order_id)
+
+        status = str(row["status"]).lower()
+        created_at = datetime.fromisoformat(str(row["created_at"]))
+        age_seconds = int((datetime.now(UTC) - created_at).total_seconds())
+        reason: str | None = None
+        if status == "open":
+            reason = "open_order_exists"
+        elif status in {"submitted", "cancel_requested"}:
+            reason = "in_flight"
+        elif status == "filled" and age_seconds < 5:
+            reason = "recent_success"
+
+        return SubmitDedupeDecision(
+            should_dedupe=reason is not None,
+            dedupe_key=exchange_client_order_id,
+            reason=reason,
+            age_seconds=age_seconds,
+            related_order_id=str(row["id"]),
+            related_status=status,
+        )
+
     def record_stage4_order_submitted(
         self,
         *,
         symbol: str,
         client_order_id: str,
+        exchange_client_id: str | None = None,
         exchange_order_id: str,
         side: str,
         price: Decimal,
@@ -1879,13 +1946,14 @@ class StateStore:
                 conn.execute(
                     """
                     INSERT INTO stage4_orders(
-                        symbol, client_order_id, exchange_order_id, side, price, qty,
-                        status, mode, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        symbol, client_order_id, exchange_client_id, exchange_order_id,
+                        side, price, qty, status, mode, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         normalize_symbol(symbol),
                         client_order_id,
+                        exchange_client_id,
                         exchange_order_id,
                         side,
                         str(price),
@@ -1900,10 +1968,11 @@ class StateStore:
                 conn.execute(
                     """
                     UPDATE stage4_orders
-                    SET exchange_order_id=?, status=?, mode=?, updated_at=?
+                    SET exchange_client_id=COALESCE(exchange_client_id, ?),
+                        exchange_order_id=?, status=?, mode=?, updated_at=?
                     WHERE client_order_id=?
                     """,
-                    (exchange_order_id, status, mode, now, client_order_id),
+                    (exchange_client_id, exchange_order_id, status, mode, now, client_order_id),
                 )
 
     def record_stage4_order_simulated_submit(
@@ -1918,6 +1987,7 @@ class StateStore:
         self.record_stage4_order_submitted(
             symbol=symbol,
             client_order_id=client_order_id,
+            exchange_client_id=client_order_id,
             exchange_order_id=f"sim-{client_order_id}",
             side=side,
             price=price,
@@ -1966,9 +2036,9 @@ class StateStore:
                 conn.execute(
                     """
                     INSERT INTO stage4_orders(
-                        symbol, client_order_id, exchange_order_id, side, price, qty,
-                        status, mode, last_error, created_at, updated_at
-                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                        symbol, client_order_id, exchange_client_id, exchange_order_id,
+                        side, price, qty, status, mode, last_error, created_at, updated_at
+                    ) VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         normalize_symbol(symbol),
@@ -2065,9 +2135,9 @@ class StateStore:
                 conn.execute(
                     """
                     INSERT INTO stage4_orders(
-                        symbol, client_order_id, exchange_order_id, side, price, qty,
-                        status, mode, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'external', ?, ?)
+                        symbol, client_order_id, exchange_client_id, exchange_order_id,
+                        side, price, qty, status, mode, created_at, updated_at
+                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'external', ?, ?)
                     """,
                     (
                         normalize_symbol(str(getattr(order, "symbol", "UNKNOWN"))),
@@ -2112,6 +2182,9 @@ class StateStore:
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
             exchange_order_id=(str(row["exchange_order_id"]) if row["exchange_order_id"] else None),
             client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+            exchange_client_id=(
+                str(row["exchange_client_id"]) if row["exchange_client_id"] else None
+            ),
             mode=str(row["mode"]),
         )
 

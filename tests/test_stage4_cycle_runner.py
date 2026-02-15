@@ -300,4 +300,4 @@ def test_cursor_advances_when_new_fills_arrive(monkeypatch, tmp_path) -> None:
 
     degrade = store.get_degrade_state_current()
     payload = json.loads(degrade.get("cursor_stall_cycles_json") or "{}")
-    assert payload.get("BTCTRY") >= 1
+    assert payload == {}

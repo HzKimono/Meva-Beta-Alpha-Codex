@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from btcbot.domain.allocation import SizedAction
 from btcbot.domain.models import PairInfo
@@ -47,10 +47,18 @@ def sized_action_to_order(
     rules = build_exchange_rules(pair_info)
     price = Quantizer.quantize_price(mark_price, rules)
     qty_q = Quantizer.quantize_qty(action.qty, rules)
+    qty_before = qty_q
     if qty_q <= Decimal("0"):
         return None, "dropped_qty_became_zero"
     if not Quantizer.validate_min_notional(price, qty_q, rules):
-        return None, "dropped_min_notional_after_quantize"
+        if action.side.lower() != "buy":
+            return None, "dropped_min_notional_after_quantize"
+        required_qty = rules.min_notional_try / price
+        step = rules.step_size
+        steps = (required_qty / step).to_integral_value(rounding=ROUND_CEILING)
+        qty_q = steps * step
+        if qty_q <= qty_before or not Quantizer.validate_min_notional(price, qty_q, rules):
+            return None, "dropped_min_notional_after_quantize"
 
     ts = created_at or datetime.now(UTC)
     return (

@@ -46,6 +46,7 @@ class Order:
     updated_at: datetime
     exchange_order_id: str | None = None
     client_order_id: str | None = None
+    exchange_client_id: str | None = None
     mode: Mode = "dry_run"
 
 

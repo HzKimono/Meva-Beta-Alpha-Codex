@@ -156,13 +156,14 @@ Canary recommendation: keep low limits (`MAX_OPEN_ORDERS`, `MAX_POSITION_NOTIONA
 
 ```powershell
 # doctor
-python -m btcbot.cli doctor --db .\btcbot_state.db --dataset .\data
+$env:SYMBOLS="BTCTRY"
+py -m btcbot.cli doctor --db .\btcbot_state.db --dataset .\data
 
 # dry-run single cycle
-python -m btcbot.cli stage4-run --dry-run --once
+py -m btcbot.cli stage4-run --dry-run --once
 
 # dry-run loop (identical planning path, no side effects)
-python -m btcbot.cli stage4-run --dry-run --loop --cycle-seconds 30 --max-cycles 20 --jitter-seconds 2
+py -m btcbot.cli stage4-run --dry-run --loop --cycle-seconds 30 --max-cycles 20 --jitter-seconds 2
 
 # live single cycle (all safety gates required)
 $env:DRY_RUN="false"
@@ -171,10 +172,15 @@ $env:LIVE_TRADING="true"
 $env:LIVE_TRADING_ACK="I_UNDERSTAND"
 $env:BTCTURK_API_KEY="<key>"
 $env:BTCTURK_API_SECRET="<secret>"
-python -m btcbot.cli stage4-run --once
+py -m btcbot.cli stage4-run --once
 
 # live loop
-python -m btcbot.cli stage4-run --loop --cycle-seconds 30 --jitter-seconds 2
+py -m btcbot.cli stage4-run --loop --cycle-seconds 30 --jitter-seconds 2
+
+# quality checks
+py -m ruff check .
+py -m ruff format --check .
+py -m pytest -q
 ```
 
 Notes:
