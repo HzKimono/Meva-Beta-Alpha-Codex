@@ -311,13 +311,27 @@ class Stage4CycleRunner:
                 extra={
                     "extra": {
                         "cycle_id": cycle_id,
-                        "cash_target": str(decision_report.cash_target_try),
+                        "try_cash_target": str(decision_report.try_cash_target),
                         "cash_try": str(decision_report.cash_try),
-                        "investable_try": str(decision_report.investable_try),
+                        "investable_total_try": str(decision_report.investable_total_try),
+                        "investable_this_cycle_try": str(decision_report.investable_this_cycle_try),
+                        "deploy_budget_try": str(decision_report.deploy_budget_try),
                         "planned_total_try": str(decision_report.planned_total_try),
-                        "unused_investable_try": str(decision_report.unused_investable_try),
+                        "unused_budget_try": str(decision_report.unused_budget_try),
                         "unused_reason": decision_report.investable_usage_reason,
+                        "selected_order_requests": len(decision_report.order_requests),
+                        "deferred_order_requests": len(decision_report.deferred_order_requests),
                         "planned": planned_payload,
+                        "deferred": [
+                            {
+                                "symbol": item.symbol,
+                                "side": item.side,
+                                "qty": str(item.qty),
+                                "price": str(item.price),
+                                "reason": "max_orders_per_cycle",
+                            }
+                            for item in decision_report.deferred_order_requests
+                        ],
                         "decisions": decisions_payload,
                     }
                 },
@@ -326,12 +340,24 @@ class Stage4CycleRunner:
                 cycle_id=cycle_id,
                 ts=datetime.now(UTC),
                 cash_try=decision_report.cash_try,
-                cash_target_try=decision_report.cash_target_try,
-                investable_try=decision_report.investable_try,
+                try_cash_target=decision_report.try_cash_target,
+                investable_total_try=decision_report.investable_total_try,
+                investable_this_cycle_try=decision_report.investable_this_cycle_try,
+                deploy_budget_try=decision_report.deploy_budget_try,
                 planned_total_try=decision_report.planned_total_try,
-                unused_investable_try=decision_report.unused_investable_try,
+                unused_budget_try=decision_report.unused_budget_try,
                 usage_reason=decision_report.investable_usage_reason,
                 plan=planned_payload,
+                deferred=[
+                    {
+                        "symbol": item.symbol,
+                        "side": item.side,
+                        "qty": str(item.qty),
+                        "price": str(item.price),
+                        "reason": "max_orders_per_cycle",
+                    }
+                    for item in decision_report.deferred_order_requests
+                ],
                 decisions=decisions_payload,
             )
             pipeline_orders = [

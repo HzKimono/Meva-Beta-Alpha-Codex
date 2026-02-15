@@ -38,14 +38,17 @@ class CycleDecisionReport:
     allocation_decisions: tuple[AllocationDecision, ...]
     counters: Mapping[str, int]
     order_requests: tuple[Order, ...]
+    deferred_order_requests: tuple[Order, ...]
     mapped_orders_count: int
     dropped_actions_count: int
     dropped_reasons: Mapping[str, int]
     cash_try: Decimal
-    cash_target_try: Decimal
-    investable_try: Decimal
+    try_cash_target: Decimal
+    investable_total_try: Decimal
+    investable_this_cycle_try: Decimal
+    deploy_budget_try: Decimal
     planned_total_try: Decimal
-    unused_investable_try: Decimal
+    unused_budget_try: Decimal
     investable_usage_reason: str
 
 
@@ -104,6 +107,7 @@ class DecisionPipelineService:
                 try_cash_max=self._to_decimal(self.settings.try_cash_max),
                 min_order_notional_try=self._to_decimal(self.settings.min_order_notional_try),
                 fee_buffer_bps=self._to_decimal(self.settings.allocation_fee_buffer_bps),
+                fee_buffer_ratio=self._to_decimal(self.settings.fee_buffer_ratio),
                 max_intent_notional_try=Decimal("0"),
                 max_position_try_per_symbol=self._to_decimal(
                     self.settings.max_position_try_per_symbol
@@ -143,25 +147,45 @@ class DecisionPipelineService:
                 continue
             order_requests.append(order)
 
+        selected_orders, deferred_orders = self._select_orders_for_cycle(order_requests)
+
         report = CycleDecisionReport(
             selected_universe=tuple(selected_universe),
             intents=tuple(intents),
             allocation_actions=allocation.actions,
             allocation_decisions=allocation.decisions,
             counters=allocation.counters,
-            order_requests=tuple(order_requests),
+            order_requests=tuple(selected_orders),
+            deferred_order_requests=tuple(deferred_orders),
             mapped_orders_count=len(order_requests),
             dropped_actions_count=sum(dropped_reasons.values()),
             dropped_reasons=dropped_reasons,
             cash_try=allocation.cash_try,
-            cash_target_try=allocation.cash_target_try,
-            investable_try=allocation.investable_try,
+            try_cash_target=allocation.try_cash_target,
+            investable_total_try=allocation.investable_total_try,
+            investable_this_cycle_try=allocation.investable_this_cycle_try,
+            deploy_budget_try=allocation.deploy_budget_try,
             planned_total_try=allocation.planned_total_try,
-            unused_investable_try=allocation.unused_investable_try,
+            unused_budget_try=allocation.unused_budget_try,
             investable_usage_reason=allocation.investable_usage_reason,
         )
         self._log_report(report)
         return report
+
+    def _select_orders_for_cycle(
+        self, order_requests: list[Order]
+    ) -> tuple[list[Order], list[Order]]:
+        max_orders = max(0, int(self.settings.max_orders_per_cycle))
+        ranked = sorted(
+            order_requests,
+            key=lambda item: (
+                Decimal("0") - item.qty * item.price,
+                canonical_symbol(item.symbol),
+                item.side,
+                item.client_order_id or "",
+            ),
+        )
+        return ranked[:max_orders], ranked[max_orders:]
 
     def _default_registry(self) -> StrategyRegistry:
         registry = StrategyRegistry()
@@ -258,6 +282,8 @@ class DecisionPipelineService:
                     "intent_count": len(report.intents),
                     "actions_count": len(report.allocation_actions),
                     "mapped_orders_count": report.mapped_orders_count,
+                    "selected_orders_count": len(report.order_requests),
+                    "deferred_orders_count": len(report.deferred_order_requests),
                     "dropped_actions_count": report.dropped_actions_count,
                     "dropped_reasons": dict(report.dropped_reasons),
                     "counters": dict(report.counters),

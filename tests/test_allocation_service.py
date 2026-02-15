@@ -455,3 +455,53 @@ def test_investable_usage_cap_limits_budget() -> None:
     )
     assert result.planned_total_try <= Decimal("120")
     assert result.cash_try - result.planned_total_try >= result.cash_target_try
+
+
+def test_investable_total_math_uses_cash_and_target() -> None:
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("100"))],
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        knobs=AllocationKnobs(target_try_cash=Decimal("300")),
+    )
+
+    assert result.cash_try == Decimal("1000")
+    assert result.try_cash_target == Decimal("300")
+    assert result.investable_total_try == Decimal("700")
+
+
+def test_fraction_mode_scales_investable_this_cycle() -> None:
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("500"))],
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        knobs=AllocationKnobs(
+            target_try_cash=Decimal("300"),
+            investable_usage_mode="fraction",
+            investable_usage_fraction=Decimal("0.5"),
+        ),
+    )
+
+    assert result.investable_total_try == Decimal("700")
+    assert result.investable_this_cycle_try == Decimal("350")
+    assert result.planned_total_try <= result.deploy_budget_try
+
+
+def test_cap_mode_scales_investable_this_cycle() -> None:
+    result = AllocationService.allocate(
+        intents=[_intent(target_notional_try=Decimal("500"))],
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        knobs=AllocationKnobs(
+            target_try_cash=Decimal("300"),
+            investable_usage_mode="cap",
+            max_try_per_cycle=Decimal("120"),
+        ),
+    )
+
+    assert result.investable_total_try == Decimal("700")
+    assert result.investable_this_cycle_try == Decimal("120")
+    assert result.planned_total_try <= result.deploy_budget_try

@@ -1491,12 +1491,15 @@ class StateStore:
                 cycle_id TEXT PRIMARY KEY,
                 ts TEXT NOT NULL,
                 cash_try TEXT NOT NULL,
-                cash_target_try TEXT NOT NULL,
-                investable_try TEXT NOT NULL,
+                try_cash_target TEXT NOT NULL,
+                investable_total_try TEXT NOT NULL,
+                investable_this_cycle_try TEXT NOT NULL,
+                deploy_budget_try TEXT NOT NULL,
                 planned_total_try TEXT NOT NULL,
-                unused_investable_try TEXT NOT NULL,
+                unused_budget_try TEXT NOT NULL,
                 usage_reason TEXT NOT NULL,
                 plan_json TEXT NOT NULL,
+                deferred_json TEXT NOT NULL DEFAULT '[]',
                 decisions_json TEXT NOT NULL
             )
             """
@@ -1505,6 +1508,40 @@ class StateStore:
         cycle_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(cycle_audit)")}
         if "envelope_json" not in cycle_columns:
             conn.execute("ALTER TABLE cycle_audit ADD COLUMN envelope_json TEXT")
+        allocation_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(allocation_plans)")
+        }
+        if "try_cash_target" not in allocation_columns and "cash_target_try" in allocation_columns:
+            conn.execute("ALTER TABLE allocation_plans ADD COLUMN try_cash_target TEXT")
+            conn.execute("UPDATE allocation_plans SET try_cash_target = cash_target_try")
+        if (
+            "investable_total_try" not in allocation_columns
+            and "investable_try" in allocation_columns
+        ):
+            conn.execute("ALTER TABLE allocation_plans ADD COLUMN investable_total_try TEXT")
+            conn.execute("UPDATE allocation_plans SET investable_total_try = investable_try")
+        if "investable_this_cycle_try" not in allocation_columns:
+            conn.execute("ALTER TABLE allocation_plans ADD COLUMN investable_this_cycle_try TEXT")
+            conn.execute(
+                "UPDATE allocation_plans SET investable_this_cycle_try = "
+                "COALESCE(investable_total_try, investable_try, '0')"
+            )
+        if "deploy_budget_try" not in allocation_columns:
+            conn.execute("ALTER TABLE allocation_plans ADD COLUMN deploy_budget_try TEXT")
+            conn.execute(
+                "UPDATE allocation_plans SET deploy_budget_try = COALESCE(planned_total_try, '0')"
+            )
+        if (
+            "unused_budget_try" not in allocation_columns
+            and "unused_investable_try" in allocation_columns
+        ):
+            conn.execute("ALTER TABLE allocation_plans ADD COLUMN unused_budget_try TEXT")
+            conn.execute("UPDATE allocation_plans SET unused_budget_try = unused_investable_try")
+        if "deferred_json" not in allocation_columns:
+            conn.execute("ALTER TABLE allocation_plans ADD COLUMN deferred_json TEXT")
+            conn.execute(
+                "UPDATE allocation_plans SET deferred_json = '[]' WHERE deferred_json IS NULL"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS account_snapshots (
@@ -2457,43 +2494,52 @@ class StateStore:
         cycle_id: str,
         ts: datetime,
         cash_try: Decimal,
-        cash_target_try: Decimal,
-        investable_try: Decimal,
+        try_cash_target: Decimal,
+        investable_total_try: Decimal,
+        investable_this_cycle_try: Decimal,
+        deploy_budget_try: Decimal,
         planned_total_try: Decimal,
-        unused_investable_try: Decimal,
+        unused_budget_try: Decimal,
         usage_reason: str,
         plan: list[dict[str, object]],
+        deferred: list[dict[str, object]],
         decisions: list[dict[str, object]],
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO allocation_plans(
-                    cycle_id, ts, cash_try, cash_target_try, investable_try,
-                    planned_total_try, unused_investable_try, usage_reason,
-                    plan_json, decisions_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cycle_id, ts, cash_try, try_cash_target, investable_total_try,
+                    investable_this_cycle_try, deploy_budget_try, planned_total_try,
+                    unused_budget_try, usage_reason, plan_json, deferred_json, decisions_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cycle_id) DO UPDATE SET
                     ts=excluded.ts,
                     cash_try=excluded.cash_try,
-                    cash_target_try=excluded.cash_target_try,
-                    investable_try=excluded.investable_try,
+                    try_cash_target=excluded.try_cash_target,
+                    investable_total_try=excluded.investable_total_try,
+                    investable_this_cycle_try=excluded.investable_this_cycle_try,
+                    deploy_budget_try=excluded.deploy_budget_try,
                     planned_total_try=excluded.planned_total_try,
-                    unused_investable_try=excluded.unused_investable_try,
+                    unused_budget_try=excluded.unused_budget_try,
                     usage_reason=excluded.usage_reason,
                     plan_json=excluded.plan_json,
+                    deferred_json=excluded.deferred_json,
                     decisions_json=excluded.decisions_json
                 """,
                 (
                     cycle_id,
                     ensure_utc(ts).isoformat(),
                     str(cash_try),
-                    str(cash_target_try),
-                    str(investable_try),
+                    str(try_cash_target),
+                    str(investable_total_try),
+                    str(investable_this_cycle_try),
+                    str(deploy_budget_try),
                     str(planned_total_try),
-                    str(unused_investable_try),
+                    str(unused_budget_try),
                     usage_reason,
                     json.dumps(plan, sort_keys=True),
+                    json.dumps(deferred, sort_keys=True),
                     json.dumps(decisions, sort_keys=True),
                 ),
             )
@@ -2508,6 +2554,7 @@ class StateStore:
             return None
         payload = {key: row[key] for key in row.keys()}
         payload["plan"] = json.loads(str(payload.pop("plan_json")))
+        payload["deferred"] = json.loads(str(payload.pop("deferred_json") or "[]"))
         payload["decisions"] = json.loads(str(payload.pop("decisions_json")))
         return payload
 
