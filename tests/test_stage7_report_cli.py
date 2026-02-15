@@ -1,9 +1,13 @@
 import sqlite3
 import sys
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from btcbot import cli
 from btcbot.config import Settings
+from btcbot.domain.models import PairInfo
+from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
 
@@ -278,6 +282,108 @@ def test_stage7_report_prints_no_trade_reason_and_allocation_summary(
     assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5) == 0
     out = capsys.readouterr().out
     assert "DRY_RUN" in out
-    assert "allocation_selection=selected=1 deferred=1" in out
+    assert "stage4_plan_summary=planned_total_try=0" in out
     assert "selected_symbols=BTCTRY:150" in out
-    assert "allocation_plan=investable_total_try=200" in out
+    assert "allocation_plan=source=cycle_id cycle_id=c2 investable_total_try=200" in out
+
+
+class _Stage4ReportExchange:
+    def get_orderbook(self, symbol: str) -> tuple[float, float]:
+        del symbol
+        return (100.0, 101.0)
+
+    def get_balances(self):
+        return [type("B", (), {"asset": "TRY", "free": Decimal("1000")})()]
+
+    def list_open_orders(self, symbol: str):
+        del symbol
+        return []
+
+    def get_recent_fills(self, symbol: str, since_ms: int | None = None):
+        del symbol, since_ms
+        return []
+
+    def get_exchange_info(self):
+        return [
+            PairInfo(
+                pairSymbol="BTCTRY",
+                numeratorScale=6,
+                denominatorScale=2,
+                minTotalAmount=Decimal("10"),
+                tickSize=Decimal("0.1"),
+                stepSize=Decimal("0.0001"),
+            )
+        ]
+
+    def close(self) -> None:
+        return None
+
+
+def test_stage7_report_reads_stage4_plan_from_persisted_cycle(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    settings = Settings(
+        STATE_DB_PATH=str(tmp_path / "s7-stage4.db"),
+        DRY_RUN=True,
+        KILL_SWITCH=True,
+        SYMBOLS="BTC_TRY",
+    )
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: _Stage4ReportExchange(),
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(db_path=settings.state_db_path)
+    with store._connect() as conn:
+        plan_row = conn.execute(
+            "SELECT cycle_id FROM allocation_plans ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    assert plan_row is not None
+    cycle_id = str(plan_row["cycle_id"])
+
+    store.save_stage7_run_metrics(
+        cycle_id,
+        {
+            "ts": datetime.now(UTC).isoformat(),
+            "run_id": "r-stage4",
+            "mode_base": "NORMAL",
+            "mode_final": "NORMAL",
+            "universe_size": 1,
+            "intents_planned_count": 0,
+            "intents_skipped_count": 0,
+            "oms_submitted_count": 0,
+            "oms_filled_count": 0,
+            "oms_rejected_count": 0,
+            "oms_canceled_count": 0,
+            "events_appended": 0,
+            "events_ignored": 0,
+            "equity_try": "1000",
+            "gross_pnl_try": "0",
+            "net_pnl_try": "0",
+            "fees_try": "0",
+            "slippage_try": "0",
+            "max_drawdown_pct": "0",
+            "turnover_try": "0",
+            "latency_ms_total": 1,
+            "selection_ms": 0,
+            "planning_ms": 0,
+            "intents_ms": 0,
+            "oms_ms": 0,
+            "ledger_ms": 0,
+            "persist_ms": 0,
+            "quality_flags": {},
+            "alert_flags": {},
+            "no_trades_reason": "KILL_SWITCH",
+            "no_metrics_reason": "NO_FILLS",
+        },
+    )
+
+    assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5) == 0
+    out = capsys.readouterr().out
+    assert "no_trades_reason" in out
+    assert "KILL_SWITCH" in out
+    assert "stage4_plan_summary=" in out
+    assert "allocation_plan=source=cycle_id" in out

@@ -118,6 +118,8 @@ def test_sell_works_with_zero_try_balance() -> None:
         knobs=knobs,
     )
 
+    assert result.investable_total_try == Decimal("0")
+    assert result.investable_this_cycle_try == Decimal("0")
     assert len(result.actions) == 1
     assert result.actions[0].notional_try == Decimal("50")
     assert result.decisions[0].status == "accepted"
@@ -419,6 +421,8 @@ def test_buy_respects_try_cash_max_cap() -> None:
         mark_prices={"BTCTRY": Decimal("100")},
         knobs=knobs,
     )
+    assert result.investable_total_try == Decimal("700")
+    assert result.investable_this_cycle_try == Decimal("50")
     assert len(result.actions) == 1
     assert result.actions[0].notional_try == Decimal("50")
 

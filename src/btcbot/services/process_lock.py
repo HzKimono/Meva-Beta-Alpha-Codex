@@ -13,6 +13,7 @@ from typing import BinaryIO
 class ProcessLock:
     path: str
     handle: object
+    pid: int
 
 
 def _lock_file_path(key: str) -> Path:
@@ -27,8 +28,13 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR)
     fh: BinaryIO = os.fdopen(fd, "r+b")
+    pid = os.getpid()
     lock_acquired = False
     try:
+        fh.seek(0)
+        fh.truncate(0)
+        fh.write(f"{pid}\n".encode())
+        fh.flush()
         try:
             if os.name == "nt":
                 import msvcrt
@@ -44,11 +50,7 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
             raise RuntimeError(
                 f"Another btcbot instance is already running for db/account lock: {path}"
             ) from exc
-
-        fh.seek(0)
-        fh.write(f"{os.getpid()}\n".encode())
-        fh.flush()
-        yield ProcessLock(path=str(path), handle=fh)
+        yield ProcessLock(path=str(path), handle=fh, pid=pid)
     finally:
         try:
             if lock_acquired:
