@@ -29,6 +29,8 @@ from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
+from btcbot.services.planning_kernel_adapters import Stage7PlanConsumer
+from btcbot.planning_kernel import ExecutionPort, Plan
 
 logger = logging.getLogger(__name__)
 
@@ -982,3 +984,11 @@ class Stage7CycleRunner:
         )
         logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})
         return stage4_result
+
+    def consume_shared_plan(self, plan: Plan, execution: ExecutionPort) -> list[str]:
+        """Adapter glue for future migration to the shared PlanningKernel.
+
+        TODO: invoke this once Stage7 planning is delegated to shared kernel output.
+        """
+
+        return Stage7PlanConsumer(execution=execution).consume(plan)
