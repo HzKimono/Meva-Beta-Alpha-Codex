@@ -24,6 +24,28 @@ class Settings(BaseSettings):
     btcturk_api_key: SecretStr | None = Field(default=None, alias="BTCTURK_API_KEY")
     btcturk_api_secret: SecretStr | None = Field(default=None, alias="BTCTURK_API_SECRET")
     btcturk_base_url: str = Field(default="https://api.btcturk.com", alias="BTCTURK_BASE_URL")
+    btcturk_ws_enabled: bool = Field(default=False, alias="BTCTURK_WS_ENABLED")
+    btcturk_ws_url: str = Field(default="wss://ws-feed-pro.btcturk.com", alias="BTCTURK_WS_URL")
+    btcturk_ws_idle_reconnect_ms: int = Field(default=30_000, alias="BTCTURK_WS_IDLE_RECONNECT_MS")
+    btcturk_ws_queue_max: int = Field(default=1_000, alias="BTCTURK_WS_QUEUE_MAX")
+    btcturk_rest_reliability_enabled: bool = Field(
+        default=True,
+        alias="BTCTURK_REST_RELIABILITY_ENABLED",
+    )
+    btcturk_rest_max_retries: int = Field(default=4, alias="BTCTURK_REST_MAX_RETRIES")
+    btcturk_rest_base_delay_ms: int = Field(default=400, alias="BTCTURK_REST_BASE_DELAY_MS")
+    btcturk_rest_max_delay_ms: int = Field(default=4_000, alias="BTCTURK_REST_MAX_DELAY_MS")
+    btcturk_rate_limit_rps: float = Field(default=8.0, alias="BTCTURK_RATE_LIMIT_RPS")
+    btcturk_rate_limit_burst: int = Field(default=8, alias="BTCTURK_RATE_LIMIT_BURST")
+    btcturk_http_max_connections: int = Field(default=10, alias="BTCTURK_HTTP_MAX_CONNECTIONS")
+    btcturk_clock_sync_interval_seconds: int = Field(
+        default=60,
+        alias="BTCTURK_CLOCK_SYNC_INTERVAL_SECONDS",
+    )
+    btcturk_marketdata_max_age_ms: int = Field(
+        default=15_000,
+        alias="BTCTURK_MARKETDATA_MAX_AGE_MS",
+    )
 
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     dry_run: bool = Field(default=True, alias="DRY_RUN")

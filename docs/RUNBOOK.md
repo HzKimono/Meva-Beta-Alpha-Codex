@@ -58,3 +58,22 @@ python -m btcbot.cli doctor --db .\btcbot_state.db --json
 Doctor exchange-rules statuses:
 - `PASS`: normalized rules usable (including verified conservative TRY min-notional fallback).
 - `WARN`: explicit reason (for example non-TRY symbol missing min-notional) with `safe_behavior=reject_and_continue`.
+
+## 7) BTCTurk live-reliability rollout (safe defaults)
+Environment defaults are conservative:
+- `BTCTURK_WS_ENABLED=false`
+- `BTCTURK_REST_RELIABILITY_ENABLED=true`
+- `BTCTURK_WS_IDLE_RECONNECT_MS=30000`
+- `BTCTURK_WS_QUEUE_MAX=1000`
+- `BTCTURK_REST_MAX_RETRIES=4`
+- `BTCTURK_REST_BASE_DELAY_MS=400`
+- `BTCTURK_REST_MAX_DELAY_MS=4000`
+- `BTCTURK_RATE_LIMIT_RPS=8`
+- `BTCTURK_RATE_LIMIT_BURST=8`
+- `BTCTURK_MARKETDATA_MAX_AGE_MS=15000`
+
+Rollout order:
+1. Enable REST reliability only in dry-run.
+2. Enable WS market data in dry-run.
+3. Enable WS user stream finalization channels (`452`) and fill channels (`423`, `441`) in dry-run.
+4. Live rollout with circuit breakers + reconcile loop continuously enabled.
