@@ -5,7 +5,19 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Mapping, Protocol, Sequence
 
+from btcbot.domain.models import normalize_symbol
 from btcbot.domain.order_intent import OrderIntent
+
+
+@dataclass(frozen=True)
+class OpenOrderView:
+    symbol: str
+    side: str
+    order_type: str
+    price: Decimal
+    qty: Decimal
+    client_order_id: str
+    status: str | None = None
 
 
 class MarketDataSnapshot(Protocol):
@@ -28,7 +40,7 @@ class PortfolioState(Protocol):
     def positions_qty(self) -> Mapping[str, Decimal]: ...
 
     @property
-    def open_orders(self) -> Sequence[OrderIntent]: ...
+    def open_orders(self) -> Sequence[OpenOrderView]: ...
 
 
 @dataclass(frozen=True)
@@ -48,7 +60,8 @@ class Plan:
     cycle_id: str
     generated_at: datetime
     universe: tuple[str, ...]
-    intents: tuple[Intent, ...]
+    intents_raw: tuple[Intent, ...]
+    intents_allocated: tuple[Intent, ...]
     order_intents: tuple[OrderIntent, ...]
     planning_gates: Mapping[str, str]
     diagnostics: Mapping[str, str]
@@ -95,13 +108,49 @@ class PlanningKernel:
     def plan(self, context: PlanningContext) -> Plan:
         """Build a deterministic plan consumed by execution layers.
 
-        TODO: wire fully into Stage4 runner after Stage7 migration parity is proven.
+        Determinism contract:
+        - universe sorted by normalized symbol
+        - intents sorted by (symbol, side, strategy_id, rationale, target_notional_try)
+        - order_intents sorted by (symbol, side, client_order_id)
         """
 
-        universe = tuple(sorted({symbol for symbol in self.universe_selector.select(context)}))
-        intents = tuple(self.strategy_engine.generate_intents(context, universe))
-        allocated_intents = tuple(self.allocator.allocate(context, intents))
-        order_intents = tuple(self.order_intent_builder.build(context, allocated_intents))
+        universe = tuple(
+            sorted({normalize_symbol(symbol) for symbol in self.universe_selector.select(context)})
+        )
+        raw_intents = tuple(
+            sorted(
+                self.strategy_engine.generate_intents(context, universe),
+                key=lambda item: (
+                    normalize_symbol(item.symbol),
+                    str(item.side).upper(),
+                    str(item.strategy_id),
+                    str(item.rationale),
+                    Decimal(str(item.target_notional_try)),
+                ),
+            )
+        )
+        allocated_intents = tuple(
+            sorted(
+                self.allocator.allocate(context, raw_intents),
+                key=lambda item: (
+                    normalize_symbol(item.symbol),
+                    str(item.side).upper(),
+                    str(item.strategy_id),
+                    str(item.rationale),
+                    Decimal(str(item.target_notional_try)),
+                ),
+            )
+        )
+        order_intents = tuple(
+            sorted(
+                self.order_intent_builder.build(context, allocated_intents),
+                key=lambda item: (
+                    normalize_symbol(item.symbol),
+                    str(item.side).upper(),
+                    str(item.client_order_id),
+                ),
+            )
+        )
 
         planning_gates = {
             "market_data_available": str(bool(context.market_data.mark_prices_try)).lower(),
@@ -110,16 +159,18 @@ class PlanningKernel:
         }
         diagnostics = {
             "universe_count": str(len(universe)),
-            "intent_count": str(len(intents)),
+            "raw_intent_count": str(len(raw_intents)),
             "allocated_intent_count": str(len(allocated_intents)),
             "order_intent_count": str(len(order_intents)),
+            "open_order_count": str(len(context.portfolio.open_orders)),
         }
 
         return Plan(
             cycle_id=context.cycle_id,
             generated_at=context.now_utc.astimezone(UTC),
             universe=universe,
-            intents=allocated_intents,
+            intents_raw=raw_intents,
+            intents_allocated=allocated_intents,
             order_intents=order_intents,
             planning_gates=planning_gates,
             diagnostics=diagnostics,

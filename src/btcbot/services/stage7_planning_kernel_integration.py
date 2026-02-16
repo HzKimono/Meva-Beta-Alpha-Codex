@@ -8,11 +8,12 @@ from typing import Mapping
 from btcbot.config import Settings
 from btcbot.domain.models import Balance, normalize_symbol
 from btcbot.domain.order_intent import OrderIntent
-from btcbot.domain.portfolio_policy_models import PortfolioPlan, RebalanceAction
+from btcbot.domain.portfolio_policy_models import PortfolioPlan
 from btcbot.domain.risk_budget import Mode
 from btcbot.planning_kernel import (
     Allocator,
     Intent,
+    OpenOrderView,
     OrderIntentBuilder,
     PlanningContext,
     StrategyEngine,
@@ -33,8 +34,39 @@ class Stage7MarketDataSnapshot:
 class Stage7PortfolioState:
     cash_try: Decimal
     positions_qty: Mapping[str, Decimal]
-    open_orders: tuple[OrderIntent, ...]
+    open_orders: tuple[OpenOrderView, ...]
     balances: tuple[Balance, ...]
+
+
+def normalize_stage4_open_orders(raw_orders: list[object]) -> list[OpenOrderView]:
+    """Convert Stage4 order rows to minimal planning open-order view."""
+
+    views: list[OpenOrderView] = []
+    for item in raw_orders:
+        symbol = normalize_symbol(getattr(item, "symbol", ""))
+        side = str(getattr(item, "side", "")).upper()
+        order_type = str(getattr(item, "type", getattr(item, "order_type", "LIMIT"))).upper()
+        price = Decimal(str(getattr(item, "price", Decimal("0"))))
+        qty = Decimal(str(getattr(item, "qty", Decimal("0"))))
+        client_order_id = str(getattr(item, "client_order_id", ""))
+        status = getattr(item, "status", None)
+        if not symbol or not client_order_id:
+            continue
+        views.append(
+            OpenOrderView(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                price=price,
+                qty=qty,
+                client_order_id=client_order_id,
+                status=(str(status) if status is not None else None),
+            )
+        )
+    return sorted(
+        views,
+        key=lambda item: (item.symbol, item.side, item.order_type, item.client_order_id),
+    )
 
 
 @dataclass
@@ -116,18 +148,18 @@ class Stage7OrderIntentBuilderAdapter(OrderIntentBuilder):
     rules_unavailable: Mapping[str, str]
 
     @staticmethod
-    def normalize_side(raw: str) -> str:
+    def normalize_side(raw: str) -> str | None:
         side = str(raw).strip().upper()
         if side in {"BUY", "SELL"}:
             return side
-        return "BUY"
+        return None
 
     @staticmethod
-    def normalize_order_type(raw: str) -> str:
+    def normalize_order_type(raw: str) -> str | None:
         order_type = str(raw).strip().upper()
         if order_type in {"LIMIT", "MARKET"}:
             return order_type
-        return "LIMIT"
+        return None
 
     def build(self, context: PlanningContext, intents: list[Intent]) -> list[OrderIntent]:
         del intents
@@ -144,12 +176,42 @@ class Stage7OrderIntentBuilderAdapter(OrderIntentBuilder):
         )
         normalized: list[OrderIntent] = []
         for item in built:
+            normalized_symbol = normalize_symbol(item.symbol)
+            normalized_side = self.normalize_side(item.side)
+            normalized_order_type = self.normalize_order_type(item.order_type)
+            invalid_reasons: list[str] = []
+            if normalized_side is None:
+                invalid_reasons.append("invalid_side")
+            if normalized_order_type is None:
+                invalid_reasons.append("invalid_order_type")
+            if invalid_reasons:
+                normalized.append(
+                    OrderIntent(
+                        cycle_id=item.cycle_id,
+                        symbol=normalized_symbol,
+                        side="BUY",
+                        order_type="LIMIT",
+                        price_try=Decimal("0"),
+                        qty=Decimal("0"),
+                        notional_try=Decimal("0"),
+                        client_order_id=item.client_order_id,
+                        reason=item.reason,
+                        constraints_applied={
+                            **dict(item.constraints_applied),
+                            "normalization_error": ",".join(invalid_reasons),
+                        },
+                        skipped=True,
+                        skip_reason="invalid_normalized_fields",
+                    )
+                )
+                continue
+
             normalized.append(
                 OrderIntent(
                     cycle_id=item.cycle_id,
-                    symbol=normalize_symbol(item.symbol),
-                    side=self.normalize_side(item.side),
-                    order_type=self.normalize_order_type(item.order_type),
+                    symbol=normalized_symbol,
+                    side=normalized_side,
+                    order_type=normalized_order_type,
                     price_try=item.price_try,
                     qty=item.qty,
                     notional_try=item.notional_try,
@@ -169,7 +231,7 @@ def build_stage7_planning_context(
     now_utc: datetime,
     mark_prices: Mapping[str, Decimal],
     balances: list[Balance],
-    open_orders: list[OrderIntent],
+    open_orders: list[OpenOrderView],
     quote_ccy: str,
 ) -> PlanningContext:
     quote_asset = str(quote_ccy).upper()
@@ -184,7 +246,9 @@ def build_stage7_planning_context(
         positions_qty[asset] = amount
 
     market = Stage7MarketDataSnapshot(
-        mark_prices_try={normalize_symbol(symbol): Decimal(str(price)) for symbol, price in mark_prices.items()},
+        mark_prices_try={
+            normalize_symbol(symbol): Decimal(str(price)) for symbol, price in mark_prices.items()
+        },
         symbol_rules={},
     )
     portfolio = Stage7PortfolioState(
@@ -199,31 +263,3 @@ def build_stage7_planning_context(
         market_data=market,
         portfolio=portfolio,
     )
-
-
-def intents_from_portfolio_plan(plan: PortfolioPlan, cycle_id: str) -> list[Intent]:
-    """Legacy parity helper for tests and diagnostics."""
-
-    return [
-        Intent(
-            symbol=normalize_symbol(action.symbol),
-            side=str(action.side).upper(),
-            target_notional_try=Decimal(str(action.target_notional_try)),
-            rationale=action.reason,
-            strategy_id=f"legacy:{cycle_id}",
-        )
-        for action in plan.actions
-    ]
-
-
-def actions_from_intents(intents: list[Intent]) -> list[RebalanceAction]:
-    return [
-        RebalanceAction(
-            symbol=intent.symbol,
-            side=Stage7OrderIntentBuilderAdapter.normalize_side(intent.side),
-            target_notional_try=Decimal(str(intent.target_notional_try)),
-            est_qty=Decimal("0"),
-            reason=intent.rationale,
-        )
-        for intent in intents
-    ]

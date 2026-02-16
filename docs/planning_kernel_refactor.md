@@ -44,7 +44,7 @@ Execution layer (stage-specific):
    - Add `consume_shared_plan(...)` methods only.
 
 4. **Add parity tests for shared plan consumption.**
-   - Add: `tests/test_planning_kernel_parity.py`.
+   - Add: `tests/test_plan_consumers_contract.py`.
    - Assert Stage4 and Stage7 consume identical shared `Plan.order_intents` into identical execution submissions.
 
 5. **Future migration (follow-up, not in this patch).**
@@ -63,14 +63,41 @@ TODO markers identify where live wiring should occur without changing current ru
 
 ## E) Test plan
 
-- New test: `tests/test_planning_kernel_parity.py`
+- New test: `tests/test_plan_consumers_contract.py`
   - Builds deterministic fake planning components.
   - Generates a shared `Plan` from `PlanningKernel`.
   - Verifies Stage4 and Stage7 consumers submit identical `OrderIntent`s to an `ExecutionPort`.
 - Run command:
-  - `pytest tests/test_planning_kernel_parity.py`
+  - `pytest tests/test_plan_consumers_contract.py`
 
 
 ## Rollout toggle
 
 - `STAGE7_USE_PLANNING_KERNEL=true|false` switches Stage7 between shared-kernel and legacy planning paths for safe rollout.
+
+## Production hardening notes
+
+### Determinism contract
+
+- `PlanningKernel.plan()` now enforces deterministic ordering before returning `Plan`:
+  - universe by normalized symbol
+  - raw/allocated intents by `(symbol, side, strategy_id, rationale, target_notional_try)`
+  - order intents by `(symbol, side, client_order_id)`
+- Consumers (`Stage4PlanConsumer`/`Stage7PlanConsumer`) must preserve plan order and must not re-sort.
+
+### Typed open-orders planning view
+
+- Kernel context uses `OpenOrderView` to pass minimal open-order state into planning:
+  - `symbol`, `side`, `order_type`, `price`, `qty`, `client_order_id`, optional `status`
+- Stage7 converts persisted stage4 open orders to `OpenOrderView` before invoking the kernel.
+
+### Strict normalization policy
+
+- Stage7 order-intent normalization is strict:
+  - invalid `side` or `order_type` does **not** default into a tradable order
+  - resulting intent is marked `skipped=True` with `skip_reason="invalid_normalized_fields"`
+
+### Live-execution/reconciliation note
+
+- For live execution, final order state transitions may arrive asynchronously over WebSocket channels.
+- `reconcile()` should remain the source of truth merger for REST snapshots + stream events, including late fills/cancels, consistent with BTCTurk channel semantics.

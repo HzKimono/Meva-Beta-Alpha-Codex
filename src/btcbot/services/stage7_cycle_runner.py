@@ -37,6 +37,7 @@ from btcbot.services.stage7_planning_kernel_integration import (
     Stage7PortfolioStrategyAdapter,
     Stage7UniverseSelectorAdapter,
     build_stage7_planning_context,
+    normalize_stage4_open_orders,
 )
 
 logger = logging.getLogger(__name__)
@@ -522,9 +523,10 @@ class Stage7CycleRunner:
                     cycle_id=cycle_id,
                     generated_at=now,
                     universe=tuple(sorted({normalize_symbol(item) for item in universe_result.selected_symbols})),
-                    intents=tuple(),
                     order_intents=tuple(order_intents),
                     planning_gates={},
+                    intents_raw=tuple(),
+                    intents_allocated=tuple(),
                     diagnostics={"engine": planning_engine},
                 )
                 self.consume_shared_plan(kernel_plan, execution_port)
@@ -1030,7 +1032,7 @@ class Stage7CycleRunner:
             now_utc=now,
             mark_prices=mark_prices,
             balances=balances,
-            open_orders=[],
+            open_orders=normalize_stage4_open_orders(open_orders),
             quote_ccy=runtime.stage7_universe_quote_ccy,
         )
         universe_adapter = Stage7UniverseSelectorAdapter(

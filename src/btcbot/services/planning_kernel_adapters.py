@@ -19,10 +19,7 @@ class Stage4PlanConsumer:
 
     def consume(self, plan: Plan) -> list[str]:
         submitted_ids: list[str] = []
-        for intent in sorted(
-            plan.order_intents,
-            key=lambda item: (item.symbol, item.side, item.client_order_id),
-        ):
+        for intent in plan.order_intents:
             if intent.skipped:
                 continue
             submitted_ids.append(self.execution.submit(intent))
@@ -37,10 +34,7 @@ class Stage7PlanConsumer:
 
     def consume(self, plan: Plan) -> list[str]:
         submitted_ids: list[str] = []
-        for intent in sorted(
-            plan.order_intents,
-            key=lambda item: (item.symbol, item.side, item.client_order_id),
-        ):
+        for intent in plan.order_intents:
             if intent.skipped:
                 continue
             submitted_ids.append(self.execution.submit(intent))
