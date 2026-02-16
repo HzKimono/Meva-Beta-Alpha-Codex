@@ -277,6 +277,40 @@ def test_no_fill_history_does_not_warn_or_mark_cursor_stall(monkeypatch, tmp_pat
     assert "CURSOR_STALL" not in codes
 
 
+def test_no_fill_history_does_not_warn_or_mark_cursor_stall(monkeypatch, tmp_path, caplog) -> None:
+    class NoFillsExchange(FakeExchange):
+        def get_recent_fills(self, symbol: str, since_ms: int | None = None):
+            del symbol, since_ms
+            return []
+
+    runner = Stage4CycleRunner()
+    exchange = NoFillsExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    settings = Settings(
+        DRY_RUN=False,
+        LIVE_TRADING=False,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "no_fills.sqlite"),
+        SYMBOLS="XRP_TRY",
+        CURSOR_STALL_CYCLES=1,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert runner.run_one_cycle(settings) == 0
+
+    assert "stage4_fills_fetch_failed" not in caplog.text
+
+    store = StateStore(settings.state_db_path)
+    with store._connect() as conn:
+        rows = conn.execute("SELECT code FROM anomaly_events").fetchall()
+    codes = {str(row["code"]) for row in rows}
+    assert "CURSOR_STALL" not in codes
+
+
 def test_runner_uses_normalized_cursor_keys(monkeypatch, tmp_path) -> None:
     runner = Stage4CycleRunner()
     exchange = FakeExchange()
