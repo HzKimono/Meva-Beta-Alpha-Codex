@@ -12,7 +12,15 @@ def isolate_settings_from_host_env(monkeypatch: pytest.MonkeyPatch):
     original_env_file = Settings.model_config.get("env_file")
     Settings.model_config["env_file"] = None
 
-    prefixes = ("BTCTURK_", "STAGE7_", "LIVE_TRADING", "KILL_SWITCH", "DRY_RUN")
+    prefixes = (
+        "BTCTURK_",
+        "STAGE7_",
+        "LIVE_TRADING",
+        "KILL_SWITCH",
+        "DRY_RUN",
+        "UNIVERSE_",
+        "SYMBOLS",
+    )
     explicit = {
         "LIVE_TRADING_ACK",
         "STATE_DB_PATH",
@@ -23,6 +31,7 @@ def isolate_settings_from_host_env(monkeypatch: pytest.MonkeyPatch):
         "TRY_CASH_TARGET",
         "DYNAMIC_UNIVERSE_ENABLED",
         "UNIVERSE_TOP_N",
+        "UNIVERSE_AUTO_CORRECT",
     }
     for key in list(os.environ):
         if key.startswith(prefixes) or key in explicit:

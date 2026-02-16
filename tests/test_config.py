@@ -19,6 +19,10 @@ def test_parse_symbols_csv() -> None:
 
 
 def test_loads_values_from_env_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("UNIVERSE_SYMBOLS", raising=False)
+    monkeypatch.delenv("SYMBOLS", raising=False)
+    monkeypatch.delenv("UNIVERSE_AUTO_CORRECT", raising=False)
+
     env_file = tmp_path / ".env.live"
     env_file.write_text(
         "\n".join(
