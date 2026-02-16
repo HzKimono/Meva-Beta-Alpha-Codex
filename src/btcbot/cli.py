@@ -606,11 +606,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
         cash_try_free = Decimal(
             str(
                 next(
-                    (
-                        b.free
-                        for b in balances
-                        if str(getattr(b, "asset", "")).upper() == "TRY"
-                    ),
+                    (b.free for b in balances if str(getattr(b, "asset", "")).upper() == "TRY"),
                     0.0,
                 )
             )

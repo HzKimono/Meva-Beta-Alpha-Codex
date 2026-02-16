@@ -33,12 +33,12 @@ from btcbot.domain.models import (
     SubmitOrderRequest,
     SubmitOrderResult,
     ValidationError,
+    normalize_symbol,
     pair_info_to_symbol_rules,
+    parse_decimal,
     quantize_price,
     quantize_quantity,
     validate_order,
-    normalize_symbol,
-    parse_decimal,
 )
 from btcbot.domain.stage4 import Order as Stage4Order
 from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
@@ -852,9 +852,7 @@ class BtcturkHttpClient(ExchangeClient):
                         "error_message": exc.error_message,
                         "request_method": exc.request_method,
                         "request_path": exc.request_path,
-                        "request_headers": _sanitize_request_headers(
-                            dict(self.client.headers)
-                        ),
+                        "request_headers": _sanitize_request_headers(dict(self.client.headers)),
                         "request_json": exc.request_json,
                         "pairSymbol": payload.get("pairSymbol"),
                         "orderType": payload.get("orderType"),
