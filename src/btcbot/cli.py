@@ -415,9 +415,11 @@ def run_with_optional_loop(
     if cycle_seconds < 0 or jitter_seconds < 0:
         print("cycle-seconds and jitter-seconds must be >= 0")
         return 2
-    if max_cycles is not None and max_cycles < 1:
-        print("max-cycles must be >= 1")
+    if max_cycles is not None and (max_cycles == 0 or max_cycles < -1):
+        print("max-cycles must be >= 1, or -1 for infinite")
         return 2
+    if max_cycles == -1:
+        max_cycles = None
 
     if not loop_enabled:
         return cycle_fn()
@@ -585,6 +587,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 max_open_orders_per_symbol=settings.max_open_orders_per_symbol,
                 cooldown_seconds=settings.cooldown_seconds,
                 notional_cap_try_per_cycle=Decimal(str(settings.notional_cap_try_per_cycle)),
+                max_notional_per_order_try=Decimal(str(settings.max_notional_per_order_try)),
             ),
             state_store=state_store,
         )
@@ -600,10 +603,29 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
             if price > 0
         }
         fills_inserted = accounting_service.refresh(settings.symbols, mark_prices)
+        cash_try_free = Decimal(
+            str(
+                next(
+                    (
+                        b.free
+                        for b in balances
+                        if str(getattr(b, "asset", "")).upper() == "TRY"
+                    ),
+                    0.0,
+                )
+            )
+        )
+        try_cash_target = Decimal(str(settings.try_cash_target))
+        investable_try = max(Decimal("0"), cash_try_free - try_cash_target)
         raw_intents = strategy_service.generate(
             cycle_id=cycle_id, symbols=settings.symbols, balances=balances
         )
-        approved_intents = risk_service.filter(cycle_id=cycle_id, intents=raw_intents)
+        approved_intents = risk_service.filter(
+            cycle_id=cycle_id,
+            intents=raw_intents,
+            try_cash_target=try_cash_target,
+            investable_try=investable_try,
+        )
 
         _ = sweep_service.build_order_intents(
             cycle_id=cycle_id,
@@ -613,15 +635,27 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
         )
 
         placed = execution_service.execute_intents(approved_intents, cycle_id=cycle_id)
+        planned_spend_try = Decimal("0")
+        for intent in approved_intents:
+            qty = getattr(intent, "qty", None)
+            limit_price = getattr(intent, "limit_price", None)
+            if qty is not None and limit_price is not None:
+                planned_spend_try += Decimal(str(qty)) * Decimal(str(limit_price))
         state_store.set_last_cycle_id(cycle_id)
         logger.info(
             "Cycle completed",
             extra={
                 "extra": {
                     "cycle_id": cycle_id,
+                    "cash_try_free": str(cash_try_free),
+                    "try_cash_target": str(try_cash_target),
+                    "investable_try": str(investable_try),
+                    "notional_cap_try_per_cycle": str(settings.notional_cap_try_per_cycle),
+                    "planned_spend_try": str(planned_spend_try),
                     "raw_intents": len(raw_intents),
                     "approved_intents": len(approved_intents),
-                    "orders": placed,
+                    "orders_submitted": placed,
+                    "orders_failed": max(0, len(approved_intents) - placed),
                     "fills_inserted": fills_inserted,
                     "positions": len(accounting_service.get_positions()),
                     "dry_run": dry_run,
@@ -769,6 +803,7 @@ def run_health(settings: Settings) -> int:
         print("Configuration: OK")
         print(f"State DB: OK ({settings.state_db_path})")
         print(f"BTCTurk public API health: {status}")
+        _print_effective_risk_config(settings)
         return 0 if ok else 1
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -778,6 +813,7 @@ def run_health(settings: Settings) -> int:
         print("Configuration: OK")
         print(f"State DB: OK ({settings.state_db_path})")
         print("BTCTurk public API health: SKIP (unreachable in current environment)")
+        _print_effective_risk_config(settings)
         return 0 if settings.dry_run else 1
     finally:
         _close_best_effort(client, "health client")
@@ -793,6 +829,17 @@ def _close_best_effort(resource: object, label: str) -> None:
         logger.warning(
             "Failed to close resource", extra={"extra": {"resource": label}}, exc_info=True
         )
+
+
+def _print_effective_risk_config(settings: Settings) -> None:
+    print("Effective risk config:")
+    print(f"  TRY_CASH_TARGET={settings.try_cash_target}")
+    print(f"  NOTIONAL_CAP_TRY_PER_CYCLE={settings.notional_cap_try_per_cycle}")
+    print(f"  MAX_NOTIONAL_PER_ORDER_TRY={settings.max_notional_per_order_try}")
+    print(f"  MIN_ORDER_NOTIONAL_TRY={settings.min_order_notional_try}")
+    print(f"  MAX_ORDERS_PER_CYCLE={settings.max_orders_per_cycle}")
+    print(f"  MAX_OPEN_ORDERS_PER_SYMBOL={settings.max_open_orders_per_symbol}")
+    print(f"  COOLDOWN_SECONDS={settings.cooldown_seconds}")
 
 
 def _normalize_flag_bool(value: object) -> bool:

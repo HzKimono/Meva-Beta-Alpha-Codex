@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     notional_cap_try_per_cycle: Decimal = Field(
         default=Decimal("1000"), alias="NOTIONAL_CAP_TRY_PER_CYCLE"
     )
+    max_notional_per_order_try: Decimal = Field(
+        default=Decimal("0"), alias="MAX_NOTIONAL_PER_ORDER_TRY"
+    )
     min_profit_bps: int = Field(default=30, alias="MIN_PROFIT_BPS")
     max_position_try_per_symbol: Decimal = Field(
         default=Decimal("5000"), alias="MAX_POSITION_TRY_PER_SYMBOL"

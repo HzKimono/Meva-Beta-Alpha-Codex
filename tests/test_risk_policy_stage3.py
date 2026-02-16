@@ -98,6 +98,7 @@ def test_policy_quantizes_and_filters() -> None:
         max_open_orders_per_symbol=1,
         cooldown_seconds=60,
         notional_cap_try_per_cycle=Decimal("50"),
+        max_notional_per_order_try=Decimal("0"),
         now_provider=clock.now,
     )
     intents = [
@@ -141,6 +142,7 @@ def test_policy_cooldown_allows_when_zero() -> None:
         max_open_orders_per_symbol=1,
         cooldown_seconds=0,
         notional_cap_try_per_cycle=Decimal("100"),
+        max_notional_per_order_try=Decimal("0"),
         now_provider=clock.now,
     )
     context = RiskPolicyContext(
@@ -162,6 +164,7 @@ def test_policy_blocks_when_within_positive_cooldown_window() -> None:
         max_open_orders_per_symbol=1,
         cooldown_seconds=60,
         notional_cap_try_per_cycle=Decimal("100"),
+        max_notional_per_order_try=Decimal("0"),
         now_provider=clock.now,
     )
     context = RiskPolicyContext(
@@ -182,6 +185,7 @@ def test_policy_cooldown_is_deterministic_with_injected_clock() -> None:
         max_open_orders_per_symbol=1,
         cooldown_seconds=60,
         notional_cap_try_per_cycle=Decimal("100"),
+        max_notional_per_order_try=Decimal("0"),
         now_provider=lambda: frozen_now,
     )
     policy_b = RiskPolicy(
@@ -190,6 +194,7 @@ def test_policy_cooldown_is_deterministic_with_injected_clock() -> None:
         max_open_orders_per_symbol=1,
         cooldown_seconds=60,
         notional_cap_try_per_cycle=Decimal("100"),
+        max_notional_per_order_try=Decimal("0"),
         now_provider=lambda: frozen_now,
     )
     context = RiskPolicyContext(
@@ -247,6 +252,7 @@ def test_policy_allows_evaluation_when_rules_unavailable() -> None:
         max_open_orders_per_symbol=1,
         cooldown_seconds=60,
         notional_cap_try_per_cycle=Decimal("100"),
+        max_notional_per_order_try=Decimal("0"),
         now_provider=clock.now,
     )
     context = RiskPolicyContext(
@@ -313,3 +319,58 @@ def test_exchange_rules_provider_resolves_underscore_and_canonical_same() -> Non
     underscore = provider.get_rules("BTC_TRY")
 
     assert canonical == underscore
+
+
+def test_policy_notional_cap_logs_block_math(caplog) -> None:
+    clock = FixedClock(datetime(2025, 1, 1, 12, 0, tzinfo=UTC))
+    policy = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=2,
+        max_open_orders_per_symbol=2,
+        cooldown_seconds=0,
+        notional_cap_try_per_cycle=Decimal("15"),
+        max_notional_per_order_try=Decimal("0"),
+        now_provider=clock.now,
+    )
+    caplog.set_level(logging.INFO, logger="btcbot.risk.policy")
+    intents = [
+        Intent.create(
+            cycle_id="c1",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            qty=Decimal("0.1"),
+            limit_price=Decimal("100"),
+            reason="first",
+        ),
+        Intent.create(
+            cycle_id="c1",
+            symbol="ETH_TRY",
+            side=OrderSide.BUY,
+            qty=Decimal("0.1"),
+            limit_price=Decimal("100"),
+            reason="second",
+        ),
+    ]
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={},
+        mark_prices={},
+        cash_try_free=Decimal("320"),
+        try_cash_target=Decimal("300"),
+        investable_try=Decimal("20"),
+    )
+
+    approved = policy.evaluate(context, intents)
+
+    assert len(approved) == 1
+    blocked = [r for r in caplog.records if r.getMessage() == "Intent blocked by risk policy"]
+    assert blocked
+    payload = json.loads(JsonFormatter().format(blocked[-1]))
+    assert payload["reason"] == "notional_cap"
+    assert payload["cap_try_per_cycle"] == "15"
+    assert payload["intent_notional_try"] == "10.0"
+    assert payload["used_notional_try"] == "10.0"
+    assert payload["cash_try_free"] == "320"
+    assert payload["try_cash_target"] == "300"
+    assert payload["investable_try"] == "20"

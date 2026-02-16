@@ -34,6 +34,11 @@ class UnhealthyClient(HealthyClient):
         return False
 
 
+class UnreachableClient(HealthyClient):
+    def health_check(self) -> bool:
+        raise RuntimeError("network unreachable")
+
+
 def test_health_returns_zero_on_success(monkeypatch) -> None:
     monkeypatch.setattr(cli, "BtcturkHttpClient", HealthyClient)
     settings = Settings()
@@ -46,6 +51,27 @@ def test_health_returns_nonzero_on_failure(monkeypatch) -> None:
     settings = Settings()
 
     assert cli.run_health(settings) == 1
+
+
+def test_health_prints_effective_risk_config(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "BtcturkHttpClient", HealthyClient)
+    settings = Settings()
+
+    assert cli.run_health(settings) == 0
+    out = capsys.readouterr().out
+    assert "Effective risk config:" in out
+    assert "TRY_CASH_TARGET=300" in out
+    assert "NOTIONAL_CAP_TRY_PER_CYCLE=1000" in out
+
+
+def test_health_prints_effective_risk_config_on_unreachable(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "BtcturkHttpClient", UnreachableClient)
+    settings = Settings(DRY_RUN=True)
+
+    assert cli.run_health(settings) == 0
+    out = capsys.readouterr().out
+    assert "SKIP (unreachable in current environment)" in out
+    assert "Effective risk config:" in out
 
 
 def test_run_dry_run_does_not_crash_with_missing_market_data(monkeypatch) -> None:
@@ -342,8 +368,8 @@ def test_run_cycle_normalizes_mark_price_keys(monkeypatch) -> None:
         def __init__(self, **kwargs) -> None:
             del kwargs
 
-        def filter(self, cycle_id, intents):
-            del cycle_id
+        def filter(self, cycle_id, intents, **kwargs):
+            del cycle_id, kwargs
             return intents
 
     class FakeSweepService:
@@ -438,8 +464,8 @@ def test_run_cycle_passes_cycle_id_to_execution(monkeypatch) -> None:
         def __init__(self, **kwargs) -> None:
             del kwargs
 
-        def filter(self, cycle_id, intents):
-            del cycle_id
+        def filter(self, cycle_id, intents, **kwargs):
+            del cycle_id, kwargs
             return intents
 
     class FakeSweepService:
@@ -608,8 +634,8 @@ def test_stage3_acceptance_run_cycle_dry_run_logs_cycle_completed(monkeypatch, c
         def __init__(self, **kwargs) -> None:
             del kwargs
 
-        def filter(self, cycle_id: str, intents):
-            del cycle_id
+        def filter(self, cycle_id: str, intents, **kwargs):
+            del cycle_id, kwargs
             return intents[:1]
 
     class FakeSweepService:
@@ -656,7 +682,7 @@ def test_stage3_acceptance_run_cycle_dry_run_logs_cycle_completed(monkeypatch, c
     payload = getattr(cycle_records[-1], "extra", {})
     assert payload["raw_intents"] == 2
     assert payload["approved_intents"] == 1
-    assert payload["orders"] == 1
+    assert payload["orders_submitted"] == 1
     assert payload["fills_inserted"] == 3
 
 
@@ -952,6 +978,27 @@ def test_run_with_optional_loop_runs_max_cycles() -> None:
     )
     assert code == 0
     assert calls["count"] == 3
+
+
+def test_run_with_optional_loop_negative_one_means_infinite_until_interrupt() -> None:
+    calls = {"count": 0}
+
+    def cycle() -> int:
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            raise KeyboardInterrupt
+        return 0
+
+    code = cli.run_with_optional_loop(
+        command="run",
+        cycle_fn=cycle,
+        loop_enabled=True,
+        cycle_seconds=0,
+        max_cycles=-1,
+        jitter_seconds=0,
+    )
+    assert code == 0
+    assert calls["count"] == 2
 
 
 def test_main_stage7_run_accepts_db_flag(monkeypatch) -> None:
