@@ -14,7 +14,7 @@ from btcbot.domain.universe_models import UniverseKnobs
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=".env.live",
         env_file_encoding="utf-8",
         extra="ignore",
     )

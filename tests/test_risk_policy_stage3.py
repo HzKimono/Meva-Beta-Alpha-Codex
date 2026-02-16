@@ -374,3 +374,5 @@ def test_policy_notional_cap_logs_block_math(caplog) -> None:
     assert payload["cash_try_free"] == "320"
     assert payload["try_cash_target"] == "300"
     assert payload["investable_try"] == "20"
+    assert payload["rule"] == "notional_cap"
+    assert payload["planned_spend_try"] == "20.0"

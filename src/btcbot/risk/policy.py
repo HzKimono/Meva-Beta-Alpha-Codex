@@ -167,11 +167,16 @@ class RiskPolicy:
             "rule_id": reason,
         }
         if reason == "notional_cap":
+            planned_spend_try = (used_notional_try or Decimal("0")) + (
+                intent_notional_try or Decimal("0")
+            )
             extra_payload.update(
                 {
+                    "rule": "notional_cap",
                     "cap_try_per_cycle": str(self.notional_cap_try_per_cycle),
                     "intent_notional_try": str(intent_notional_try or Decimal("0")),
                     "used_notional_try": str(used_notional_try or Decimal("0")),
+                    "planned_spend_try": str(planned_spend_try),
                     "scope": "cycle_cumulative",
                 }
             )

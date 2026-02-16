@@ -51,14 +51,14 @@ def test_env_example_is_multiline_and_key_value() -> None:
 
 def test_env_example_values_load_into_settings(monkeypatch, tmp_path: Path) -> None:
     env_contents = Path(".env.example").read_text(encoding="utf-8")
-    env_file = tmp_path / ".env"
+    env_file = tmp_path / ".env.live"
     env_file.write_text(env_contents, encoding="utf-8")
 
     monkeypatch.chdir(tmp_path)
     for key in EXPECTED_KEYS:
         monkeypatch.delenv(key, raising=False)
 
-    settings = Settings()
+    settings = Settings(_env_file=str(env_file))
 
     assert settings.kill_switch is True
     assert settings.dry_run is True
