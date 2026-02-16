@@ -61,3 +61,22 @@ def test_setup_logging_respects_http_env_overrides(monkeypatch) -> None:
 
     assert logging.getLogger("httpx").level == logging.ERROR
     assert logging.getLogger("httpcore").level == logging.CRITICAL
+
+
+def test_json_formatter_includes_correlation_fields_even_when_unset() -> None:
+    formatter = JsonFormatter()
+    record = logging.LogRecord(
+        name="btcbot.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="hello",
+        args=(),
+        exc_info=None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert "run_id" in payload
+    assert "cycle_id" in payload
+    assert "client_order_id" in payload
+    assert "order_id" in payload
+    assert "symbol" in payload

@@ -41,6 +41,7 @@ from btcbot.domain.models import (
     validate_order,
 )
 from btcbot.domain.stage4 import Order as Stage4Order
+from btcbot.observability import get_instrumentation
 from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
 
 logger = logging.getLogger(__name__)
@@ -184,11 +185,12 @@ class BtcturkHttpClient(ExchangeClient):
         request_id = uuid4().hex
 
         def _call() -> dict:
-            response = self.client.get(
-                path,
-                params=params,
-                headers={"X-Request-ID": request_id},
-            )
+            with get_instrumentation().trace("rest_call", attrs={"method": "GET", "path": path}):
+                response = self.client.get(
+                    path,
+                    params=params,
+                    headers={"X-Request-ID": request_id},
+                )
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
@@ -244,13 +246,14 @@ class BtcturkHttpClient(ExchangeClient):
             stamp_ms=self._next_stamp_ms(),
         )
         headers["X-Request-ID"] = request_id
-        response = self.client.request(
-            method=method,
-            url=path,
-            params=params,
-            json=json,
-            headers=headers,
-        )
+        with get_instrumentation().trace("rest_call", attrs={"method": method, "path": path}):
+            response = self.client.request(
+                method=method,
+                url=path,
+                params=params,
+                json=json,
+                headers=headers,
+            )
         if response.status_code != 200:
             snippet = _response_snippet(response)
             payload_code = None
@@ -305,6 +308,9 @@ class BtcturkHttpClient(ExchangeClient):
             except ExchangeError as exc:
                 if exc.status_code not in {429, 500, 502, 503, 504} or attempt >= _RETRY_ATTEMPTS:
                     raise
+                if exc.status_code == 429:
+                    get_instrumentation().counter("rest_429_rate", 1, attrs={"path": path})
+                get_instrumentation().counter("rest_retry_rate", 1, attrs={"path": path})
                 delay = _retry_delay_seconds(attempt)
                 if monotonic() - start + delay > _RETRY_TOTAL_WAIT_CAP_SECONDS:
                     raise

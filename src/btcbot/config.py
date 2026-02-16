@@ -204,6 +204,18 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    observability_enabled: bool = Field(default=False, alias="OBSERVABILITY_ENABLED")
+    observability_metrics_exporter: str = Field(
+        default="none", alias="OBSERVABILITY_METRICS_EXPORTER"
+    )
+    observability_otlp_endpoint: str | None = Field(
+        default=None, alias="OBSERVABILITY_OTLP_ENDPOINT"
+    )
+    observability_prometheus_port: int = Field(
+        default=9464, alias="OBSERVABILITY_PROMETHEUS_PORT"
+    )
+    safe_mode: bool = Field(default=False, alias="SAFE_MODE")
+
     universe_quote_currency: str = Field(default="TRY", alias="UNIVERSE_QUOTE_CURRENCY")
     universe_max_size: int = Field(default=20, alias="UNIVERSE_MAX_SIZE")
     universe_min_notional_try: Decimal = Field(
@@ -638,6 +650,9 @@ class Settings(BaseSettings):
 
     def is_live_trading_enabled(self) -> bool:
         return self.live_trading and self.live_trading_ack == "I_UNDERSTAND"
+
+    def is_safe_mode_enabled(self) -> bool:
+        return self.safe_mode
 
     def symbols_source(self) -> str:
         """Return the highest-precedence source for configured symbols."""

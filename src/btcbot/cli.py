@@ -22,7 +22,13 @@ from btcbot.adapters.btcturk_http import (
 )
 from btcbot.config import Settings
 from btcbot.domain.models import normalize_symbol
+from btcbot.logging_context import with_logging_context
 from btcbot.logging_utils import setup_logging
+from btcbot.observability import (
+    configure_instrumentation,
+    flush_instrumentation,
+    get_instrumentation,
+)
 from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_replay_dataset
 from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
@@ -48,6 +54,7 @@ from btcbot.services.stage4_cycle_runner import (
 )
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
+from btcbot.services.startup_recovery import StartupRecoveryService
 from btcbot.services.state_store import StateStore
 from btcbot.services.strategy_service import StrategyService
 from btcbot.services.sweep_service import SweepService
@@ -312,6 +319,12 @@ def main() -> int:
     args = parser.parse_args()
     settings = _load_settings(args.env_file)
     setup_logging(settings.log_level)
+    configure_instrumentation(
+        enabled=bool(getattr(settings, "observability_enabled", False)),
+        metrics_exporter=str(getattr(settings, "observability_metrics_exporter", "none")),
+        otlp_endpoint=getattr(settings, "observability_otlp_endpoint", None),
+        prometheus_port=int(getattr(settings, "observability_prometheus_port", 9464)),
+    )
     settings = _apply_effective_universe(settings)
 
     if args.command == "run":
@@ -598,11 +611,20 @@ def _log_arm_check(settings: Settings, *, dry_run: bool) -> None:
 
 
 def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
+    run_id = uuid4().hex
     dry_run = force_dry_run or settings.dry_run
+    effective_safe_mode = settings.is_safe_mode_enabled()
+    if effective_safe_mode:
+        logger.warning(
+            "SAFE_MODE_ENABLED_OBSERVE_ONLY",
+            extra={"extra": {"safe_mode": True, "banner": "*** SAFE MODE ACTIVE ***"}},
+        )
+        dry_run = True
+
     _log_arm_check(settings, dry_run=dry_run)
     live_block_reason = validate_live_side_effects_policy(
         dry_run=dry_run,
-        kill_switch=settings.kill_switch,
+        kill_switch=(settings.kill_switch or effective_safe_mode),
         live_trading_enabled=settings.is_live_trading_enabled(),
     )
     if not dry_run and live_block_reason is not None:
@@ -619,123 +641,183 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
     cycle_id = uuid4().hex
 
     try:
-        if settings.kill_switch:
-            logger.warning(
-                "Kill switch enabled; planning/logging continue "
-                "but cancellations and execution are blocked"
-            )
-
-        portfolio_service = PortfolioService(exchange)
-        market_data_service = MarketDataService(exchange)
-        sweep_service = SweepService(
-            state_store=state_store,
-            target_try=settings.target_try,
-            offset_bps=settings.offset_bps,
-            default_min_notional=settings.min_order_notional_try,
-        )
-        execution_service = ExecutionService(
-            exchange=exchange,
-            state_store=state_store,
-            market_data_service=market_data_service,
-            dry_run=dry_run,
-            ttl_seconds=settings.ttl_seconds,
-            kill_switch=settings.kill_switch,
-            live_trading_enabled=settings.is_live_trading_enabled(),
-        )
-        accounting_service = AccountingService(exchange=exchange, state_store=state_store)
-        strategy_service = StrategyService(
-            strategy=ProfitAwareStrategyV1(),
-            settings=settings,
-            market_data_service=market_data_service,
-            accounting_service=accounting_service,
-            state_store=state_store,
-        )
-        risk_service = RiskService(
-            risk_policy=RiskPolicy(
-                rules_provider=MarketDataExchangeRulesProvider(market_data_service),
-                max_orders_per_cycle=settings.max_orders_per_cycle,
-                max_open_orders_per_symbol=settings.max_open_orders_per_symbol,
-                cooldown_seconds=settings.cooldown_seconds,
-                notional_cap_try_per_cycle=Decimal(str(settings.notional_cap_try_per_cycle)),
-                max_notional_per_order_try=Decimal(str(settings.max_notional_per_order_try)),
-            ),
-            state_store=state_store,
-        )
-
-        execution_service.cancel_stale_orders(cycle_id=cycle_id)
-
-        balances = portfolio_service.get_balances()
-        bids = market_data_service.get_best_bids(settings.symbols)
-
-        mark_prices = {
-            normalize_symbol(symbol): Decimal(str(price))
-            for symbol, price in bids.items()
-            if price > 0
-        }
-        fills_inserted = accounting_service.refresh(settings.symbols, mark_prices)
-        cash_try_free = Decimal(
-            str(
-                next(
-                    (b.free for b in balances if str(getattr(b, "asset", "")).upper() == "TRY"),
-                    0.0,
+        with with_logging_context(run_id=run_id, cycle_id=cycle_id):
+            if settings.kill_switch or effective_safe_mode:
+                logger.warning(
+                    "observe_only_mode_enabled; planning/logging continue "
+                    "but write-side effects are blocked"
                 )
-            )
-        )
-        try_cash_target = Decimal(str(settings.try_cash_target))
-        investable_try = max(Decimal("0"), cash_try_free - try_cash_target)
-        raw_intents = strategy_service.generate(
-            cycle_id=cycle_id, symbols=settings.symbols, balances=balances
-        )
-        approved_intents = risk_service.filter(
-            cycle_id=cycle_id,
-            intents=raw_intents,
-            try_cash_target=try_cash_target,
-            investable_try=investable_try,
-        )
 
-        _ = sweep_service.build_order_intents(
-            cycle_id=cycle_id,
-            balances=balances,
-            symbols=settings.symbols,
-            best_bids=bids,
-        )
-
-        placed = execution_service.execute_intents(approved_intents, cycle_id=cycle_id)
-        planned_spend_try = Decimal("0")
-        for intent in approved_intents:
-            qty = getattr(intent, "qty", None)
-            limit_price = getattr(intent, "limit_price", None)
-            if qty is not None and limit_price is not None:
-                planned_spend_try += Decimal(str(qty)) * Decimal(str(limit_price))
-        state_store.set_last_cycle_id(cycle_id)
-        blocked_by_gate = len(approved_intents) if settings.kill_switch else 0
-        suppressed_dry_run = len(approved_intents) if dry_run else 0
-        logger.info(
-            "Cycle completed",
-            extra={
-                "extra": {
-                    "cycle_id": cycle_id,
-                    "cash_try_free": str(cash_try_free),
-                    "try_cash_target": str(try_cash_target),
-                    "investable_try": str(investable_try),
-                    "notional_cap_try_per_cycle": str(settings.notional_cap_try_per_cycle),
-                    "planned_spend_try": str(planned_spend_try),
-                    "raw_intents": len(raw_intents),
-                    "approved_intents": len(approved_intents),
-                    "orders_submitted": placed,
-                    "orders_blocked_by_gate": blocked_by_gate,
-                    "orders_suppressed_dry_run": suppressed_dry_run,
-                    "orders_failed_exchange": max(
-                        0,
-                        len(approved_intents) - placed - blocked_by_gate - suppressed_dry_run,
+            instrumentation = get_instrumentation()
+            with instrumentation.trace(
+                "planning_cycle", attrs={"run_id": run_id, "cycle_id": cycle_id}
+            ):
+                portfolio_service = PortfolioService(exchange)
+                market_data_service = MarketDataService(exchange)
+                sweep_service = SweepService(
+                    state_store=state_store,
+                    target_try=settings.target_try,
+                    offset_bps=settings.offset_bps,
+                    default_min_notional=settings.min_order_notional_try,
+                )
+                execution_service = ExecutionService(
+                    exchange=exchange,
+                    state_store=state_store,
+                    market_data_service=market_data_service,
+                    dry_run=dry_run,
+                    ttl_seconds=settings.ttl_seconds,
+                    kill_switch=(settings.kill_switch or effective_safe_mode),
+                    live_trading_enabled=settings.is_live_trading_enabled(),
+                    safe_mode=effective_safe_mode,
+                )
+                accounting_service = AccountingService(exchange=exchange, state_store=state_store)
+                strategy_service = StrategyService(
+                    strategy=ProfitAwareStrategyV1(),
+                    settings=settings,
+                    market_data_service=market_data_service,
+                    accounting_service=accounting_service,
+                    state_store=state_store,
+                )
+                risk_service = RiskService(
+                    risk_policy=RiskPolicy(
+                        rules_provider=MarketDataExchangeRulesProvider(market_data_service),
+                        max_orders_per_cycle=settings.max_orders_per_cycle,
+                        max_open_orders_per_symbol=settings.max_open_orders_per_symbol,
+                        cooldown_seconds=settings.cooldown_seconds,
+                        notional_cap_try_per_cycle=Decimal(
+                            str(settings.notional_cap_try_per_cycle)
+                        ),
+                        max_notional_per_order_try=Decimal(
+                            str(settings.max_notional_per_order_try)
+                        ),
                     ),
-                    "fills_inserted": fills_inserted,
-                    "positions": len(accounting_service.get_positions()),
-                    "dry_run": dry_run,
-                    "kill_switch": settings.kill_switch,
+                    state_store=state_store,
+                )
+
+                recovery = StartupRecoveryService().run(
+                    cycle_id=cycle_id,
+                    symbols=settings.symbols,
+                    execution_service=execution_service,
+                    accounting_service=accounting_service,
+                    portfolio_service=portfolio_service,
+                )
+                if recovery.observe_only_required:
+                    logger.error(
+                        "startup_recovery_forced_observe_only",
+                        extra={"extra": {"invariant_errors": list(recovery.invariant_errors)}},
+                    )
+                    execution_service.kill_switch = True
+
+                reconcile_started = time.monotonic()
+                execution_service.cancel_stale_orders(cycle_id=cycle_id)
+                instrumentation.histogram(
+                    "reconcile_lag_ms",
+                    (time.monotonic() - reconcile_started) * 1000,
+                    attrs={"cycle_id": cycle_id},
+                )
+
+                balances = portfolio_service.get_balances()
+                bids = market_data_service.get_best_bids(settings.symbols)
+
+                mark_prices = {
+                    normalize_symbol(symbol): Decimal(str(price))
+                    for symbol, price in bids.items()
+                    if price > 0
                 }
-            },
-        )
+                stale_count = len([symbol for symbol, price in bids.items() if price <= 0])
+                if settings.symbols:
+                    instrumentation.counter(
+                        "stale_market_data_rate",
+                        stale_count,
+                        attrs={"cycle_id": cycle_id},
+                    )
+
+                fills_inserted = accounting_service.refresh(settings.symbols, mark_prices)
+                cash_try_free = Decimal(
+                    str(
+                        next(
+                            (
+                                b.free
+                                for b in balances
+                                if str(getattr(b, "asset", "")).upper() == "TRY"
+                            ),
+                            0.0,
+                        )
+                    )
+                )
+                try_cash_target = Decimal(str(settings.try_cash_target))
+                investable_try = max(Decimal("0"), cash_try_free - try_cash_target)
+                raw_intents = strategy_service.generate(
+                    cycle_id=cycle_id, symbols=settings.symbols, balances=balances
+                )
+                approved_intents = risk_service.filter(
+                    cycle_id=cycle_id,
+                    intents=raw_intents,
+                    try_cash_target=try_cash_target,
+                    investable_try=investable_try,
+                )
+
+                _ = sweep_service.build_order_intents(
+                    cycle_id=cycle_id,
+                    balances=balances,
+                    symbols=settings.symbols,
+                    best_bids=bids,
+                )
+
+                submit_started = time.monotonic()
+                placed = execution_service.execute_intents(approved_intents, cycle_id=cycle_id)
+                instrumentation.histogram(
+                    "order_submit_latency_ms",
+                    (time.monotonic() - submit_started) * 1000,
+                    attrs={"cycle_id": cycle_id},
+                )
+                instrumentation.gauge(
+                    "circuit_breaker_state",
+                    1.0 if bool(getattr(execution_service, "kill_switch", False)) else 0.0,
+                    attrs={"cycle_id": cycle_id},
+                )
+
+                planned_spend_try = Decimal("0")
+                for intent in approved_intents:
+                    qty = getattr(intent, "qty", None)
+                    limit_price = getattr(intent, "limit_price", None)
+                    if qty is not None and limit_price is not None:
+                        planned_spend_try += Decimal(str(qty)) * Decimal(str(limit_price))
+                state_store.set_last_cycle_id(cycle_id)
+                blocked_by_gate = (
+                    len(approved_intents) if (settings.kill_switch or effective_safe_mode) else 0
+                )
+                suppressed_dry_run = len(approved_intents) if dry_run else 0
+                logger.info(
+                    "Cycle completed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "cash_try_free": str(cash_try_free),
+                            "try_cash_target": str(try_cash_target),
+                            "investable_try": str(investable_try),
+                            "notional_cap_try_per_cycle": str(settings.notional_cap_try_per_cycle),
+                            "planned_spend_try": str(planned_spend_try),
+                            "raw_intents": len(raw_intents),
+                            "approved_intents": len(approved_intents),
+                            "orders_submitted": placed,
+                            "orders_blocked_by_gate": blocked_by_gate,
+                            "orders_suppressed_dry_run": suppressed_dry_run,
+                            "orders_failed_exchange": max(
+                                0,
+                                len(approved_intents)
+                                - placed
+                                - blocked_by_gate
+                                - suppressed_dry_run,
+                            ),
+                            "fills_inserted": fills_inserted,
+                            "positions": len(accounting_service.get_positions()),
+                            "dry_run": dry_run,
+                            "kill_switch": bool(settings.kill_switch or effective_safe_mode),
+                            "safe_mode": effective_safe_mode,
+                        }
+                    },
+                )
         return 0
     except ConfigurationError as exc:
         logger.exception(
@@ -760,6 +842,8 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
         )
         return 1
     finally:
+        flush_instrumentation()
+        _flush_logging_handlers()
         _close_best_effort(exchange, "exchange")
 
 
@@ -767,6 +851,12 @@ def run_cycle_stage4(
     settings: Settings, force_dry_run: bool = False, db_path: str | None = None
 ) -> int:
     dry_run = force_dry_run or settings.dry_run
+    if settings.is_safe_mode_enabled():
+        logger.warning(
+            "SAFE_MODE_ENABLED_OBSERVE_ONLY",
+            extra={"extra": {"safe_mode": True, "banner": "*** SAFE MODE ACTIVE ***"}},
+        )
+        dry_run = True
     _log_arm_check(settings, dry_run=dry_run)
     live_block_reason = validate_live_side_effects_policy(
         dry_run=dry_run,
@@ -890,6 +980,15 @@ def run_health(settings: Settings) -> int:
         return 0 if settings.dry_run else 1
     finally:
         _close_best_effort(client, "health client")
+
+
+def _flush_logging_handlers() -> None:
+    root = logging.getLogger()
+    for handler in root.handlers:
+        try:
+            handler.flush()
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to flush logging handler", exc_info=True)
 
 
 def _close_best_effort(resource: object, label: str) -> None:
