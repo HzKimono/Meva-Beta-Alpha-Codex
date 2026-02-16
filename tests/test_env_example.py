@@ -22,6 +22,7 @@ EXPECTED_KEYS = {
     "MAX_OPEN_ORDERS_PER_SYMBOL",
     "COOLDOWN_SECONDS",
     "NOTIONAL_CAP_TRY_PER_CYCLE",
+    "MAX_NOTIONAL_PER_ORDER_TRY",
     "MIN_PROFIT_BPS",
     "MAX_POSITION_TRY_PER_SYMBOL",
     "ENABLE_AUTO_KILL_SWITCH",
@@ -74,6 +75,7 @@ def test_env_example_values_load_into_settings(monkeypatch, tmp_path: Path) -> N
     assert settings.max_open_orders_per_symbol == 1
     assert settings.cooldown_seconds == 60
     assert settings.notional_cap_try_per_cycle == 1000
+    assert settings.max_notional_per_order_try == 0
     assert settings.min_profit_bps == 30
     assert settings.max_position_try_per_symbol == 5000
     assert settings.enable_auto_kill_switch is True

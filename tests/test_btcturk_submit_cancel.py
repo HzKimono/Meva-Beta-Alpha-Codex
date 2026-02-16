@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
 
 from btcbot.adapters.btcturk_http import BtcturkHttpClient
-from btcbot.domain.models import ExchangeError, OrderSide
+from btcbot.domain.models import ExchangeError, OrderSide, ValidationError
 
 
 def test_submit_limit_order_payload_fields() -> None:
@@ -132,6 +133,123 @@ def test_submit_limit_order_400_includes_code_and_message() -> None:
     assert "status=400" in message
     assert "code=1126" in message
     assert "FAILED_INVALID_PRICE_SCALE" in message
+    client.close()
+
+
+def test_submit_limit_order_invalid_quantity_scale_caught_before_request() -> None:
+    calls = {"get": 0, "post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            calls["get"] += 1
+            return httpx.Response(200, json={"success": True, "data": []})
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+            return httpx.Response(500)
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+    )
+
+    with pytest.raises(ValidationError, match="quantity scale violation"):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("0.000000001"),
+            client_order_id="coid-scale-qty",
+        )
+
+    assert calls["get"] >= 1
+    assert calls["post"] == 0
+    client.close()
+
+
+def test_submit_limit_order_invalid_price_scale_caught_before_request() -> None:
+    calls = {"get": 0, "post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            calls["get"] += 1
+            return httpx.Response(200, json={"success": True, "data": []})
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+            return httpx.Response(500)
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+    )
+
+    with pytest.raises(ValidationError, match="price scale violation"):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100.123456789"),
+            qty=Decimal("0.01"),
+            client_order_id="coid-scale-price",
+        )
+
+    assert calls["get"] >= 1
+    assert calls["post"] == 0
+    client.close()
+
+
+def test_submit_limit_order_400_logs_error_body(caplog) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [
+                        {
+                            "pairSymbol": "BTCTRY",
+                            "numeratorScale": 8,
+                            "denominatorScale": 2,
+                            "minTotalAmount": "10",
+                        }
+                    ],
+                },
+            )
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            return httpx.Response(
+                400,
+                json={"success": False, "code": 1126, "message": "FAILED_INVALID_PRICE_SCALE"},
+            )
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+    )
+
+    caplog.set_level("ERROR", logger="btcbot.adapters.btcturk_http")
+    with pytest.raises(ExchangeError):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100.12"),
+            qty=Decimal("0.2"),
+            client_order_id="coid-400-log",
+        )
+
+    assert any("BTCTurk submit_limit_order failed" in r.getMessage() for r in caplog.records)
+    logged = [r for r in caplog.records if r.getMessage() == "BTCTurk submit_limit_order failed"]
+    payload = getattr(logged[-1], "extra", {})
+    assert payload["status_code"] == 400
+    assert payload["error_code"] == 1126
+    assert payload["pairSymbol"] == "BTCTRY"
+    assert payload["quantized_price"] == "100.12"
     client.close()
 
 

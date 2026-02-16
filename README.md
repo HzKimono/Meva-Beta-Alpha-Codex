@@ -171,6 +171,9 @@ py -m btcbot.cli stage4-run --dry-run --once
 # dry-run loop (identical planning path, no side effects)
 py -m btcbot.cli stage4-run --dry-run --loop --cycle-seconds 30 --max-cycles 20 --jitter-seconds 2
 
+# dry-run infinite loop
+py -m btcbot.cli stage4-run --dry-run --loop --cycle-seconds 30 --max-cycles -1 --jitter-seconds 2
+
 # live single cycle (all safety gates required)
 $env:DRY_RUN="false"
 $env:KILL_SWITCH="false"
@@ -192,7 +195,25 @@ py -m pytest -q
 Notes:
 - Startup logs include an explicit `arm_check` summary for each live gate.
 - `--once` forces a single cycle (alias behavior for loop-capable commands).
+- `--max-cycles -1` runs continuously until interrupted; `--max-cycles 0` is invalid.
 - No DB migration is required for this update.
+
+## Pilot live profile (Top-5 TRY, conservative caps)
+
+1. Copy `.env.pilot.example` to `.env` and set only credentials (`BTCTURK_API_KEY`, `BTCTURK_API_SECRET`).
+2. Verify effective config values before running:
+
+```bash
+python -m btcbot.cli health
+```
+
+3. Start continuous pilot loop:
+
+```bash
+python -m btcbot.cli run --loop --cycle-seconds 30 --jitter-seconds 2 --max-cycles -1
+```
+
+The pilot profile keeps `TRY_CASH_TARGET=300`, limits to Top-5 universe symbols, and applies conservative cycle/order notional caps.
 
 ## Stage 7 backtest/parity quick checks
 

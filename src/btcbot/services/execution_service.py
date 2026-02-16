@@ -347,6 +347,8 @@ class ExecutionService:
                                     "request_method": exc.request_method,
                                     "request_path": exc.request_path,
                                     "request_params": exc.request_params,
+                                    "request_json": exc.request_json,
+                                    "response_body": exc.response_body,
                                 }
                             },
                         )

@@ -32,8 +32,13 @@ from btcbot.domain.models import (
     PairInfo,
     SubmitOrderRequest,
     SubmitOrderResult,
+    ValidationError,
     normalize_symbol,
+    pair_info_to_symbol_rules,
     parse_decimal,
+    quantize_price,
+    quantize_quantity,
+    validate_order,
 )
 from btcbot.domain.stage4 import Order as Stage4Order
 from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
@@ -50,6 +55,7 @@ _RETRY_ATTEMPTS = 4
 _RETRY_BASE_DELAY_SECONDS = 0.4
 _RETRY_MAX_DELAY_SECONDS = 4.0
 _RETRY_TOTAL_WAIT_CAP_SECONDS = 8.0
+_DEFAULT_MIN_NOTIONAL_TRY = Decimal("10")
 
 
 def _is_permanent_transport_error(exc: httpx.TransportError) -> bool:
@@ -128,6 +134,11 @@ def _sanitize_request_json(payload: dict[str, object] | None) -> dict[str, objec
         "x-stamp",
     }
     return {key: value for key, value in payload.items() if key.lower() not in blocked}
+
+
+def _sanitize_request_headers(headers: dict[str, str]) -> dict[str, str]:
+    blocked = {"x-pck", "x-signature", "x-stamp", "authorization", "api-key"}
+    return {key: value for key, value in headers.items() if key.lower() not in blocked}
 
 
 def _fmt_decimal(value: Decimal) -> str:
@@ -265,6 +276,7 @@ class BtcturkHttpClient(ExchangeClient):
                 request_method=method,
                 request_params=_sanitize_request_params(params),
                 request_json=_sanitize_request_json(json),
+                response_body=snippet,
             )
 
         payload = response.json()
@@ -808,19 +820,74 @@ class BtcturkHttpClient(ExchangeClient):
         qty: Decimal,
         client_order_id: str,
     ) -> OrderAck:
+        symbol_normalized = normalize_symbol(symbol)
+        rules = self._resolve_symbol_rules(symbol_normalized)
+        validate_order(price=price, qty=qty, rules=rules)
+        quantized_price = quantize_price(price, rules)
+        quantized_qty = quantize_quantity(qty, rules)
+        computed_notional = quantized_price * quantized_qty
+        if rules.min_total is None and computed_notional < _DEFAULT_MIN_NOTIONAL_TRY:
+            raise ValidationError(
+                f"total below min_total for {rules.pair_symbol}; "
+                f"required={_DEFAULT_MIN_NOTIONAL_TRY} observed={computed_notional}"
+            )
+
         request = SubmitOrderRequest(
-            pair_symbol=self._pair_symbol(symbol),
+            pair_symbol=self._pair_symbol(symbol_normalized),
             side=OrderSide(side.lower()),
-            price=price,
-            quantity=qty,
+            price=quantized_price,
+            quantity=quantized_qty,
             client_order_id=client_order_id,
         )
         payload = self._build_submit_order_payload(request)
-        response = self._private_request("POST", "/api/v1/order", json=payload)
+        try:
+            response = self._private_request("POST", "/api/v1/order", json=payload)
+        except ExchangeError as exc:
+            logger.error(
+                "BTCTurk submit_limit_order failed",
+                extra={
+                    "extra": {
+                        "status_code": exc.status_code,
+                        "error_code": exc.error_code,
+                        "error_message": exc.error_message,
+                        "request_method": exc.request_method,
+                        "request_path": exc.request_path,
+                        "request_headers": _sanitize_request_headers(dict(self.client.headers)),
+                        "request_json": exc.request_json,
+                        "pairSymbol": payload.get("pairSymbol"),
+                        "orderType": payload.get("orderType"),
+                        "orderMethod": payload.get("orderMethod"),
+                        "price": payload.get("price"),
+                        "quantity": payload.get("quantity"),
+                        "stopPrice": payload.get("stopPrice"),
+                        "computed_notional_try": str(computed_notional),
+                        "quantized_price": _fmt_decimal(quantized_price),
+                        "quantized_qty": _fmt_decimal(quantized_qty),
+                    }
+                },
+            )
+            raise
         data = response.get("data")
         if not isinstance(data, dict) or data.get("id") is None:
             raise ExchangeError("Submit order response missing order id")
         return OrderAck(exchange_order_id=str(data["id"]), status="submitted", raw=data)
+
+    def _resolve_symbol_rules(self, symbol: str):
+        try:
+            exchange_info = self.get_exchange_info()
+        except Exception:  # noqa: BLE001
+            exchange_info = []
+        for pair in exchange_info:
+            if normalize_symbol(pair.pair_symbol) == symbol:
+                return pair_info_to_symbol_rules(pair)
+        return pair_info_to_symbol_rules(
+            PairInfo(
+                pairSymbol=symbol,
+                numeratorScale=8,
+                denominatorScale=8,
+                minTotalAmount=_DEFAULT_MIN_NOTIONAL_TRY,
+            )
+        )
 
     def cancel_order_by_exchange_id(self, exchange_order_id: str) -> bool:
         try:
