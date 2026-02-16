@@ -987,6 +987,23 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
                 f"skipped={summary.get('order_intents_skipped', 0)} "
                 f"actions={summary.get('order_decisions_total', 0)}"
             )
+            planning_diag = summary.get("planning_diagnostics")
+            if isinstance(planning_diag, dict) and planning_diag:
+                print(
+                    "  planning_diagnostics="
+                    f"enabled={planning_diag.get('planning_enabled')} "
+                    f"disabled_reason={planning_diag.get('planning_disabled_reason') or '-'} "
+                    f"universe={planning_diag.get('selected_universe_count', 0)} "
+                    f"mark_prices={planning_diag.get('mark_prices_count', 0)} "
+                    f"planned={planning_diag.get('planned_intents_count', 0)} "
+                    f"skipped={planning_diag.get('skipped_intents_count', 0)}"
+                )
+                skip_reasons = planning_diag.get("skip_reasons") or {}
+                if isinstance(skip_reasons, dict) and skip_reasons:
+                    reason_items = ", ".join(
+                        f"{key}:{value}" for key, value in sorted(skip_reasons.items())
+                    )
+                    print(f"  planning_skip_reasons={reason_items}")
             if isinstance(portfolio_plan, dict) and portfolio_plan:
                 print(
                     "  portfolio_plan="
