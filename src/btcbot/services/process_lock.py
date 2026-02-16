@@ -21,20 +21,21 @@ def _lock_file_path(key: str) -> Path:
     return Path(tempfile.gettempdir()) / f"btcbot-{digest}.lock"
 
 
+def _pid_file_path(lock_path: Path) -> Path:
+    return lock_path.with_suffix(".pid")
+
+
 @contextmanager
 def single_instance_lock(*, db_path: str, account_key: str = "default"):
     lock_key = f"{os.path.abspath(db_path)}::{account_key}"
     path = _lock_file_path(lock_key)
+    pid_path = _pid_file_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR)
     fh: BinaryIO = os.fdopen(fd, "r+b")
     pid = os.getpid()
     lock_acquired = False
     try:
-        fh.seek(0)
-        fh.truncate(0)
-        fh.write(f"{pid}\n".encode())
-        fh.flush()
         try:
             if os.name == "nt":
                 import msvcrt
@@ -50,6 +51,8 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
             raise RuntimeError(
                 f"Another btcbot instance is already running for db/account lock: {path}"
             ) from exc
+
+        pid_path.write_text(f"{pid}\n", encoding="utf-8")
         yield ProcessLock(path=str(path), handle=fh, pid=pid)
     finally:
         try:
