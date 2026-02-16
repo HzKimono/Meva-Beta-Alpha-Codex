@@ -32,10 +32,48 @@ from btcbot.services.universe_selection_service import _BPS, UniverseSelectionSe
 
 logger = logging.getLogger(__name__)
 
+_PLANNING_DISABLED_REASONS = {
+    "STRATEGY_DISABLED",
+    "PLANNER_NOT_WIRED",
+    "DATA_UNAVAILABLE",
+    "BUDGET_ZERO",
+    "ALL_INTENTS_REJECTED_BY_RISK",
+    "MIN_NOTIONAL_ALL_REJECTED",
+    "SIM_EXECUTION_DISABLED",
+    "UNKNOWN",
+}
+
 
 def _deterministic_fill_id(cycle_id: str, client_order_id: str, symbol: str, side: str) -> str:
     digest = sha256(f"{cycle_id}|{client_order_id}|{symbol}|{side}".encode()).hexdigest()[:16]
     return f"s7f:{digest}"
+
+
+def _resolve_planning_disabled_reason(
+    *,
+    planning_enabled: bool,
+    selected_universe: list[str],
+    mark_prices: dict[str, Decimal],
+    notional_cap_try_per_cycle: Decimal,
+    order_intents: list[object],
+) -> str | None:
+    if planning_enabled:
+        return None
+    if not selected_universe or not mark_prices:
+        return "DATA_UNAVAILABLE"
+    if notional_cap_try_per_cycle <= 0:
+        return "BUDGET_ZERO"
+
+    skipped = [item for item in order_intents if bool(getattr(item, "skipped", False))]
+    if skipped and all(
+        str(getattr(item, "skip_reason", "")).startswith("risk_") for item in skipped
+    ):
+        return "ALL_INTENTS_REJECTED_BY_RISK"
+    if skipped and all(
+        "min_notional" in str(getattr(item, "skip_reason", "")).lower() for item in skipped
+    ):
+        return "MIN_NOTIONAL_ALL_REJECTED"
+    return "UNKNOWN"
 
 
 class Stage7CycleRunner:
@@ -277,6 +315,45 @@ class Stage7CycleRunner:
             lifecycle_syms = {normalize_symbol(action.symbol) for action in lifecycle_actions}
             symbols_needed = sorted(universe_syms | lifecycle_syms)
             mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
+            ticker_stats_by_symbol: dict[str, dict[str, object]] = {}
+            if callable(ticker_stats_getter):
+                for row in ticker_stats_getter() or []:
+                    if not isinstance(row, dict):
+                        continue
+                    symbol_key = normalize_symbol(
+                        str(row.get("pairSymbol") or row.get("symbol") or row.get("pair") or "")
+                    )
+                    if symbol_key:
+                        ticker_stats_by_symbol[symbol_key] = row
+            get_candles = getattr(base_client, "get_candles", None)
+            for symbol in symbols_needed:
+                if symbol in mark_prices:
+                    continue
+                if symbol not in universe_syms:
+                    continue
+                ticker_row = ticker_stats_by_symbol.get(symbol)
+                if ticker_row is not None:
+                    last_raw = ticker_row.get("last") or ticker_row.get("lastPrice")
+                    if last_raw is not None:
+                        last_price = Decimal(str(last_raw))
+                        if last_price > 0:
+                            mark_prices[symbol] = last_price
+                            continue
+                if callable(get_candles):
+                    try:
+                        candle_rows = get_candles(symbol, 1)
+                    except Exception:  # noqa: BLE001
+                        candle_rows = []
+                    if candle_rows:
+                        latest = candle_rows[-1]
+                        if isinstance(latest, dict):
+                            close_raw = latest.get("close") or latest.get("c")
+                        else:
+                            close_raw = getattr(latest, "close", None)
+                        if close_raw is not None:
+                            close_price = Decimal(str(close_raw))
+                            if close_price > 0:
+                                mark_prices[symbol] = close_price
             rules_symbols_fallback: set[str] = set()
             rules_symbols_invalid_metadata: set[str] = set()
             rules_symbols_missing: set[str] = set()
@@ -660,6 +737,50 @@ class Stage7CycleRunner:
             elif oms_filled <= 0:
                 no_trades_reason = "NO_FILLS"
 
+            planning_enabled = planned_count > 0
+            planning_disabled_reason = _resolve_planning_disabled_reason(
+                planning_enabled=planning_enabled,
+                selected_universe=universe_result.selected_symbols,
+                mark_prices=mark_prices,
+                notional_cap_try_per_cycle=Decimal(str(runtime.notional_cap_try_per_cycle)),
+                order_intents=order_intents,
+            )
+            if (
+                planning_disabled_reason
+                and planning_disabled_reason not in _PLANNING_DISABLED_REASONS
+            ):
+                planning_disabled_reason = "UNKNOWN"
+
+            skip_reasons: dict[str, int] = {}
+            for intent in order_intents:
+                if not intent.skipped:
+                    continue
+                reason = str(intent.skip_reason or "unknown")
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
+            planning_diagnostics = {
+                "planning_enabled": planning_enabled,
+                "planning_disabled_reason": planning_disabled_reason,
+                "is_backtest_replay": is_backtest_simulation,
+                "dry_run": bool(settings.dry_run),
+                "kill_switch": bool(settings.kill_switch),
+                "strategy_enabled": bool(settings.stage7_enabled),
+                "selected_universe_count": len(universe_result.selected_symbols),
+                "mark_prices_count": len(mark_prices),
+                "notional_cap_try_per_cycle": str(runtime.notional_cap_try_per_cycle),
+                "portfolio_actions_count": len(portfolio_plan.actions),
+                "planned_intents_count": planned_count,
+                "skipped_intents_count": skipped_count,
+                "skip_reasons": dict(sorted(skip_reasons.items())),
+                "risk_rejections_count": int(
+                    sum(count for key, count in skip_reasons.items() if key.startswith("risk_"))
+                ),
+            }
+            logger.info(
+                "stage7_planning_diagnostics",
+                extra={"extra": {"cycle_id": cycle_id, **planning_diagnostics}},
+            )
+
             run_metrics_base = {
                 "ts": now.isoformat(),
                 "run_id": run_id,
@@ -718,6 +839,7 @@ class Stage7CycleRunner:
                         "order_intents_planned": planned_count,
                         "order_intents_skipped": skipped_count,
                         "rules_stats": rules_stats,
+                        "planning_diagnostics": planning_diagnostics,
                         "events_total": len(oms_events),
                         "oms_summary": {
                             "orders_total": len(oms_orders),
