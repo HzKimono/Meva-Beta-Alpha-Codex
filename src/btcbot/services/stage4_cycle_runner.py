@@ -314,6 +314,13 @@ class Stage4CycleRunner:
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}
             planning_engine = "legacy"
             kernel_plan = None
+            latest_mode = state_store.get_latest_risk_mode()
+            budget_notional_multiplier = Decimal("1")
+            if latest_mode == Mode.REDUCE_RISK_ONLY:
+                budget_notional_multiplier = Decimal("0.5")
+            elif latest_mode == Mode.OBSERVE_ONLY:
+                budget_notional_multiplier = Decimal("0")
+
             if settings.stage4_use_planning_kernel:
                 kernel_result = build_stage4_kernel_plan(
                     settings=settings,
@@ -355,6 +362,7 @@ class Stage4CycleRunner:
                     live_mode=live_mode,
                     preferred_symbols=active_symbols,
                     aggressive_scores=aggressive_scores,
+                    budget_notional_multiplier=budget_notional_multiplier,
                 )
             planned_payload = [
                 {
@@ -1129,12 +1137,22 @@ class Stage4CycleRunner:
         if evaluated.action in {DecisionAction.NO_OP, DecisionAction.ADJUST_RISK}:
             evaluated = base_decision
 
+        latest_mode = state_store.get_latest_risk_mode()
+        guard_multiplier = Decimal("1")
+        if latest_mode == Mode.REDUCE_RISK_ONLY:
+            guard_multiplier = Decimal("0.5")
+        elif latest_mode == Mode.OBSERVE_ONLY:
+            guard_multiplier = Decimal("0")
+
         guard = SafetyGuard(
-            max_exposure_try=settings.risk_max_gross_exposure_try,
+            max_exposure_try=settings.risk_max_gross_exposure_try * guard_multiplier,
             max_order_notional_try=(
-                settings.agent_max_order_notional_try
-                if settings.agent_max_order_notional_try > 0
-                else settings.risk_max_order_notional_try
+                (
+                    settings.agent_max_order_notional_try
+                    if settings.agent_max_order_notional_try > 0
+                    else settings.risk_max_order_notional_try
+                )
+                * guard_multiplier
             ),
             max_drawdown_pct=settings.max_drawdown_pct,
             min_notional_try=Decimal(str(settings.min_order_notional_try)),
