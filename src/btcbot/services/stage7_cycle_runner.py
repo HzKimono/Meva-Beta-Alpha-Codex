@@ -315,9 +315,7 @@ class Stage7CycleRunner:
             }
 
             base_mode = (
-                Mode.NORMAL
-                if is_backtest_simulation
-                else state_store.get_latest_risk_mode()
+                Mode.NORMAL if is_backtest_simulation else state_store.get_latest_risk_mode()
             )
             final_mode = combine_modes(base_mode, None)
             stage7_mode = Mode(stage7_risk_decision.mode.value)

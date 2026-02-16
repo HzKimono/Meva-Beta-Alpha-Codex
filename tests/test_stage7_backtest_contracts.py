@@ -186,6 +186,5 @@ def test_stage7_backtest_dry_run_keeps_simulated_trading_enabled(tmp_path: Path)
     assert rows
     assert all(row["no_trades_reason"] != "DRY_RUN" for row in rows)
     assert any(
-        int(row["intents_planned_count"]) > 0 or float(row["turnover_try"]) > 0
-        for row in rows
+        int(row["intents_planned_count"]) > 0 or float(row["turnover_try"]) > 0 for row in rows
     )
