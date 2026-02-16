@@ -85,6 +85,7 @@ class StateStore:
             self._ensure_risk_budget_schema(conn)
             self._ensure_anomaly_schema(conn)
             self._ensure_stage7_schema(conn)
+            self._ensure_agent_audit_schema(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -241,6 +242,33 @@ class StateStore:
             self._ensure_risk_budget_schema(conn)
             self._ensure_anomaly_schema(conn)
             self._ensure_stage7_schema(conn)
+            self._ensure_agent_audit_schema(conn)
+
+
+    def _ensure_agent_audit_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_decision_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_id TEXT NOT NULL,
+                correlation_id TEXT NOT NULL,
+                ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                context_json TEXT NOT NULL,
+                decision_json TEXT NOT NULL,
+                safe_decision_json TEXT NOT NULL,
+                diff_json TEXT NOT NULL,
+                diff_hash TEXT NOT NULL,
+                prompt_json TEXT,
+                response_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_decision_audit_cycle
+            ON agent_decision_audit(cycle_id, ts)
+            """
+        )
 
     def _ensure_risk_budget_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -3450,3 +3478,46 @@ class StateStore:
         if row is None:
             return None
         return Stage7Params.from_dict(json.loads(str(row["params_json"])))
+
+    def persist_agent_decision_audit(
+        self,
+        *,
+        cycle_id: str,
+        correlation_id: str,
+        context_json: str,
+        decision_json: str,
+        safe_decision_json: str,
+        diff_json: str,
+        diff_hash: str,
+        prompt_json: str | None,
+        response_json: str | None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_decision_audit (
+                    cycle_id,
+                    correlation_id,
+                    context_json,
+                    decision_json,
+                    safe_decision_json,
+                    diff_json,
+                    diff_hash,
+                    prompt_json,
+                    response_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cycle_id,
+                    correlation_id,
+                    context_json,
+                    decision_json,
+                    safe_decision_json,
+                    diff_json,
+                    diff_hash,
+                    prompt_json,
+                    response_json,
+                ),
+            )
+
+

@@ -7,6 +7,11 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
+from btcbot.agent.audit import AgentAuditTrail
+from btcbot.agent.contracts import AgentContext, AgentDecision, DecisionAction, DecisionRationale
+from btcbot.agent.guardrails import SafetyGuard
+from btcbot.agent.policy import FallbackPolicy, LlmPolicy, PromptBuilder, RuleBasedPolicy
+
 from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
@@ -43,6 +48,12 @@ from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
 from btcbot.planning_kernel import ExecutionPort, Plan
 
 logger = logging.getLogger(__name__)
+
+
+class _UnavailableLlmClient:
+    def complete(self, prompt: str, *, timeout_seconds: float) -> str:
+        del prompt, timeout_seconds
+        raise RuntimeError("llm client not configured")
 
 
 class Stage4ConfigurationError(RuntimeError):
@@ -432,6 +443,21 @@ class Stage4CycleRunner:
                 intents = pipeline_orders or bootstrap_intents
             else:
                 bootstrap_intents = []
+
+            intents = self._apply_agent_policy(
+                settings=settings,
+                state_store=state_store,
+                cycle_id=cycle_id,
+                cycle_started_at=cycle_started_at,
+                intents=intents,
+                mark_prices=mark_prices,
+                positions=positions,
+                current_open_orders=current_open_orders,
+                snapshot=snapshot,
+                live_mode=live_mode,
+                failed_symbols=failed_symbols,
+            )
+
             mid_price = next(iter(mark_prices.values()), Decimal("0"))
             lifecycle_plan = lifecycle_service.plan(
                 intents, current_open_orders, mid_price=mid_price
@@ -963,6 +989,156 @@ class Stage4CycleRunner:
                 continue
             mark_prices[normalized] = mark
         return mark_prices, anomalies
+
+    def _apply_agent_policy(
+        self,
+        *,
+        settings: Settings,
+        state_store: StateStore,
+        cycle_id: str,
+        cycle_started_at: datetime,
+        intents: list[Order],
+        mark_prices: dict[str, Decimal],
+        positions: list[Position],
+        current_open_orders: list[Order],
+        snapshot: object,
+        live_mode: bool,
+        failed_symbols: set[str],
+    ) -> list[Order]:
+        if not settings.agent_policy_enabled:
+            return intents
+
+        spreads_bps = self._resolve_spreads_bps(mark_prices=mark_prices)
+        policy = self._resolve_agent_policy(settings)
+        context = AgentContext(
+            cycle_id=cycle_id,
+            generated_at=datetime.now(UTC),
+            market_snapshot=mark_prices,
+            market_spreads_bps=spreads_bps,
+            portfolio={
+                self.norm(position.symbol): position.qty
+                for position in positions
+                if self.norm(position.symbol) not in failed_symbols
+            },
+            open_orders=[
+                {
+                    "symbol": self.norm(order.symbol),
+                    "side": str(order.side),
+                    "qty": str(order.qty),
+                    "price": str(order.price),
+                }
+                for order in current_open_orders
+            ],
+            risk_state={
+                "kill_switch": settings.kill_switch,
+                "safe_mode": settings.safe_mode,
+                "drawdown_pct": getattr(snapshot, "drawdown_pct", Decimal("0")),
+                "gross_exposure_try": sum(
+                    (position.qty * mark_prices.get(self.norm(position.symbol), position.avg_cost_try))
+                    for position in positions
+                ),
+                "market_data_age_seconds": Decimal("0"),
+            },
+            recent_events=[f"mark_price_error:{symbol}" for symbol in sorted(failed_symbols)],
+            started_at=cycle_started_at,
+            is_live_mode=live_mode,
+        )
+
+        base_decision = AgentDecision(
+            action=DecisionAction.PROPOSE_INTENTS,
+            propose_intents=[
+                {
+                    "symbol": self.norm(order.symbol),
+                    "side": str(order.side),
+                    "price_try": order.price,
+                    "qty": order.qty,
+                    "notional_try": order.price * order.qty,
+                    "reason": order.client_order_id or "pipeline_intent",
+                }
+                for order in intents
+            ],
+            rationale=DecisionRationale(
+                reasons=["Upstream planning intents"],
+                confidence=1.0,
+                constraints_hit=[],
+                citations=["planning_kernel"],
+            ),
+        )
+
+        evaluated = policy.evaluate(context)
+        if evaluated.action in {DecisionAction.NO_OP, DecisionAction.ADJUST_RISK}:
+            evaluated = base_decision
+
+        guard = SafetyGuard(
+            max_exposure_try=settings.risk_max_gross_exposure_try,
+            max_order_notional_try=(
+                settings.agent_max_order_notional_try
+                if settings.agent_max_order_notional_try > 0
+                else settings.risk_max_order_notional_try
+            ),
+            max_drawdown_pct=settings.max_drawdown_pct,
+            min_notional_try=Decimal(str(settings.min_order_notional_try)),
+            max_spread_bps=settings.agent_max_spread_bps,
+            symbol_allowlist={
+                self.norm(symbol)
+                for symbol in (settings.agent_symbol_allowlist or settings.symbols)
+            },
+            cooldown_seconds=settings.cooldown_seconds,
+            stale_data_seconds=settings.stale_market_data_seconds,
+            kill_switch=settings.kill_switch,
+            safe_mode=settings.safe_mode,
+            observe_only_override=settings.agent_observe_only,
+        )
+        safe_decision = guard.apply(context, evaluated)
+        AgentAuditTrail(
+            state_store=state_store,
+            include_prompt_payloads=settings.agent_prompt_capture_enabled,
+            max_payload_chars=settings.agent_prompt_capture_max_chars,
+        ).persist(
+            cycle_id=cycle_id,
+            correlation_id=f"{cycle_id}:agent_policy",
+            context=context,
+            decision=evaluated,
+            safe_decision=safe_decision,
+        )
+
+        return self._to_stage4_orders(
+            safe_decision=safe_decision,
+            now_utc=datetime.now(UTC),
+            live_mode=live_mode,
+        )
+
+    def _resolve_agent_policy(self, settings: Settings) -> FallbackPolicy | RuleBasedPolicy:
+        baseline = RuleBasedPolicy()
+        if settings.agent_policy_provider.lower() != "llm":
+            return baseline
+        llm_policy = LlmPolicy(client=_UnavailableLlmClient(), prompt_builder=PromptBuilder())
+        return FallbackPolicy(primary=llm_policy, fallback=baseline)
+
+    def _to_stage4_orders(
+        self, *, safe_decision: object, now_utc: datetime, live_mode: bool
+    ) -> list[Order]:
+        if safe_decision.observe_only_override or safe_decision.decision.observe_only:
+            return []
+        mapped: list[Order] = []
+        for item in safe_decision.decision.propose_intents:
+            mapped.append(
+                Order(
+                    symbol=item.symbol,
+                    side=item.side,
+                    type="limit",
+                    price=item.price_try,
+                    qty=item.qty,
+                    status="new",
+                    created_at=now_utc,
+                    updated_at=now_utc,
+                    mode="live" if live_mode else "dry_run",
+                )
+            )
+        return mapped
+
+    def _resolve_spreads_bps(self, *, mark_prices: dict[str, Decimal]) -> dict[str, Decimal]:
+        return {symbol: Decimal("0") for symbol in mark_prices}
 
     def _assert_execution_invariant(self, report: object) -> None:
         for field in ("executed_total", "submitted", "canceled", "simulated", "rejected"):
