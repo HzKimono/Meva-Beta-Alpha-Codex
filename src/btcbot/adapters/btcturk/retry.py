@@ -17,20 +17,23 @@ class RetryDecision:
     delay_seconds: float
 
 
-def _parse_retry_after(value: str | None) -> float | None:
+def parse_retry_after_seconds(value: str | None) -> float | None:
     if value is None or not value.strip():
         return None
+    candidate = value.strip()
     try:
-        return max(0.0, float(value))
+        seconds = float(candidate)
+        return seconds if seconds >= 0 else None
     except ValueError:
         pass
+
     try:
-        dt = parsedate_to_datetime(value)
+        parsed = parsedate_to_datetime(candidate)
     except (TypeError, ValueError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return max(0.0, (dt - datetime.now(UTC)).total_seconds())
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
 
 
 def compute_delay(
@@ -41,28 +44,32 @@ def compute_delay(
     retry_after_header: str | None,
     jitter_seed: int,
 ) -> float:
-    retry_after = _parse_retry_after(retry_after_header)
-    if retry_after is not None:
-        return min(max_delay_seconds, retry_after)
-    prng = random.Random(jitter_seed + attempt)
-    exp = min(max_delay_seconds, base_delay_seconds * (2 ** max(0, attempt - 1)))
-    return exp * (0.8 + 0.4 * prng.random())
+    retry_after_seconds = parse_retry_after_seconds(retry_after_header)
+    if retry_after_seconds is not None:
+        return min(max_delay_seconds, retry_after_seconds)
+
+    bounded_attempt = max(1, attempt)
+    exp_delay = min(max_delay_seconds, base_delay_seconds * (2 ** (bounded_attempt - 1)))
+    rng = random.Random(jitter_seed + bounded_attempt)
+    return exp_delay * (0.8 + (0.4 * rng.random()))
 
 
 async def async_retry(  # noqa: UP047
     fn: Callable[[], Awaitable[T]],
     *,
     max_attempts: int,
-    classify: Callable[[Exception], RetryDecision],
+    classify: Callable[[Exception, int], RetryDecision],
 ) -> T:
     if max_attempts < 1:
-        raise ValueError("max_attempts must be >=1")
+        raise ValueError("max_attempts must be >= 1")
+
     for attempt in range(1, max_attempts + 1):
         try:
             return await fn()
         except Exception as exc:
-            decision = classify(exc)
+            decision = classify(exc, attempt)
             if not decision.retry or attempt >= max_attempts:
                 raise
-            await asyncio.sleep(decision.delay_seconds)
-    raise RuntimeError("retry loop exhausted")
+            await asyncio.sleep(max(0.0, decision.delay_seconds))
+
+    raise RuntimeError("Retry loop exhausted unexpectedly")
