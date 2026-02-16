@@ -21,6 +21,7 @@ from btcbot.domain.stage4 import (
     Quantizer,
 )
 from btcbot.domain.strategy_core import PositionSummary
+from btcbot.domain.order_intent import OrderIntent
 from btcbot.services import metrics_service
 from btcbot.services.account_snapshot_service import AccountSnapshotService
 from btcbot.services.accounting_service_stage4 import AccountingService
@@ -36,6 +37,7 @@ from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_budget_service import RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
+from btcbot.services.stage4_planning_kernel_integration import build_stage4_kernel_plan
 from btcbot.services.state_store import StateStore
 from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
 from btcbot.planning_kernel import ExecutionPort, Plan
@@ -288,21 +290,50 @@ class Stage4CycleRunner:
             current_open_orders = state_store.list_stage4_open_orders()
             positions = state_store.list_stage4_positions()
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}
-            decision_report = decision_pipeline.run_cycle(
-                cycle_id=cycle_id,
-                balances={"TRY": try_cash},
-                positions={
-                    symbol: self._to_position_summary(position)
-                    for symbol, position in positions_by_symbol.items()
-                },
-                mark_prices=mark_prices,
-                open_orders=current_open_orders,
-                pair_info=pair_info,
-                bootstrap_enabled=settings.stage4_bootstrap_intents,
-                live_mode=live_mode,
-                preferred_symbols=active_symbols,
-                aggressive_scores=aggressive_scores,
-            )
+            planning_engine = "legacy"
+            kernel_plan = None
+            if settings.stage4_use_planning_kernel:
+                kernel_result = build_stage4_kernel_plan(
+                    settings=settings,
+                    cycle_id=cycle_id,
+                    now_utc=cycle_now,
+                    selected_symbols=[
+                        symbol for symbol in active_symbols if self.norm(symbol) not in failed_symbols
+                    ],
+                    mark_prices=mark_prices,
+                    try_cash=try_cash,
+                    positions=positions,
+                    open_orders=current_open_orders,
+                    pair_info=pair_info,
+                    live_mode=live_mode,
+                    aggressive_scores=aggressive_scores,
+                    bootstrap_builder=self._build_intents,
+                )
+                planning_engine = "kernel"
+                kernel_plan = kernel_result.plan
+                decision_report = kernel_result.decision_report
+                bootstrap_drop_reasons = dict(kernel_result.bootstrap_drop_reasons)
+                intents = self._translate_kernel_order_intents(
+                    order_intents=list(kernel_result.plan.order_intents),
+                    now_utc=cycle_now,
+                    live_mode=live_mode,
+                )
+            else:
+                decision_report = decision_pipeline.run_cycle(
+                    cycle_id=cycle_id,
+                    balances={"TRY": try_cash},
+                    positions={
+                        symbol: self._to_position_summary(position)
+                        for symbol, position in positions_by_symbol.items()
+                    },
+                    mark_prices=mark_prices,
+                    open_orders=current_open_orders,
+                    pair_info=pair_info,
+                    bootstrap_enabled=settings.stage4_bootstrap_intents,
+                    live_mode=live_mode,
+                    preferred_symbols=active_symbols,
+                    aggressive_scores=aggressive_scores,
+                )
             planned_payload = [
                 {
                     "symbol": item.symbol,
@@ -380,24 +411,27 @@ class Stage4CycleRunner:
                 ],
                 decisions=decisions_payload,
             )
-            pipeline_orders = [
-                order
-                for order in decision_report.order_requests
-                if self.norm(order.symbol) not in failed_symbols
-            ]
-            bootstrap_intents, bootstrap_drop_reasons = self._build_intents(
-                cycle_id=cycle_id,
-                symbols=[
-                    symbol for symbol in active_symbols if self.norm(symbol) not in failed_symbols
-                ],
-                mark_prices=mark_prices,
-                try_cash=try_cash,
-                open_orders=current_open_orders,
-                live_mode=live_mode,
-                bootstrap_enabled=settings.stage4_bootstrap_intents,
-                pair_info=pair_info,
-            )
-            intents = pipeline_orders or bootstrap_intents
+            if not settings.stage4_use_planning_kernel:
+                pipeline_orders = [
+                    order
+                    for order in decision_report.order_requests
+                    if self.norm(order.symbol) not in failed_symbols
+                ]
+                bootstrap_intents, bootstrap_drop_reasons = self._build_intents(
+                    cycle_id=cycle_id,
+                    symbols=[
+                        symbol for symbol in active_symbols if self.norm(symbol) not in failed_symbols
+                    ],
+                    mark_prices=mark_prices,
+                    try_cash=try_cash,
+                    open_orders=current_open_orders,
+                    live_mode=live_mode,
+                    bootstrap_enabled=settings.stage4_bootstrap_intents,
+                    pair_info=pair_info,
+                )
+                intents = pipeline_orders or bootstrap_intents
+            else:
+                bootstrap_intents = []
             mid_price = next(iter(mark_prices.values()), Decimal("0"))
             lifecycle_plan = lifecycle_service.plan(
                 intents, current_open_orders, mid_price=mid_price
@@ -817,6 +851,10 @@ class Stage4CycleRunner:
                         "cycle_id": cycle_id,
                         "mode": ("dry_run" if settings.dry_run else "live"),
                         "selected_universe": list(decision_report.selected_universe),
+                        "planning_engine": planning_engine,
+                        "kernel_plan_order_intents": (
+                            len(kernel_plan.order_intents) if kernel_plan is not None else 0
+                        ),
                         "equity_estimate_try": str(pnl_report.equity_estimate),
                         "intent_count": len(decision_report.intents),
                         "action_count": len(decision_report.allocation_actions),
@@ -1038,6 +1076,30 @@ class Stage4CycleRunner:
                 )
             )
         return intents, drop_reasons
+
+    @staticmethod
+    def _translate_kernel_order_intents(
+        *, order_intents: list[OrderIntent], now_utc: datetime, live_mode: bool
+    ) -> list[Order]:
+        translated: list[Order] = []
+        for item in order_intents:
+            if item.skipped:
+                continue
+            translated.append(
+                Order(
+                    symbol=item.symbol,
+                    side=item.side.lower(),
+                    type=item.order_type.lower(),
+                    price=item.price_try,
+                    qty=item.qty,
+                    status="new",
+                    created_at=now_utc,
+                    updated_at=now_utc,
+                    client_order_id=item.client_order_id,
+                    mode=("live" if live_mode else "dry_run"),
+                )
+            )
+        return translated
 
     @staticmethod
     def _inc_reason(reasons: dict[str, int], key: str) -> None:
