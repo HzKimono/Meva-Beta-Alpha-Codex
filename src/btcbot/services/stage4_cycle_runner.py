@@ -37,6 +37,8 @@ from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_budget_service import RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.state_store import StateStore
+from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
+from btcbot.planning_kernel import ExecutionPort, Plan
 
 logger = logging.getLogger(__name__)
 
@@ -842,6 +844,14 @@ class Stage4CycleRunner:
             raise Stage4ExchangeError(str(exc)) from exc
         finally:
             self._close_best_effort(exchange, "exchange_stage4")
+
+    def consume_shared_plan(self, plan: Plan, execution: ExecutionPort) -> list[str]:
+        """Adapter glue for future migration to the shared PlanningKernel.
+
+        TODO: invoke this from run_one_cycle once Stage4 planning duplication is removed.
+        """
+
+        return Stage4PlanConsumer(execution=execution).consume(plan)
 
     def _close_best_effort(self, resource: object, label: str) -> None:
         close = getattr(resource, "close", None)

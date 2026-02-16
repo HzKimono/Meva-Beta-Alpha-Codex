@@ -29,6 +29,16 @@ from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
+from btcbot.planning_kernel import ExecutionPort, Plan, PlanningKernel
+from btcbot.services.planning_kernel_adapters import Stage7ExecutionPort, Stage7PlanConsumer
+from btcbot.services.stage7_planning_kernel_integration import (
+    Stage7OrderIntentBuilderAdapter,
+    Stage7PassThroughAllocator,
+    Stage7PortfolioStrategyAdapter,
+    Stage7UniverseSelectorAdapter,
+    build_stage7_planning_context,
+    normalize_stage4_open_orders,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -420,30 +430,27 @@ class Stage7CycleRunner:
             }
 
             collector.start_timer("planning")
-            portfolio_plan = policy_service.build_plan(
-                universe=universe_result.selected_symbols,
-                mark_prices_try=mark_prices,
-                balances=balances,
-                settings=runtime,
-                now_utc=now,
-                final_mode=final_mode,
-            )
-            collector.stop_timer("planning")
-
             collector.start_timer("intents")
             try:
-                order_intents = order_builder.build_intents(
+                portfolio_plan, order_intents, planning_engine = self._build_stage7_order_intents(
                     cycle_id=cycle_id,
-                    plan=portfolio_plan,
-                    mark_prices_try=mark_prices,
-                    rules=rules_service,
-                    settings=runtime,
+                    now=now,
+                    runtime=runtime,
+                    universe_service=universe_service,
+                    base_client=base_client,
+                    mark_prices=mark_prices,
+                    balances=balances,
+                    open_orders=open_orders,
                     final_mode=final_mode,
-                    now_utc=now,
+                    rules_service=rules_service,
                     rules_unavailable=rules_unavailable,
+                    selected_universe=universe_result.selected_symbols,
+                    policy_service=policy_service,
+                    order_builder=order_builder,
                 )
             finally:
                 collector.stop_timer("intents")
+                collector.stop_timer("planning")
 
             actions: list[dict[str, object]] = []
             slippage_try = Decimal("0")
@@ -504,25 +511,28 @@ class Stage7CycleRunner:
                 collector.start_timer("oms")
                 oms_service = OMSService()
                 market_simulator = Stage7MarketSimulator(mark_prices)
-                reconciled_orders, reconciled_events = oms_service.reconcile_open_orders(
+                execution_port = Stage7ExecutionPort(
                     cycle_id=cycle_id,
                     now_utc=now,
-                    state_store=state_store,
-                    settings=runtime,
-                    market_sim=market_simulator,
-                )
-                planned_intents = [intent for intent in order_intents if not intent.skipped]
-                oms_orders, oms_events = oms_service.process_intents(
-                    cycle_id=cycle_id,
-                    now_utc=now,
-                    intents=planned_intents,
+                    oms_service=oms_service,
                     market_sim=market_simulator,
                     state_store=state_store,
                     settings=runtime,
-                    cancel_requests=[],
                 )
-                oms_orders = [*reconciled_orders, *oms_orders]
-                oms_events = [*reconciled_events, *oms_events]
+                kernel_plan = Plan(
+                    cycle_id=cycle_id,
+                    generated_at=now,
+                    universe=tuple(sorted({normalize_symbol(item) for item in universe_result.selected_symbols})),
+                    order_intents=tuple(order_intents),
+                    planning_gates={},
+                    intents_raw=tuple(),
+                    intents_allocated=tuple(),
+                    diagnostics={"engine": planning_engine},
+                )
+                self.consume_shared_plan(kernel_plan, execution_port)
+                execution_report = execution_port.reconcile()
+                oms_orders = list(execution_report.get("orders", []))
+                oms_events = list(execution_report.get("events", []))
                 collector.stop_timer("oms")
                 actions = (
                     [
@@ -982,3 +992,117 @@ class Stage7CycleRunner:
         )
         logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})
         return stage4_result
+
+    def _build_stage7_order_intents(
+        self,
+        *,
+        cycle_id: str,
+        now: datetime,
+        runtime: Settings,
+        universe_service: UniverseSelectionService,
+        base_client: object,
+        mark_prices: dict[str, Decimal],
+        balances: list[Balance],
+        open_orders: list[object],
+        final_mode: Mode,
+        rules_service: ExchangeRulesService,
+        rules_unavailable: dict[str, str],
+        selected_universe: list[str],
+        policy_service: PortfolioPolicyService,
+        order_builder: OrderBuilderService,
+    ) -> tuple[object, list[object], str]:
+        if not getattr(runtime, "stage7_use_planning_kernel", True):
+            portfolio_plan, order_intents = self._build_stage7_order_intents_legacy(
+                cycle_id=cycle_id,
+                now=now,
+                runtime=runtime,
+                selected_universe=selected_universe,
+                mark_prices=mark_prices,
+                balances=balances,
+                final_mode=final_mode,
+                rules_service=rules_service,
+                rules_unavailable=rules_unavailable,
+                policy_service=policy_service,
+                order_builder=order_builder,
+            )
+            return portfolio_plan, order_intents, "legacy"
+
+        context = build_stage7_planning_context(
+            cycle_id=cycle_id,
+            now_utc=now,
+            mark_prices=mark_prices,
+            balances=balances,
+            open_orders=normalize_stage4_open_orders(open_orders),
+            quote_ccy=runtime.stage7_universe_quote_ccy,
+        )
+        universe_adapter = Stage7UniverseSelectorAdapter(
+            service=universe_service,
+            exchange=base_client,
+            settings=runtime,
+            now_utc=now,
+            _cached=[normalize_symbol(item) for item in selected_universe],
+        )
+        strategy_adapter = Stage7PortfolioStrategyAdapter(
+            policy_service=policy_service,
+            settings=runtime,
+            now_utc=now,
+            final_mode=final_mode,
+        )
+        allocator_adapter = Stage7PassThroughAllocator()
+        order_intent_builder_adapter = Stage7OrderIntentBuilderAdapter(
+            order_builder=order_builder,
+            strategy_adapter=strategy_adapter,
+            settings=runtime,
+            final_mode=final_mode,
+            now_utc=now,
+            rules=rules_service,
+            rules_unavailable=rules_unavailable,
+        )
+        kernel = PlanningKernel(
+            universe_selector=universe_adapter,
+            strategy_engine=strategy_adapter,
+            allocator=allocator_adapter,
+            order_intent_builder=order_intent_builder_adapter,
+        )
+        plan = kernel.plan(context)
+        return strategy_adapter.last_portfolio_plan, list(plan.order_intents), "kernel"
+
+    def _build_stage7_order_intents_legacy(
+        self,
+        *,
+        cycle_id: str,
+        now: datetime,
+        runtime: Settings,
+        selected_universe: list[str],
+        mark_prices: dict[str, Decimal],
+        balances: list[Balance],
+        final_mode: Mode,
+        rules_service: ExchangeRulesService,
+        rules_unavailable: dict[str, str],
+        policy_service: PortfolioPolicyService,
+        order_builder: OrderBuilderService,
+    ) -> tuple[object, list[object]]:
+        portfolio_plan = policy_service.build_plan(
+            universe=selected_universe,
+            mark_prices_try=mark_prices,
+            balances=balances,
+            settings=runtime,
+            now_utc=now,
+            final_mode=final_mode,
+        )
+        order_intents = order_builder.build_intents(
+            cycle_id=cycle_id,
+            plan=portfolio_plan,
+            mark_prices_try=mark_prices,
+            rules=rules_service,
+            settings=runtime,
+            final_mode=final_mode,
+            now_utc=now,
+            rules_unavailable=rules_unavailable,
+        )
+        return portfolio_plan, order_intents
+
+    def consume_shared_plan(self, plan: Plan, execution: ExecutionPort) -> list[str]:
+        """Submit shared Plan order intents through a stage-specific execution adapter."""
+
+        return Stage7PlanConsumer(execution=execution).consume(plan)

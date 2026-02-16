@@ -103,6 +103,7 @@ class Settings(BaseSettings):
         default=None, alias="STAGE7_SCORE_WEIGHTS"
     )
     stage7_order_offset_bps: Decimal = Field(default=Decimal("5"), alias="STAGE7_ORDER_OFFSET_BPS")
+    stage7_use_planning_kernel: bool = Field(default=True, alias="STAGE7_USE_PLANNING_KERNEL")
     stage7_rules_fallback_tick_size: Decimal = Field(
         default=Decimal("0.01"), alias="STAGE7_RULES_FALLBACK_TICK_SIZE"
     )
