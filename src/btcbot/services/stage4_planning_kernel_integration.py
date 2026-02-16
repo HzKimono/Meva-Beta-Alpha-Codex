@@ -221,6 +221,7 @@ class Stage4CompatOrderIntentBuilderAdapter(OrderIntentBuilder):
                 live_mode=self.live_mode,
                 bootstrap_enabled=context.bootstrap_enabled,
                 pair_info=list(context.pair_info),
+                now_utc=context.now_utc,
             )
             selected_orders = bootstrap_orders
             self._last_bootstrap_drop_reasons = dict(drop_reasons)

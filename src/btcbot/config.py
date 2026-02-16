@@ -215,6 +215,29 @@ class Settings(BaseSettings):
         default=9464, alias="OBSERVABILITY_PROMETHEUS_PORT"
     )
     safe_mode: bool = Field(default=False, alias="SAFE_MODE")
+    agent_policy_enabled: bool = Field(default=False, alias="AGENT_POLICY_ENABLED")
+    agent_policy_provider: str = Field(default="rule", alias="AGENT_POLICY_PROVIDER")
+    agent_observe_only: bool = Field(default=False, alias="AGENT_OBSERVE_ONLY")
+    agent_symbol_allowlist: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        alias="AGENT_SYMBOL_ALLOWLIST",
+    )
+    agent_max_order_notional_try: Decimal = Field(
+        default=Decimal("0"), alias="AGENT_MAX_ORDER_NOTIONAL_TRY"
+    )
+    agent_max_spread_bps: Decimal = Field(default=Decimal("120"), alias="AGENT_MAX_SPREAD_BPS")
+    agent_prompt_capture_enabled: bool = Field(
+        default=False,
+        alias="AGENT_PROMPT_CAPTURE_ENABLED",
+    )
+    agent_prompt_capture_max_chars: int = Field(
+        default=4000,
+        alias="AGENT_PROMPT_CAPTURE_MAX_CHARS",
+    )
+    agent_llm_enabled: bool = Field(default=False, alias="AGENT_LLM_ENABLED")
+    agent_llm_timeout_seconds: float = Field(default=3.0, alias="AGENT_LLM_TIMEOUT_SECONDS")
+    agent_llm_model: str | None = Field(default=None, alias="AGENT_LLM_MODEL")
+    agent_llm_provider: str = Field(default="none", alias="AGENT_LLM_PROVIDER")
 
     universe_quote_currency: str = Field(default="TRY", alias="UNIVERSE_QUOTE_CURRENCY")
     universe_max_size: int = Field(default=20, alias="UNIVERSE_MAX_SIZE")
@@ -272,6 +295,7 @@ class Settings(BaseSettings):
         "universe_allow_symbols",
         "universe_deny_symbols",
         "universe_exclude_symbols",
+        "agent_symbol_allowlist",
         mode="before",
     )
     def parse_universe_symbols(cls, value: str | list[str]) -> list[str]:
