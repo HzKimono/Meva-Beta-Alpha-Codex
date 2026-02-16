@@ -4,12 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from btcbot.planning_kernel import (
-    Intent,
-    OrderIntent,
-    PlanningContext,
-    PlanningKernel,
-)
+from btcbot.planning_kernel import Intent, PlanningContext, PlanningKernel
 from btcbot.services.planning_kernel_adapters import (
     InMemoryExecutionPort,
     Stage4PlanConsumer,
@@ -27,7 +22,7 @@ class _MarketData:
 class _Portfolio:
     cash_try: Decimal
     positions_qty: dict[str, Decimal]
-    open_orders: tuple[OrderIntent, ...] = ()
+    open_orders: tuple[object, ...] = ()
 
 
 class _UniverseSelector:
@@ -58,21 +53,25 @@ class _Allocator:
 
 
 class _OrderIntentBuilder:
-    def build(self, context: PlanningContext, intents: list[Intent]) -> list[OrderIntent]:
+    def build(self, context: PlanningContext, intents: list[Intent]) -> list[object]:
+        from btcbot.domain.order_intent import OrderIntent
+
         out: list[OrderIntent] = []
         for idx, intent in enumerate(intents):
             price = context.market_data.mark_prices_try[intent.symbol]
             qty = (intent.target_notional_try / price).quantize(Decimal("0.0001"))
             out.append(
                 OrderIntent(
+                    cycle_id=context.cycle_id,
                     symbol=intent.symbol,
-                    side=intent.side,
+                    side="BUY",
                     order_type="LIMIT",
                     price_try=price,
                     qty=qty,
                     notional_try=price * qty,
                     client_order_id=f"cid-{idx}",
                     reason=intent.rationale,
+                    constraints_applied={},
                 )
             )
         return out

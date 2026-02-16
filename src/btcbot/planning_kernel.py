@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Mapping, Protocol, Sequence
+
+from btcbot.domain.order_intent import OrderIntent
 
 
 class MarketDataSnapshot(Protocol):
@@ -26,7 +28,7 @@ class PortfolioState(Protocol):
     def positions_qty(self) -> Mapping[str, Decimal]: ...
 
     @property
-    def open_orders(self) -> Sequence["OrderIntent"]: ...
+    def open_orders(self) -> Sequence[OrderIntent]: ...
 
 
 @dataclass(frozen=True)
@@ -37,20 +39,8 @@ class Intent:
     rationale: str
     strategy_id: str
 
-
-@dataclass(frozen=True)
-class OrderIntent:
-    symbol: str
-    side: str
-    order_type: str
-    price_try: Decimal
-    qty: Decimal
-    notional_try: Decimal
-    client_order_id: str
-    reason: str
-    skipped: bool = False
-    skip_reason: str | None = None
-    constraints_applied: Mapping[str, str] = field(default_factory=dict)
+    def normalized_side(self) -> str:
+        return str(self.side).upper()
 
 
 @dataclass(frozen=True)
@@ -105,8 +95,7 @@ class PlanningKernel:
     def plan(self, context: PlanningContext) -> Plan:
         """Build a deterministic plan consumed by execution layers.
 
-        TODO: Wire this kernel into Stage4CycleRunner and Stage7CycleRunner, replacing
-        duplicated planning steps while keeping output parity with existing services.
+        TODO: wire fully into Stage4 runner after Stage7 migration parity is proven.
         """
 
         universe = tuple(sorted({symbol for symbol in self.universe_selector.select(context)}))

@@ -69,3 +69,8 @@ TODO markers identify where live wiring should occur without changing current ru
   - Verifies Stage4 and Stage7 consumers submit identical `OrderIntent`s to an `ExecutionPort`.
 - Run command:
   - `pytest tests/test_planning_kernel_parity.py`
+
+
+## Rollout toggle
+
+- `STAGE7_USE_PLANNING_KERNEL=true|false` switches Stage7 between shared-kernel and legacy planning paths for safe rollout.
