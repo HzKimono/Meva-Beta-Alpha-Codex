@@ -6,6 +6,7 @@ from decimal import Decimal
 from hashlib import sha256
 from uuid import uuid4
 
+from btcbot.adapters.replay_exchange import ReplayExchangeClient
 from btcbot.config import Settings
 from btcbot.domain.accounting import Position, TradeFill
 from btcbot.domain.anomalies import combine_modes
@@ -146,6 +147,7 @@ class Stage7CycleRunner:
                 )
 
         base_client = getattr(exchange, "client", exchange)
+        is_backtest_simulation = isinstance(base_client, ReplayExchangeClient)
         rules_service = ExchangeRulesService(
             base_client,
             cache_ttl_sec=settings.rules_cache_ttl_sec,
@@ -242,6 +244,10 @@ class Stage7CycleRunner:
                 data_age_sec = max(0, int((now - newest).total_seconds()))
             elif quote_volume_try > 0:
                 data_age_sec = 0
+            elif is_backtest_simulation:
+                # Replay datasets may omit ticker timestamps/quote volume. In backtests this
+                # must not force OBSERVE_ONLY because execution is fully simulated locally.
+                data_age_sec = 0
 
             risk_inputs = Stage7RiskInputs(
                 max_drawdown_pct=latest_metrics["max_drawdown_ratio"],
@@ -308,7 +314,11 @@ class Stage7CycleRunner:
                 "rules_unavailable_details": dict(sorted(rules_unavailable_details.items())),
             }
 
-            base_mode = state_store.get_latest_risk_mode()
+            base_mode = (
+                Mode.NORMAL
+                if is_backtest_simulation
+                else state_store.get_latest_risk_mode()
+            )
             final_mode = combine_modes(base_mode, None)
             stage7_mode = Mode(stage7_risk_decision.mode.value)
             final_mode = combine_modes(final_mode, stage7_mode)
@@ -631,6 +641,8 @@ class Stage7CycleRunner:
                 "throttled": throttled_events > 0,
                 "retry_scheduled": retry_count > 0,
                 "retry_giveup": retry_giveup_count > 0,
+                "blocked_exchange_writes": bool(settings.kill_switch),
+                "simulated_execution": is_backtest_simulation,
             }
             alert_flags = {
                 "drawdown_breach": snapshot.max_drawdown >= runtime.stage7_max_drawdown_pct,
@@ -641,12 +653,12 @@ class Stage7CycleRunner:
                 "retry_giveup": retry_giveup_count > 0,
             }
             no_trades_reason = None
-            if settings.kill_switch:
+            if planned_count <= 0:
+                no_trades_reason = "NO_TRADE_PLANNING"
+            elif final_mode == Mode.OBSERVE_ONLY:
+                no_trades_reason = "MODE_OBSERVE_ONLY"
+            elif settings.kill_switch and not is_backtest_simulation:
                 no_trades_reason = "KILL_SWITCH"
-            elif settings.dry_run:
-                no_trades_reason = "DRY_RUN"
-            elif planned_count <= 0:
-                no_trades_reason = "NO_PRIVATE_DATA"
             elif oms_filled <= 0:
                 no_trades_reason = "NO_FILLS"
 

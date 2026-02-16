@@ -259,7 +259,7 @@ def test_stage7_report_prints_no_trade_reason_and_allocation_summary(
             "persist_ms": 0,
             "quality_flags": {},
             "alert_flags": {},
-            "no_trades_reason": "DRY_RUN",
+            "no_trades_reason": "NO_TRADE_PLANNING",
             "no_metrics_reason": "NO_TRADES",
         },
     )
@@ -281,7 +281,7 @@ def test_stage7_report_prints_no_trade_reason_and_allocation_summary(
 
     assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5) == 0
     out = capsys.readouterr().out
-    assert "DRY_RUN" in out
+    assert "NO_TRADE_PLANNING" in out
     assert "stage4_plan_summary=planned_total_try=0" in out
     assert "selected_symbols=BTCTRY:150" in out
     assert "allocation_plan=source=cycle_id cycle_id=c2 investable_total_try=200" in out
