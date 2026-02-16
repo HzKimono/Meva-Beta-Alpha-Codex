@@ -156,3 +156,36 @@ def test_stage7_parity_same_seed_with_adaptation_matches(tmp_path: Path) -> None
     )
 
     assert compare_fingerprints(f1, f2)
+
+
+def test_stage7_backtest_dry_run_keeps_simulated_trading_enabled(tmp_path: Path) -> None:
+    dataset = tmp_path / "data"
+    _dataset(dataset)
+    out_db = tmp_path / "backtest.db"
+
+    Stage7BacktestRunner().run(
+        settings=_settings(out_db),
+        replay=_replay(dataset, seed=21),
+        cycles=None,
+        out_db_path=out_db,
+        seed=21,
+        freeze_params=True,
+        disable_adaptation=True,
+    )
+
+    with sqlite3.connect(out_db) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT intents_planned_count, turnover_try, no_trades_reason
+            FROM stage7_run_metrics
+            ORDER BY ts
+            """
+        ).fetchall()
+
+    assert rows
+    assert all(row["no_trades_reason"] != "DRY_RUN" for row in rows)
+    assert any(
+        int(row["intents_planned_count"]) > 0 or float(row["turnover_try"]) > 0
+        for row in rows
+    )
