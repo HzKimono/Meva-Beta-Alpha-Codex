@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -1565,6 +1565,37 @@ class StateStore:
             """
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS universe_price_cache (
+                pair_symbol TEXT NOT NULL,
+                ts_bucket TEXT NOT NULL,
+                mid_price TEXT NOT NULL,
+                PRIMARY KEY(pair_symbol, ts_bucket)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dynamic_universe_cycles (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                selected_symbols_json TEXT NOT NULL,
+                scores_json TEXT NOT NULL,
+                filters_json TEXT NOT NULL,
+                ineligible_counts_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dynamic_universe_cycles_ts "
+            "ON dynamic_universe_cycles(ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_universe_price_cache_pair_ts "
+            "ON universe_price_cache(pair_symbol, ts_bucket)"
+        )
+
     def _ensure_cycle_metrics_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """
@@ -2567,6 +2598,100 @@ class StateStore:
         payload["plan"] = json.loads(str(payload.pop("plan_json")))
         payload["deferred"] = json.loads(str(payload.pop("deferred_json") or "[]"))
         payload["decisions"] = json.loads(str(payload.pop("decisions_json")))
+        return payload
+
+    def upsert_universe_price_snapshot(
+        self,
+        *,
+        pair_symbol: str,
+        ts_bucket: datetime,
+        mid_price: Decimal,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO universe_price_cache(pair_symbol, ts_bucket, mid_price)
+                VALUES (?, ?, ?)
+                ON CONFLICT(pair_symbol, ts_bucket) DO UPDATE SET
+                    mid_price=excluded.mid_price
+                """,
+                (pair_symbol, ensure_utc(ts_bucket).isoformat(), str(mid_price)),
+            )
+
+    def get_universe_price_lookback(
+        self,
+        *,
+        pair_symbol: str,
+        target_ts: datetime,
+        tolerance: timedelta,
+    ) -> Decimal | None:
+        target = ensure_utc(target_ts)
+        start = (target - tolerance).isoformat()
+        end = (target + tolerance).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT mid_price
+                FROM universe_price_cache
+                WHERE pair_symbol = ?
+                  AND ts_bucket BETWEEN ? AND ?
+                ORDER BY ABS(strftime('%s', ts_bucket) - strftime('%s', ?)) ASC, ts_bucket ASC
+                LIMIT 1
+                """,
+                (pair_symbol, start, end, target.isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        return Decimal(str(row["mid_price"]))
+
+    def save_dynamic_universe_selection(
+        self,
+        *,
+        cycle_id: str,
+        ts: datetime,
+        selected_symbols: list[str],
+        scores: dict[str, str],
+        filters: dict[str, object],
+        ineligible_counts: dict[str, int],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dynamic_universe_cycles(
+                    cycle_id, ts, selected_symbols_json, scores_json, filters_json,
+                    ineligible_counts_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts=excluded.ts,
+                    selected_symbols_json=excluded.selected_symbols_json,
+                    scores_json=excluded.scores_json,
+                    filters_json=excluded.filters_json,
+                    ineligible_counts_json=excluded.ineligible_counts_json
+                """,
+                (
+                    cycle_id,
+                    ensure_utc(ts).isoformat(),
+                    json.dumps(selected_symbols, sort_keys=True),
+                    json.dumps(scores, sort_keys=True),
+                    json.dumps(filters, sort_keys=True),
+                    json.dumps(ineligible_counts, sort_keys=True),
+                ),
+            )
+
+    def get_latest_dynamic_universe_selection(self) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM dynamic_universe_cycles ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        payload = {key: row[key] for key in row.keys()}
+        payload["selected_symbols"] = json.loads(str(payload.pop("selected_symbols_json") or "[]"))
+        payload["scores"] = json.loads(str(payload.pop("scores_json") or "{}"))
+        payload["filters"] = json.loads(str(payload.pop("filters_json") or "{}"))
+        payload["ineligible_counts"] = json.loads(
+            str(payload.pop("ineligible_counts_json") or "{}")
+        )
         return payload
 
     def record_cycle_audit(

@@ -194,6 +194,25 @@ class Settings(BaseSettings):
     )
     universe_require_active: bool = Field(default=True, alias="UNIVERSE_REQUIRE_ACTIVE")
     universe_require_try_quote: bool = Field(default=True, alias="UNIVERSE_REQUIRE_TRY_QUOTE")
+    dynamic_universe_enabled: bool = Field(default=True, alias="DYNAMIC_UNIVERSE_ENABLED")
+    universe_top_n: int = Field(default=5, alias="UNIVERSE_TOP_N")
+    universe_spread_max_bps: Decimal = Field(
+        default=Decimal("60"), alias="UNIVERSE_SPREAD_MAX_BPS"
+    )
+    universe_min_depth_try: Decimal = Field(
+        default=Decimal("50000"), alias="UNIVERSE_MIN_DEPTH_TRY"
+    )
+    universe_exclude_stables: bool = Field(default=True, alias="UNIVERSE_EXCLUDE_STABLES")
+    universe_exclude_symbols: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["USDTTRY", "USDCTRY", "EURTRY"],
+        alias="UNIVERSE_EXCLUDE_SYMBOLS",
+    )
+    universe_refresh_minutes: int = Field(default=60, alias="UNIVERSE_REFRESH_MINUTES")
+    universe_history_bucket_minutes: int = Field(default=5, alias="UNIVERSE_HISTORY_BUCKET_MINUTES")
+    universe_history_tolerance_minutes: int = Field(
+        default=30,
+        alias="UNIVERSE_HISTORY_TOLERANCE_MINUTES",
+    )
 
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCTRY", "ETHTRY", "SOLTRY"],
@@ -208,7 +227,12 @@ class Settings(BaseSettings):
             invalid_json_message="SYMBOLS JSON value must be a list",
         )
 
-    @field_validator("universe_allow_symbols", "universe_deny_symbols", mode="before")
+    @field_validator(
+        "universe_allow_symbols",
+        "universe_deny_symbols",
+        "universe_exclude_symbols",
+        mode="before",
+    )
     def parse_universe_symbols(cls, value: str | list[str]) -> list[str]:
         return cls._parse_symbol_list(
             value,
@@ -433,6 +457,17 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
+        "universe_top_n",
+        "universe_refresh_minutes",
+        "universe_history_bucket_minutes",
+        "universe_history_tolerance_minutes",
+    )
+    def validate_dynamic_universe_positive_ints(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Dynamic universe integer settings must be >= 1")
+        return value
+
+    @field_validator(
         "stage7_min_quote_volume_try",
         "stage7_max_spread_bps",
         "stage7_order_offset_bps",
@@ -443,6 +478,12 @@ class Settings(BaseSettings):
     def validate_stage7_non_negative_decimals(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("Stage7 universe decimal settings must be >= 0")
+        return value
+
+    @field_validator("universe_spread_max_bps", "universe_min_depth_try")
+    def validate_dynamic_universe_non_negative_decimals(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("Dynamic universe decimal settings must be >= 0")
         return value
 
     @field_validator("stage7_universe_quote_ccy")
