@@ -250,6 +250,8 @@ def test_submit_limit_order_400_logs_error_body(caplog) -> None:
     assert payload["error_code"] == 1126
     assert payload["pairSymbol"] == "BTCTRY"
     assert payload["quantized_price"] == "100.12"
+    assert payload["clientOrderId"] == "coid-400-log"
+    assert "FAILED_INVALID_PRICE_SCALE" in payload["response_body"]
     client.close()
 
 
@@ -287,4 +289,41 @@ def test_submit_limit_order_415_exposes_sanitized_request_json() -> None:
     assert exc.request_json["price"] == "100"
     assert exc.request_json["quantity"] == "0.01"
     assert exc.request_json["newOrderClientId"] == "coid-415"
+    client.close()
+
+
+def test_submit_limit_order_non_positive_values_caught_before_request() -> None:
+    calls = {"post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+    )
+
+    with pytest.raises(ValidationError, match="price must be positive"):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("0"),
+            qty=Decimal("0.1"),
+            client_order_id="coid-non-positive-price",
+        )
+
+    with pytest.raises(ValidationError, match="quantity must be positive"):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("0"),
+            client_order_id="coid-non-positive-qty",
+        )
+
+    assert calls["post"] == 0
     client.close()

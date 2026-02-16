@@ -822,14 +822,23 @@ class BtcturkHttpClient(ExchangeClient):
     ) -> OrderAck:
         symbol_normalized = normalize_symbol(symbol)
         rules = self._resolve_symbol_rules(symbol_normalized)
+        if price <= 0:
+            raise ValidationError(f"price must be positive; observed={price}")
+        if qty <= 0:
+            raise ValidationError(f"quantity must be positive; observed={qty}")
         validate_order(price=price, qty=qty, rules=rules)
         quantized_price = quantize_price(price, rules)
         quantized_qty = quantize_quantity(qty, rules)
+        if quantized_price <= 0:
+            raise ValidationError(f"price non-positive after quantize; observed={quantized_price}")
+        if quantized_qty <= 0:
+            raise ValidationError(f"quantity non-positive after quantize; observed={quantized_qty}")
         computed_notional = quantized_price * quantized_qty
-        if rules.min_total is None and computed_notional < _DEFAULT_MIN_NOTIONAL_TRY:
+        min_notional = rules.min_total if rules.min_total is not None else _DEFAULT_MIN_NOTIONAL_TRY
+        if computed_notional < min_notional:
             raise ValidationError(
                 f"total below min_total for {rules.pair_symbol}; "
-                f"required={_DEFAULT_MIN_NOTIONAL_TRY} observed={computed_notional}"
+                f"required={min_notional} observed={computed_notional}"
             )
 
         request = SubmitOrderRequest(
@@ -854,11 +863,13 @@ class BtcturkHttpClient(ExchangeClient):
                         "request_path": exc.request_path,
                         "request_headers": _sanitize_request_headers(dict(self.client.headers)),
                         "request_json": exc.request_json,
+                        "response_body": exc.response_body,
                         "pairSymbol": payload.get("pairSymbol"),
                         "orderType": payload.get("orderType"),
                         "orderMethod": payload.get("orderMethod"),
                         "price": payload.get("price"),
                         "quantity": payload.get("quantity"),
+                        "clientOrderId": payload.get("newOrderClientId"),
                         "stopPrice": payload.get("stopPrice"),
                         "computed_notional_try": str(computed_notional),
                         "quantized_price": _fmt_decimal(quantized_price),

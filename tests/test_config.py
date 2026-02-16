@@ -19,7 +19,7 @@ def test_parse_symbols_csv() -> None:
 
 
 def test_loads_values_from_env_file(monkeypatch, tmp_path: Path) -> None:
-    env_file = tmp_path / ".env"
+    env_file = tmp_path / ".env.live"
     env_file.write_text(
         "\n".join(
             [
@@ -34,7 +34,7 @@ def test_loads_values_from_env_file(monkeypatch, tmp_path: Path) -> None:
     )
     monkeypatch.chdir(tmp_path)
 
-    settings = Settings()
+    settings = Settings(_env_file=str(env_file))
 
     assert settings.kill_switch is False
     assert settings.dry_run is True
@@ -124,7 +124,7 @@ def test_live_trading_cannot_be_enabled_in_dry_run() -> None:
 
 
 def test_settings_defaults_are_prod_safe() -> None:
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.kill_switch is True
     assert settings.dry_run is True

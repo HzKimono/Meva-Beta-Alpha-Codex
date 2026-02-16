@@ -74,6 +74,14 @@ def main() -> int:
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help=(
+            "Optional dotenv path for settings bootstrap (e.g. .env.live). "
+            "By default Settings uses .env.live when present."
+        ),
+    )
 
     run_parser = subparsers.add_parser("run", help="Run one decision cycle")
     run_parser.add_argument("--dry-run", action="store_true", help="Do not place orders")
@@ -83,7 +91,10 @@ def main() -> int:
         "--cycle-seconds", type=int, default=60, help="Sleep seconds between cycles"
     )
     run_parser.add_argument(
-        "--max-cycles", type=int, default=None, help="Optional maximum number of cycles"
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Maximum cycles (default: infinite in --loop mode; use -1 for infinite)",
     )
     run_parser.add_argument(
         "--jitter-seconds", type=int, default=0, help="Optional random jitter added to cycle sleep"
@@ -97,7 +108,10 @@ def main() -> int:
         "--cycle-seconds", type=int, default=60, help="Sleep seconds between cycles"
     )
     stage4_run_parser.add_argument(
-        "--max-cycles", type=int, default=None, help="Optional maximum number of cycles"
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Maximum cycles (default: infinite in --loop mode; use -1 for infinite)",
     )
     stage4_run_parser.add_argument(
         "--jitter-seconds", type=int, default=0, help="Optional random jitter added to cycle sleep"
@@ -283,7 +297,7 @@ def main() -> int:
     )
 
     args = parser.parse_args()
-    settings = Settings()
+    settings = _load_settings(args.env_file)
     setup_logging(settings.log_level)
 
     if args.command == "run":
@@ -401,6 +415,12 @@ def main() -> int:
         )
 
     return 1
+
+
+def _load_settings(env_file: str | None) -> Settings:
+    if env_file in (None, ""):
+        return Settings()
+    return Settings(_env_file=env_file)
 
 
 def run_with_optional_loop(

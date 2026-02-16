@@ -1071,3 +1071,26 @@ def test_main_stage7_db_count_supports_env_fallback(monkeypatch) -> None:
 
     assert cli.main() == 0
     assert captured["db_path"] is None
+
+
+def test_main_supports_env_file_override(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    def _fake_settings(**kwargs):
+        captured.update(kwargs)
+        return FakeSettings()
+
+    monkeypatch.setattr(cli, "Settings", _fake_settings)
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(cli, "run_cycle", lambda settings, force_dry_run=False: 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["btcbot", "--env-file", ".env.live", "run", "--once"],
+    )
+
+    assert cli.main() == 0
+    assert captured["_env_file"] == ".env.live"

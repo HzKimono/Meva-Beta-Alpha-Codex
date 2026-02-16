@@ -53,7 +53,7 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -e ".[dev]"
-cp .env.example .env
+cp .env.example .env.live
 ```
 
 ### Windows PowerShell deterministic run
@@ -80,7 +80,7 @@ $vars = @(
 foreach ($v in $vars) { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
 
 # 3) Fresh config
-Copy-Item .env.example .env -Force
+Copy-Item .env.example .env.live -Force
 
 # 4) Stage 3 acceptance commands
 python -m pytest -q
@@ -114,7 +114,9 @@ python -m pytest -q
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust only what you need.
+Copy `.env.example` to `.env.live` and adjust only what you need.
+
+Use `--env-file .env.live` explicitly in CLI commands when you want to pin a specific runtime profile.
 
 Key notes:
 - `SYMBOLS` accepts either JSON list (recommended) or CSV.
@@ -200,7 +202,7 @@ Notes:
 
 ## Pilot live profile (Top-5 TRY, conservative caps)
 
-1. Copy `.env.pilot.example` to `.env` and set only credentials (`BTCTURK_API_KEY`, `BTCTURK_API_SECRET`).
+1. Copy `.env.pilot.example` to `.env.live` and set only credentials (`BTCTURK_API_KEY`, `BTCTURK_API_SECRET`).
 2. Verify effective config values before running:
 
 ```bash
