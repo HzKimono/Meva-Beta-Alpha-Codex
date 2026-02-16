@@ -143,6 +143,7 @@ class ExchangeError(RuntimeError):
         request_method: str | None = None,
         request_params: dict[str, object] | None = None,
         request_json: dict[str, object] | None = None,
+        response_body: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -152,6 +153,7 @@ class ExchangeError(RuntimeError):
         self.request_method = request_method
         self.request_params = request_params
         self.request_json = request_json
+        self.response_body = response_body
 
 
 class SubmitOrderRequest(BaseModel):

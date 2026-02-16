@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from btcbot.domain.intent import Intent
 from btcbot.risk.policy import RiskPolicy, RiskPolicyContext
@@ -12,7 +13,14 @@ class RiskService:
         self.risk_policy = risk_policy
         self.state_store = state_store
 
-    def filter(self, cycle_id: str, intents: list[Intent]) -> list[Intent]:
+    def filter(
+        self,
+        cycle_id: str,
+        intents: list[Intent],
+        *,
+        try_cash_target: Decimal = Decimal("0"),
+        investable_try: Decimal = Decimal("0"),
+    ) -> list[Intent]:
         open_orders_by_symbol: dict[str, int] = {}
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
         existing_orders = (
@@ -35,6 +43,9 @@ class RiskService:
             open_orders_by_symbol=open_orders_by_symbol,
             last_intent_ts_by_symbol_side=last_intent_ts,
             mark_prices={},
+            cash_try_free=self._extract_try_balance(),
+            try_cash_target=try_cash_target,
+            investable_try=investable_try,
         )
         approved = self.risk_policy.evaluate(context, intents)
         now = datetime.now(UTC)
@@ -43,3 +54,17 @@ class RiskService:
             for intent in approved:
                 record_intent(intent, now)
         return approved
+
+    def _extract_try_balance(self) -> Decimal:
+        get_balances = getattr(self.state_store, "get_latest_balances", None)
+        if not callable(get_balances):
+            return Decimal("0")
+        try:
+            balances = get_balances()
+        except Exception:  # noqa: BLE001
+            return Decimal("0")
+        for balance in balances:
+            asset = str(getattr(balance, "asset", "")).upper()
+            if asset == "TRY":
+                return Decimal(str(getattr(balance, "free", 0)))
+        return Decimal("0")
