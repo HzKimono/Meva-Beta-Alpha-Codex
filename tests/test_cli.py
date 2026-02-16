@@ -1181,9 +1181,11 @@ def test_run_cycle_kill_switch_reports_blocked_not_failed(monkeypatch) -> None:
 
         def generate(self, **kwargs):
             del kwargs
+
             class Intent:
                 qty = 1
                 limit_price = 100
+
             return [Intent(), Intent()]
 
     class FakeRiskService:
@@ -1192,9 +1194,11 @@ def test_run_cycle_kill_switch_reports_blocked_not_failed(monkeypatch) -> None:
 
         def filter(self, **kwargs):
             del kwargs
+
             class Intent:
                 qty = 1
                 limit_price = 100
+
             return [Intent(), Intent()]
 
     captured_extra: dict[str, object] = {}
@@ -1203,7 +1207,9 @@ def test_run_cycle_kill_switch_reports_blocked_not_failed(monkeypatch) -> None:
         if message == "Cycle completed":
             captured_extra.update(kwargs["extra"]["extra"])
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "StateStore", FakeStateStore)
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)

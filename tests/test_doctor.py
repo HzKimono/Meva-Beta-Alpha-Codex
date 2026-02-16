@@ -284,7 +284,9 @@ def test_doctor_reports_effective_universe_and_source(monkeypatch) -> None:
         ),
     )
 
-    report = run_health_checks(Settings(UNIVERSE_SYMBOLS="BTCTRY,INVALIDTRY"), db_path=None, dataset_path=None)
+    report = run_health_checks(
+        Settings(UNIVERSE_SYMBOLS="BTCTRY,INVALIDTRY"), db_path=None, dataset_path=None
+    )
 
     messages = [c.message for c in report.checks if c.category == "universe"]
     assert any("source=env:UNIVERSE_SYMBOLS" in m for m in messages)

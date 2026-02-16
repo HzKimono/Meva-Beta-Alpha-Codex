@@ -88,20 +88,22 @@ def run_health_checks(
             "universe",
             "effective_symbols",
             "pass",
-            "effective symbols=%s size=%s source=%s"
-            % (effective_universe.symbols, len(effective_universe.symbols), effective_universe.source),
+            f"effective symbols={effective_universe.symbols} "
+            f"size={len(effective_universe.symbols)} "
+            f"source={effective_universe.source}",
         )
     )
     if effective_universe.rejected_symbols:
         warnings.append(
-            "Rejected symbols via exchange metadata: %s" % ",".join(effective_universe.rejected_symbols)
+            "Rejected symbols via exchange metadata: "
+            f"{','.join(effective_universe.rejected_symbols)}"
         )
         checks.append(
             DoctorCheck(
                 "universe",
                 "rejected_symbols",
                 "warn",
-                "rejected symbols=%s" % effective_universe.rejected_symbols,
+                f"rejected symbols={effective_universe.rejected_symbols}",
             )
         )
 

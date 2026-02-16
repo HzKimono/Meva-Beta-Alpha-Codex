@@ -711,9 +711,18 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     "raw_intents": len(raw_intents),
                     "approved_intents": len(approved_intents),
                     "orders_submitted": placed,
-                    "orders_blocked_by_gate": (len(approved_intents) if settings.kill_switch else 0),
-                    "orders_suppressed_dry_run": (len(approved_intents) if (dry_run and not settings.kill_switch) else 0),
-                    "orders_failed_exchange": max(0, len(approved_intents) - placed - (len(approved_intents) if settings.kill_switch else 0)),
+                    "orders_blocked_by_gate": (
+                        len(approved_intents) if settings.kill_switch else 0
+                    ),
+                    "orders_suppressed_dry_run": (
+                        len(approved_intents) if (dry_run and not settings.kill_switch) else 0
+                    ),
+                    "orders_failed_exchange": max(
+                        0,
+                        len(approved_intents)
+                        - placed
+                        - (len(approved_intents) if settings.kill_switch else 0),
+                    ),
                     "fills_inserted": fills_inserted,
                     "positions": len(accounting_service.get_positions()),
                     "dry_run": dry_run,
