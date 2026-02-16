@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from btcbot.adapters.action_to_order import sized_action_to_order
+from btcbot.adapters.action_to_order import build_exchange_rules, sized_action_to_order
 from btcbot.config import Settings
 from btcbot.domain.allocation import AllocationDecision, SizedAction
 from btcbot.domain.models import PairInfo
-from btcbot.domain.stage4 import Order
+from btcbot.domain.stage4 import Order, Quantizer
 from btcbot.domain.strategy_core import (
     Intent,
     OpenOrdersSummary,
@@ -79,6 +79,8 @@ class DecisionPipelineService:
         pair_info: list[PairInfo] | None,
         bootstrap_enabled: bool,
         live_mode: bool,
+        preferred_symbols: list[str] | None = None,
+        aggressive_scores: Mapping[str, Decimal] | None = None,
     ) -> CycleDecisionReport:
         del cycle_id
         now_ts = self.now_provider()
@@ -86,7 +88,22 @@ class DecisionPipelineService:
             pair_info=pair_info,
             mark_prices=mark_prices,
             fallback_symbols=tuple(sorted(mark_prices.keys())),
+            preferred_symbols=preferred_symbols,
         )
+
+        if aggressive_scores:
+            report = self._run_aggressive_path(
+                selected_universe=selected_universe,
+                aggressive_scores=aggressive_scores,
+                balances=balances,
+                mark_prices=mark_prices,
+                pair_info=pair_info,
+                now_ts=now_ts,
+                live_mode=live_mode,
+            )
+            self._log_report(report)
+            return report
+
         intents = self._generate_intents(
             symbols=selected_universe,
             balances=balances,
@@ -172,6 +189,170 @@ class DecisionPipelineService:
         self._log_report(report)
         return report
 
+    def _run_aggressive_path(
+        self,
+        *,
+        selected_universe: list[str],
+        aggressive_scores: Mapping[str, Decimal],
+        balances: Mapping[str, Decimal],
+        mark_prices: Mapping[str, Decimal],
+        pair_info: list[PairInfo] | None,
+        now_ts: datetime,
+        live_mode: bool,
+    ) -> CycleDecisionReport:
+        cash_try = self._to_decimal(balances.get("TRY", Decimal("0")))
+        try_cash_target = self._to_decimal(self.settings.try_cash_target)
+        investable_total_try = max(Decimal("0"), cash_try - try_cash_target)
+        fee_buffer_ratio = self._resolve_fee_buffer_ratio()
+        deploy_budget_try = investable_total_try / (Decimal("1") + fee_buffer_ratio)
+
+        pair_info_by_symbol = {
+            canonical_symbol(item.pair_symbol): item for item in (pair_info or [])
+        }
+        eligible = [
+            symbol
+            for symbol in selected_universe
+            if symbol in pair_info_by_symbol and mark_prices.get(symbol, Decimal("0")) > 0
+        ]
+
+        weight_scores = {
+            symbol: max(Decimal("0"), self._to_decimal(aggressive_scores.get(symbol, Decimal("0"))))
+            for symbol in eligible
+        }
+
+        kept = list(eligible)
+        plans: dict[str, tuple[Decimal, Decimal, Decimal]] = {}
+        dropped_reasons: dict[str, int] = {}
+
+        while kept:
+            total_weight = sum(weight_scores[symbol] for symbol in kept)
+            equal_weight = Decimal("1") / Decimal(len(kept)) if kept else Decimal("0")
+            dropped_any = False
+            plans.clear()
+
+            for symbol in list(kept):
+                mark = self._to_decimal(mark_prices[symbol])
+                pair = pair_info_by_symbol[symbol]
+                rules = build_exchange_rules(pair)
+                weight = (
+                    weight_scores[symbol] / total_weight
+                    if total_weight > 0
+                    else equal_weight
+                )
+                notional_try = deploy_budget_try * weight
+                price_q = Quantizer.quantize_price(mark, rules)
+                if price_q <= 0:
+                    kept.remove(symbol)
+                    dropped_reasons["dropped_invalid_price"] = (
+                        dropped_reasons.get("dropped_invalid_price", 0) + 1
+                    )
+                    dropped_any = True
+                    continue
+                qty_raw = notional_try / price_q if price_q > 0 else Decimal("0")
+                if qty_raw <= 0:
+                    kept.remove(symbol)
+                    dropped_reasons["dropped_zero_qty"] = (
+                        dropped_reasons.get("dropped_zero_qty", 0) + 1
+                    )
+                    dropped_any = True
+                    continue
+                qty_q = Quantizer.quantize_qty(qty_raw, rules)
+                notional_q = qty_q * price_q
+                if qty_q <= 0 or not Quantizer.validate_min_notional(price_q, qty_q, rules):
+                    kept.remove(symbol)
+                    dropped_reasons["dropped_min_notional"] = (
+                        dropped_reasons.get("dropped_min_notional", 0) + 1
+                    )
+                    dropped_any = True
+                    continue
+                plans[symbol] = (price_q, qty_q, notional_q)
+
+            if not dropped_any:
+                break
+
+        order_requests: list[Order] = []
+        intents: list[Intent] = []
+        actions: list[SizedAction] = []
+        decisions: list[AllocationDecision] = []
+        for index, symbol in enumerate(sorted(plans.keys())):
+            price_q, qty_q, notional_q = plans[symbol]
+            intents.append(
+                Intent(
+                    symbol=symbol,
+                    side="buy",
+                    intent_type="place",
+                    target_notional_try=notional_q,
+                    rationale="aggressive_24h_momentum",
+                    strategy_id="aggressive_24h_momentum",
+                )
+            )
+            actions.append(
+                SizedAction(
+                    symbol=symbol,
+                    side="buy",
+                    notional_try=notional_q,
+                    qty=qty_q,
+                    rationale="allocation:aggressive_24h_momentum",
+                    strategy_id="aggressive_24h_momentum",
+                    intent_index=index,
+                )
+            )
+            decisions.append(
+                AllocationDecision(
+                    symbol=symbol,
+                    side="buy",
+                    intent_type="place",
+                    requested_notional_try=notional_q,
+                    allocated_notional_try=notional_q,
+                    allocated_qty=qty_q,
+                    status="accepted",
+                    reason="ok",
+                    strategy_id="aggressive_24h_momentum",
+                    intent_index=index,
+                )
+            )
+            order_requests.append(
+                Order(
+                    symbol=symbol,
+                    side="buy",
+                    type="limit",
+                    price=price_q,
+                    qty=qty_q,
+                    status="new",
+                    created_at=now_ts,
+                    updated_at=now_ts,
+                    client_order_id=f"s4a-{symbol.lower()}-{index}",
+                    mode=("live" if live_mode else "dry_run"),
+                )
+            )
+
+        planned_total_try = sum(item[2] for item in plans.values())
+        unused_budget_try = max(Decimal("0"), deploy_budget_try - planned_total_try)
+        counters = {"accepted": len(decisions)}
+
+        selected_orders, deferred_orders = self._select_orders_for_cycle(order_requests)
+        report = CycleDecisionReport(
+            selected_universe=tuple(selected_universe),
+            intents=tuple(intents),
+            allocation_actions=tuple(actions),
+            allocation_decisions=tuple(decisions),
+            counters=counters,
+            order_requests=tuple(selected_orders),
+            deferred_order_requests=tuple(deferred_orders),
+            mapped_orders_count=len(order_requests),
+            dropped_actions_count=sum(dropped_reasons.values()),
+            dropped_reasons=dropped_reasons,
+            cash_try=cash_try,
+            try_cash_target=try_cash_target,
+            investable_total_try=investable_total_try,
+            investable_this_cycle_try=investable_total_try,
+            deploy_budget_try=deploy_budget_try,
+            planned_total_try=planned_total_try,
+            unused_budget_try=unused_budget_try,
+            investable_usage_reason="use_all",
+        )
+        return report
+
     def _select_orders_for_cycle(
         self, order_requests: list[Order]
     ) -> tuple[list[Order], list[Order]]:
@@ -198,7 +379,11 @@ class DecisionPipelineService:
         pair_info: list[PairInfo] | None,
         mark_prices: Mapping[str, Decimal],
         fallback_symbols: tuple[str, ...],
+        preferred_symbols: list[str] | None,
     ) -> list[str]:
+        if preferred_symbols:
+            return [canonical_symbol(symbol) for symbol in preferred_symbols]
+
         configured_symbols = [canonical_symbol(symbol) for symbol in self.settings.symbols]
         if configured_symbols:
             return configured_symbols
@@ -341,3 +526,10 @@ class DecisionPipelineService:
         if isinstance(value, Decimal):
             return value
         return Decimal(str(value))
+
+    def _resolve_fee_buffer_ratio(self) -> Decimal:
+        fee_buffer_ratio = self._to_decimal(self.settings.fee_buffer_ratio)
+        if fee_buffer_ratio > Decimal("0"):
+            return fee_buffer_ratio
+        buffer_bps = max(self._to_decimal(self.settings.allocation_fee_buffer_bps), Decimal("0"))
+        return buffer_bps / Decimal("10000")

@@ -26,6 +26,7 @@ from btcbot.services.account_snapshot_service import AccountSnapshotService
 from btcbot.services.accounting_service_stage4 import AccountingService
 from btcbot.services.anomaly_detector_service import AnomalyDetectorConfig, AnomalyDetectorService
 from btcbot.services.decision_pipeline_service import DecisionPipelineService
+from btcbot.services.dynamic_universe_service import DynamicUniverseService
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
@@ -69,6 +70,21 @@ class Stage4CycleRunner:
         cycle_started_at = cycle_now
         pair_info = self._resolve_pair_info(exchange) or []
         active_symbols = [self.norm(symbol) for symbol in settings.symbols]
+        aggressive_scores: dict[str, Decimal] | None = None
+        if settings.dynamic_universe_enabled:
+            selection = DynamicUniverseService().select(
+                exchange=exchange,
+                state_store=state_store,
+                settings=settings,
+                now_utc=cycle_now,
+                cycle_id=cycle_id,
+            )
+            if selection.selected_symbols:
+                active_symbols = [self.norm(symbol) for symbol in selection.selected_symbols]
+                aggressive_scores = {
+                    self.norm(symbol): Decimal(str(score))
+                    for symbol, score in selection.scores.items()
+                }
 
         envelope = {
             "cycle_id": cycle_id,
@@ -282,6 +298,8 @@ class Stage4CycleRunner:
                 pair_info=pair_info,
                 bootstrap_enabled=settings.stage4_bootstrap_intents,
                 live_mode=live_mode,
+                preferred_symbols=active_symbols,
+                aggressive_scores=aggressive_scores,
             )
             planned_payload = [
                 {
