@@ -24,6 +24,19 @@ class Settings(BaseSettings):
     btcturk_api_key: SecretStr | None = Field(default=None, alias="BTCTURK_API_KEY")
     btcturk_api_secret: SecretStr | None = Field(default=None, alias="BTCTURK_API_SECRET")
     btcturk_base_url: str = Field(default="https://api.btcturk.com", alias="BTCTURK_BASE_URL")
+    btcturk_ws_enabled: bool = Field(default=False, alias="BTCTURK_WS_ENABLED")
+    btcturk_rest_reliability_enabled: bool = Field(
+        default=True,
+        alias="BTCTURK_REST_RELIABILITY_ENABLED",
+    )
+    btcturk_ws_url: str = Field(default="wss://ws-feed-pro.btcturk.com", alias="BTCTURK_WS_URL")
+    btcturk_http_rate_limit_rps: float = Field(default=8.0, alias="BTCTURK_HTTP_RATE_LIMIT_RPS")
+    btcturk_http_rate_limit_burst: int = Field(default=8, alias="BTCTURK_HTTP_RATE_LIMIT_BURST")
+    btcturk_http_max_connections: int = Field(default=10, alias="BTCTURK_HTTP_MAX_CONNECTIONS")
+    btcturk_clock_sync_interval_seconds: int = Field(
+        default=60,
+        alias="BTCTURK_CLOCK_SYNC_INTERVAL_SECONDS",
+    )
 
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     dry_run: bool = Field(default=True, alias="DRY_RUN")
