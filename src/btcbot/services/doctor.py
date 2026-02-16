@@ -6,6 +6,7 @@ from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.replay.validate import DatasetValidationReport, validate_replay_dataset
+from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 
@@ -81,7 +82,30 @@ def run_health_checks(
     if not any(check.category == "gates" for check in checks):
         checks.append(DoctorCheck("gates", "coherence", "pass", "gate configuration is coherent"))
 
-    _check_exchange_rules(settings, checks, errors, warnings, actions)
+    effective_universe = resolve_effective_universe(settings)
+    checks.append(
+        DoctorCheck(
+            "universe",
+            "effective_symbols",
+            "pass",
+            "effective symbols=%s size=%s source=%s"
+            % (effective_universe.symbols, len(effective_universe.symbols), effective_universe.source),
+        )
+    )
+    if effective_universe.rejected_symbols:
+        warnings.append(
+            "Rejected symbols via exchange metadata: %s" % ",".join(effective_universe.rejected_symbols)
+        )
+        checks.append(
+            DoctorCheck(
+                "universe",
+                "rejected_symbols",
+                "warn",
+                "rejected symbols=%s" % effective_universe.rejected_symbols,
+            )
+        )
+
+    _check_exchange_rules(settings, effective_universe.symbols, checks, errors, warnings, actions)
 
     if dataset_path is not None:
         dataset_report = validate_replay_dataset(Path(dataset_path))
@@ -129,6 +153,7 @@ def run_health_checks(
 
 def _check_exchange_rules(
     settings: Settings,
+    symbols: list[str],
     checks: list[DoctorCheck],
     errors: list[str],
     warnings: list[str],
@@ -170,7 +195,7 @@ def _check_exchange_rules(
             )
             return
 
-        for symbol in settings.symbols:
+        for symbol in symbols:
             resolution = rules_service.resolve_symbol_rules(symbol)
             status = resolution.status
             if status in {
@@ -215,7 +240,7 @@ def _check_exchange_rules(
                 "exchange_rules",
                 "symbols_metadata",
                 "pass",
-                f"exchange rules usable for {len(settings.symbols)} configured symbols",
+                f"exchange rules usable for {len(symbols)} configured symbols",
             )
         )
 

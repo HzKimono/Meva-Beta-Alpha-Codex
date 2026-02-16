@@ -45,3 +45,15 @@ def test_symbols_dedupes_preserving_first_seen_order() -> None:
 def test_universe_allow_dedupes_preserving_first_seen_order() -> None:
     settings = Settings(UNIVERSE_ALLOW_SYMBOLS='["btc_try","BTCTRY","eth_try","ETHTRY"]')
     assert settings.universe_allow_symbols == ["BTCTRY", "ETHTRY"]
+
+
+def test_universe_symbols_alias_parses_and_dedupes() -> None:
+    settings = Settings(UNIVERSE_SYMBOLS=" btc_try, ETH_try ,btc_try , soltry ")
+    assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]
+
+
+def test_symbols_source_prefers_universe_symbols_env(monkeypatch) -> None:
+    monkeypatch.setenv("UNIVERSE_SYMBOLS", "BTCTRY,ETHTRY")
+    monkeypatch.setenv("SYMBOLS", "BTCTRY")
+    settings = Settings()
+    assert settings.symbols_source() == "env:UNIVERSE_SYMBOLS"
