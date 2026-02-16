@@ -281,6 +281,8 @@ def test_doctor_reports_effective_universe_and_source(monkeypatch) -> None:
             rejected_symbols=["INVALIDTRY"],
             metadata_available=True,
             source="env:UNIVERSE_SYMBOLS",
+            suggestions={"INVALIDTRY": ["XRPTRY"]},
+            auto_corrected_symbols={},
         ),
     )
 
@@ -291,4 +293,6 @@ def test_doctor_reports_effective_universe_and_source(monkeypatch) -> None:
     messages = [c.message for c in report.checks if c.category == "universe"]
     assert any("source=env:UNIVERSE_SYMBOLS" in m for m in messages)
     assert any("size=1" in m for m in messages)
+    assert any("suggested={'INVALIDTRY': ['XRPTRY']}" in m for m in messages)
+    assert any("metadata validation performed" in m for m in messages)
     assert any("INVALIDTRY" in w for w in report.warnings)
