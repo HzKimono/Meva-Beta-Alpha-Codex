@@ -74,6 +74,8 @@ TODO markers identify where live wiring should occur without changing current ru
 ## Rollout toggle
 
 - `STAGE7_USE_PLANNING_KERNEL=true|false` switches Stage7 between shared-kernel and legacy planning paths for safe rollout.
+- `STAGE4_USE_PLANNING_KERNEL=true|false` switches Stage4 between shared-kernel and legacy planning paths for safe rollout (default `false`).
+- **Rollout note:** keep `STAGE4_USE_PLANNING_KERNEL=0` in live environments at first; validate in dry-run and replay before enabling live.
 
 ## Production hardening notes
 
@@ -101,3 +103,15 @@ TODO markers identify where live wiring should occur without changing current ru
 
 - For live execution, final order state transitions may arrive asynchronously over WebSocket channels.
 - `reconcile()` should remain the source of truth merger for REST snapshots + stream events, including late fills/cancels, consistent with BTCTurk channel semantics.
+
+
+## Stage4 deprecation plan
+
+- TODO(stage4-kernel-cutover-1): Keep `DecisionPipelineService` + `_build_intents` as temporary compatibility sources for Stage4 `OrderIntentBuilder` adapter while parity is monitored.
+- TODO(stage4-kernel-cutover-2): After parity burn-in, migrate Stage4 strategy/allocation/order-intent emission into native kernel adapters and remove compat delegation.
+- TODO(stage4-kernel-cutover-3): Remove legacy Stage4 planning branch only after live dry-run parity and production canary metrics stay stable.
+
+## BTCTurk reconcile live correctness
+
+- BTCTurk final order state transitions (especially cancel/replace outcomes) may arrive first on WebSocket channels before REST snapshots converge.
+- Stage4/Stage7 reconcile should therefore treat stream + REST as complementary sources and accept late WS finalization without reopening finalized orders.

@@ -189,3 +189,8 @@ def test_stage7_enabled_requires_dry_run_and_no_live() -> None:
 
     with pytest.raises(ValidationError):
         Settings(STAGE7_ENABLED=True, DRY_RUN=True, LIVE_TRADING=True)
+
+
+def test_stage4_planning_kernel_flag_defaults_safe() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.stage4_use_planning_kernel is False
