@@ -234,11 +234,7 @@ class DecisionPipelineService:
                 mark = self._to_decimal(mark_prices[symbol])
                 pair = pair_info_by_symbol[symbol]
                 rules = build_exchange_rules(pair)
-                weight = (
-                    weight_scores[symbol] / total_weight
-                    if total_weight > 0
-                    else equal_weight
-                )
+                weight = weight_scores[symbol] / total_weight if total_weight > 0 else equal_weight
                 notional_try = deploy_budget_try * weight
                 price_q = Quantizer.quantize_price(mark, rules)
                 if price_q <= 0:
