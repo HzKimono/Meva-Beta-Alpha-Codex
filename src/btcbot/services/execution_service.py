@@ -27,6 +27,7 @@ from btcbot.domain.models import (
     quantize_quantity,
     validate_order,
 )
+from btcbot.observability import get_instrumentation
 from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.state_store import StateStore
 from btcbot.services.trading_policy import (
@@ -51,6 +52,7 @@ class ExecutionService:
         ttl_seconds: int = 120,
         kill_switch: bool = True,
         live_trading_enabled: bool = False,
+        safe_mode: bool = False,
     ) -> None:
         self.exchange = exchange
         self.state_store = state_store
@@ -59,6 +61,7 @@ class ExecutionService:
         self.ttl_seconds = ttl_seconds
         self.kill_switch = kill_switch
         self.live_trading_enabled = live_trading_enabled
+        self.safe_mode = safe_mode
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -133,6 +136,11 @@ class ExecutionService:
             logger.exception("Failed to list open orders")
             return 0
 
+        if self.safe_mode:
+            logger.warning("safe_mode_blocks_cancel_write_calls")
+            return 0
+
+
         if self.kill_switch:
             for order in open_orders:
                 logger.info(
@@ -191,7 +199,13 @@ class ExecutionService:
                 continue
 
             try:
+                started = datetime.now(UTC)
                 was_canceled = self.exchange.cancel_order(order.order_id)
+                get_instrumentation().histogram(
+                    "cancel_latency_ms",
+                    (datetime.now(UTC) - started).total_seconds() * 1000,
+                    attrs={"symbol": order.symbol},
+                )
             except Exception as exc:  # noqa: BLE001
                 if not self._is_uncertain_error(exc):
                     logger.exception(
@@ -258,6 +272,10 @@ class ExecutionService:
 
         symbols = [intent.symbol for intent, _ in normalized_intents]
         self.refresh_order_lifecycle(symbols)
+
+        if self.safe_mode:
+            logger.warning("safe_mode_blocks_submit_write_calls")
+            return 0
 
         if self.kill_switch:
             for intent, _raw_intent in normalized_intents:

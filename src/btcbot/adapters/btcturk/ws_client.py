@@ -12,6 +12,7 @@ from time import monotonic
 from typing import Protocol
 
 from btcbot.adapters.btcturk.instrumentation import MetricsSink
+from btcbot.observability import get_instrumentation
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,9 @@ class BtcturkWsClient:
 
             attempt += 1
             self.metrics.inc("ws_reconnects")
-            await asyncio.sleep(self._compute_backoff(attempt))
+            self.metrics.inc("ws_reconnect_rate")
+            with get_instrumentation().trace("ws_reconnect", attrs={"attempt": attempt}):
+                await asyncio.sleep(self._compute_backoff(attempt))
 
     async def shutdown(self) -> None:
         self._stop.set()
