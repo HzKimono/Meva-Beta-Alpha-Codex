@@ -694,17 +694,31 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     state_store=state_store,
                 )
 
+                balances = portfolio_service.get_balances()
+                bids = market_data_service.get_best_bids(settings.symbols)
+                startup_mark_prices = {
+                    normalize_symbol(symbol): Decimal(str(price))
+                    for symbol, price in bids.items()
+                    if price > 0
+                }
+
                 recovery = StartupRecoveryService().run(
                     cycle_id=cycle_id,
                     symbols=settings.symbols,
                     execution_service=execution_service,
                     accounting_service=accounting_service,
                     portfolio_service=portfolio_service,
+                    mark_prices=startup_mark_prices,
                 )
                 if recovery.observe_only_required:
                     logger.error(
                         "startup_recovery_forced_observe_only",
-                        extra={"extra": {"invariant_errors": list(recovery.invariant_errors)}},
+                        extra={
+                            "extra": {
+                                "invariant_errors": list(recovery.invariant_errors),
+                                "observe_only_reason": recovery.observe_only_reason,
+                            }
+                        },
                     )
                     execution_service.kill_switch = True
 
@@ -715,9 +729,6 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     (time.monotonic() - reconcile_started) * 1000,
                     attrs={"cycle_id": cycle_id},
                 )
-
-                balances = portfolio_service.get_balances()
-                bids = market_data_service.get_best_bids(settings.symbols)
 
                 mark_prices = {
                     normalize_symbol(symbol): Decimal(str(price))
