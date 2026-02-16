@@ -23,6 +23,7 @@ class OrderIntentProposal(BaseModel):
     qty: Decimal = Field(gt=Decimal("0"))
     price_try: Decimal = Field(gt=Decimal("0"))
     reason: str = Field(min_length=1, max_length=256)
+    client_order_id: str | None = Field(default=None, min_length=4, max_length=64)
 
     @field_validator("symbol")
     @classmethod
@@ -64,6 +65,7 @@ class AgentContext(BaseModel):
     generated_at: datetime
     market_snapshot: dict[str, Decimal]
     market_spreads_bps: dict[str, Decimal] = Field(default_factory=dict)
+    market_data_age_seconds: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     portfolio: dict[str, Decimal]
     open_orders: list[dict[str, str]]
     risk_state: dict[str, Decimal | str | bool]

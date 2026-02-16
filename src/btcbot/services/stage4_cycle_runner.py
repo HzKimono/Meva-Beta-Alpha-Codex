@@ -56,6 +56,15 @@ class _UnavailableLlmClient:
         raise RuntimeError("llm client not configured")
 
 
+@dataclass(frozen=True)
+class MarketSnapshot:
+    mark_prices: dict[str, Decimal]
+    anomalies: set[str]
+    spreads_bps: dict[str, Decimal]
+    age_seconds_by_symbol: dict[str, Decimal]
+    max_data_age_seconds: Decimal
+
+
 class Stage4ConfigurationError(RuntimeError):
     pass
 
@@ -150,7 +159,9 @@ class Stage4CycleRunner:
                 ),
             )
 
-            mark_prices, mark_price_errors = self._resolve_mark_prices(exchange, active_symbols)
+            market_snapshot = self._resolve_market_snapshot(exchange, active_symbols, cycle_now=cycle_now)
+            mark_prices = market_snapshot.mark_prices
+            mark_price_errors = market_snapshot.anomalies
             snapshot_service = AccountSnapshotService(exchange=exchange)
             account_snapshot = snapshot_service.build_snapshot(
                 symbols=active_symbols,
@@ -400,7 +411,7 @@ class Stage4CycleRunner:
             )
             state_store.save_allocation_plan(
                 cycle_id=cycle_id,
-                ts=datetime.now(UTC),
+                ts=cycle_now,
                 cash_try=decision_report.cash_try,
                 try_cash_target=decision_report.try_cash_target,
                 investable_total_try=decision_report.investable_total_try,
@@ -439,6 +450,7 @@ class Stage4CycleRunner:
                     live_mode=live_mode,
                     bootstrap_enabled=settings.stage4_bootstrap_intents,
                     pair_info=pair_info,
+                    now_utc=cycle_now,
                 )
                 intents = pipeline_orders or bootstrap_intents
             else:
@@ -449,8 +461,11 @@ class Stage4CycleRunner:
                 state_store=state_store,
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
+                cycle_now=cycle_now,
                 intents=intents,
                 mark_prices=mark_prices,
+                market_spreads_bps=market_snapshot.spreads_bps,
+                market_data_age_seconds=market_snapshot.max_data_age_seconds,
                 positions=positions,
                 current_open_orders=current_open_orders,
                 snapshot=snapshot,
@@ -554,9 +569,9 @@ class Stage4CycleRunner:
                     else:
                         cursor_stall_by_symbol[symbol] = 0
 
-            cycle_duration_ms = int((datetime.now(UTC) - cycle_started_at).total_seconds() * 1000)
+            cycle_duration_ms = int((cycle_now - cycle_started_at).total_seconds() * 1000)
             anomalies = anomaly_detector.detect(
-                market_data_age_seconds=None,
+                market_data_age_seconds={k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()},
                 reject_count=prev_reject_count,
                 cycle_duration_ms=cycle_duration_ms,
                 cursor_stall_by_symbol=cursor_stall_by_symbol,
@@ -597,10 +612,10 @@ class Stage4CycleRunner:
             self._assert_execution_invariant(execution_report)
 
             updated_cycle_duration_ms = int(
-                (datetime.now(UTC) - cycle_started_at).total_seconds() * 1000
+                (cycle_now - cycle_started_at).total_seconds() * 1000
             )
             updated_anomalies = anomaly_detector.detect(
-                market_data_age_seconds=None,
+                market_data_age_seconds={k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()},
                 reject_count=execution_report.rejected,
                 cycle_duration_ms=updated_cycle_duration_ms,
                 cursor_stall_by_symbol=cursor_stall_by_symbol,
@@ -617,7 +632,7 @@ class Stage4CycleRunner:
             updated_recent_warn_codes = updated_warn_codes or prev_warn_codes
             updated_decision = decide_degrade(
                 anomalies=updated_anomalies,
-                now=datetime.now(UTC),
+                now=cycle_now,
                 current_override=current_override,
                 cooldown_until=cooldown_until,
                 last_reasons=last_reasons,
@@ -709,7 +724,7 @@ class Stage4CycleRunner:
             cycle_metrics: CycleMetrics = metrics_service.build_cycle_metrics(
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
-                cycle_ended_at=datetime.now(UTC),
+                cycle_ended_at=cycle_now,
                 mode=final_mode.value,
                 fills=fills,
                 ledger_append_result=ledger_ingest,
@@ -954,24 +969,43 @@ class Stage4CycleRunner:
     def resolve_mark_prices(
         self, exchange: object, symbols: list[str]
     ) -> tuple[dict[str, Decimal], set[str]]:
-        return self._resolve_mark_prices(exchange, symbols)
+        snapshot = self._resolve_market_snapshot(exchange, symbols, cycle_now=datetime.now(UTC))
+        return snapshot.mark_prices, snapshot.anomalies
 
     def _resolve_mark_prices(
         self, exchange: object, symbols: list[str]
     ) -> tuple[dict[str, Decimal], set[str]]:
+        snapshot = self._resolve_market_snapshot(exchange, symbols, cycle_now=datetime.now(UTC))
+        return snapshot.mark_prices, snapshot.anomalies
+
+    def _resolve_market_snapshot(
+        self, exchange: object, symbols: list[str], *, cycle_now: datetime
+    ) -> MarketSnapshot:
         base = getattr(exchange, "client", exchange)
         get_orderbook = getattr(base, "get_orderbook", None)
         mark_prices: dict[str, Decimal] = {}
+        spreads_bps: dict[str, Decimal] = {}
+        fetch_ages: list[Decimal] = []
+        age_by_symbol: dict[str, Decimal] = {}
         anomalies: set[str] = set()
         if not callable(get_orderbook):
-            return mark_prices, anomalies
+            return MarketSnapshot(
+                mark_prices=mark_prices,
+                anomalies=set(symbols),
+                spreads_bps=spreads_bps,
+                age_seconds_by_symbol={self.norm(symbol): Decimal("999999") for symbol in symbols},
+                max_data_age_seconds=Decimal("999999"),
+            )
 
         for symbol in symbols:
             normalized = self.norm(symbol)
+            fetched_at = cycle_now
             try:
                 bid_raw, ask_raw = get_orderbook(symbol)
             except Exception:  # noqa: BLE001
                 anomalies.add(normalized)
+                fetch_ages.append(Decimal("999999"))
+                age_by_symbol[normalized] = Decimal("999999")
                 continue
             bid = self._safe_decimal(bid_raw)
             ask = self._safe_decimal(ask_raw)
@@ -980,15 +1014,194 @@ class Stage4CycleRunner:
                 anomalies.add(normalized)
             if bid is not None and bid > 0 and ask is not None and ask > 0:
                 mark = (bid + ask) / Decimal("2")
+                spread_bps = ((ask - bid) / mark) * Decimal("10000") if mark > 0 else Decimal("999999")
+                spreads_bps[normalized] = max(Decimal("0"), spread_bps)
             elif bid is not None and bid > 0:
                 mark = bid
+                spreads_bps[normalized] = Decimal("999999")
             elif ask is not None and ask > 0:
                 mark = ask
+                spreads_bps[normalized] = Decimal("999999")
             else:
                 anomalies.add(normalized)
+                fetch_ages.append(Decimal("999999"))
+                age_by_symbol[normalized] = Decimal("999999")
                 continue
             mark_prices[normalized] = mark
-        return mark_prices, anomalies
+            age_seconds = Decimal(str(max(0.0, (cycle_now - fetched_at).total_seconds())))
+            fetch_ages.append(age_seconds)
+            age_by_symbol[normalized] = age_seconds
+
+        if not fetch_ages:
+            max_age = Decimal("999999")
+        else:
+            max_age = max(fetch_ages)
+        return MarketSnapshot(
+            mark_prices=mark_prices,
+            anomalies=anomalies,
+            spreads_bps=spreads_bps,
+            age_seconds_by_symbol=age_by_symbol,
+            max_data_age_seconds=max_age,
+        )
+
+    def _apply_agent_policy(
+        self,
+        *,
+        settings: Settings,
+        state_store: StateStore,
+        cycle_id: str,
+        cycle_started_at: datetime,
+        cycle_now: datetime,
+        intents: list[Order],
+        mark_prices: dict[str, Decimal],
+        market_spreads_bps: dict[str, Decimal],
+        market_data_age_seconds: Decimal,
+        positions: list[Position],
+        current_open_orders: list[Order],
+        snapshot: object,
+        live_mode: bool,
+        failed_symbols: set[str],
+    ) -> list[Order]:
+        if not settings.agent_policy_enabled:
+            return intents
+
+        policy = self._resolve_agent_policy(settings)
+        context = AgentContext(
+            cycle_id=cycle_id,
+            generated_at=cycle_now,
+            market_snapshot=mark_prices,
+            market_spreads_bps=market_spreads_bps,
+            market_data_age_seconds=market_data_age_seconds,
+            portfolio={
+                self.norm(position.symbol): position.qty
+                for position in positions
+                if self.norm(position.symbol) not in failed_symbols
+            },
+            open_orders=[
+                {
+                    "symbol": self.norm(order.symbol),
+                    "side": str(order.side),
+                    "qty": str(order.qty),
+                    "price": str(order.price),
+                }
+                for order in current_open_orders
+            ],
+            risk_state={
+                "kill_switch": settings.kill_switch,
+                "safe_mode": settings.safe_mode,
+                "drawdown_pct": getattr(snapshot, "drawdown_pct", Decimal("0")),
+                "gross_exposure_try": sum(
+                    (position.qty * mark_prices.get(self.norm(position.symbol), position.avg_cost_try))
+                    for position in positions
+                ),
+                "stale_data_seconds": Decimal(str(settings.stale_market_data_seconds)),
+            },
+            recent_events=[f"mark_price_error:{symbol}" for symbol in sorted(failed_symbols)],
+            started_at=cycle_started_at,
+            is_live_mode=live_mode,
+        )
+
+        base_decision = AgentDecision(
+            action=DecisionAction.PROPOSE_INTENTS,
+            propose_intents=[
+                {
+                    "symbol": self.norm(order.symbol),
+                    "side": str(order.side),
+                    "price_try": order.price,
+                    "qty": order.qty,
+                    "notional_try": order.price * order.qty,
+                    "reason": order.client_order_id or "pipeline_intent",
+                    "client_order_id": order.client_order_id,
+                }
+                for order in intents
+            ],
+            rationale=DecisionRationale(
+                reasons=["Upstream planning intents"],
+                confidence=1.0,
+                constraints_hit=[],
+                citations=["planning_kernel"],
+            ),
+        )
+
+        evaluated = policy.evaluate(context)
+        if evaluated.action in {DecisionAction.NO_OP, DecisionAction.ADJUST_RISK}:
+            evaluated = base_decision
+
+        guard = SafetyGuard(
+            max_exposure_try=settings.risk_max_gross_exposure_try,
+            max_order_notional_try=(
+                settings.agent_max_order_notional_try
+                if settings.agent_max_order_notional_try > 0
+                else settings.risk_max_order_notional_try
+            ),
+            max_drawdown_pct=settings.max_drawdown_pct,
+            min_notional_try=Decimal(str(settings.min_order_notional_try)),
+            max_spread_bps=settings.agent_max_spread_bps,
+            symbol_allowlist={
+                self.norm(symbol)
+                for symbol in (settings.agent_symbol_allowlist or settings.symbols)
+            },
+            cooldown_seconds=settings.cooldown_seconds,
+            stale_data_seconds=settings.stale_market_data_seconds,
+            kill_switch=settings.kill_switch,
+            safe_mode=settings.safe_mode,
+            observe_only_override=settings.agent_observe_only,
+        )
+        safe_decision = guard.apply(context, evaluated)
+        AgentAuditTrail(
+            state_store=state_store,
+            include_prompt_payloads=settings.agent_prompt_capture_enabled,
+            max_payload_chars=settings.agent_prompt_capture_max_chars,
+        ).persist(
+            cycle_id=cycle_id,
+            correlation_id=f"{cycle_id}:agent_policy",
+            context=context,
+            decision=evaluated,
+            safe_decision=safe_decision,
+        )
+
+        return self._to_stage4_orders(
+            safe_decision=safe_decision,
+            now_utc=cycle_now,
+            live_mode=live_mode,
+        )
+
+    def _resolve_agent_policy(self, settings: Settings) -> FallbackPolicy | RuleBasedPolicy:
+        baseline = RuleBasedPolicy()
+        if settings.agent_policy_provider.lower() != "llm":
+            return baseline
+        if not settings.agent_llm_enabled:
+            logger.info("llm_disabled_fallback", extra={"extra": {"provider": settings.agent_llm_provider}})
+            return baseline
+        llm_policy = LlmPolicy(
+            client=_UnavailableLlmClient(),
+            prompt_builder=PromptBuilder(),
+            timeout_seconds=settings.agent_llm_timeout_seconds,
+        )
+        return FallbackPolicy(primary=llm_policy, fallback=baseline)
+
+    def _to_stage4_orders(
+        self, *, safe_decision: object, now_utc: datetime, live_mode: bool
+    ) -> list[Order]:
+        if safe_decision.observe_only_override or safe_decision.decision.observe_only:
+            return []
+        mapped: list[Order] = []
+        for item in safe_decision.decision.propose_intents:
+            mapped.append(
+                Order(
+                    symbol=item.symbol,
+                    side=item.side.lower(),
+                    type="limit",
+                    price=item.price_try,
+                    qty=item.qty,
+                    status="new",
+                    created_at=now_utc,
+                    updated_at=now_utc,
+                    client_order_id=item.client_order_id,
+                    mode="live" if live_mode else "dry_run",
+                )
+            )
+        return mapped
 
     def _apply_agent_policy(
         self,
@@ -1198,6 +1411,7 @@ class Stage4CycleRunner:
         live_mode: bool,
         bootstrap_enabled: bool,
         pair_info: list[PairInfo] | None,
+        now_utc: datetime,
     ) -> tuple[list[Order], dict[str, int]]:
         if not bootstrap_enabled:
             return [], {}
@@ -1245,8 +1459,8 @@ class Stage4CycleRunner:
                     price=price_q,
                     qty=qty_q,
                     status="new",
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
+                    created_at=now_utc,
+                    updated_at=now_utc,
                     client_order_id=f"s4-{cycle_id[:12]}-{normalized.lower()}-buy",
                     mode=("live" if live_mode else "dry_run"),
                 )

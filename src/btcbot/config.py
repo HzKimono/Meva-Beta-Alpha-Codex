@@ -234,6 +234,10 @@ class Settings(BaseSettings):
         default=4000,
         alias="AGENT_PROMPT_CAPTURE_MAX_CHARS",
     )
+    agent_llm_enabled: bool = Field(default=False, alias="AGENT_LLM_ENABLED")
+    agent_llm_timeout_seconds: float = Field(default=3.0, alias="AGENT_LLM_TIMEOUT_SECONDS")
+    agent_llm_model: str | None = Field(default=None, alias="AGENT_LLM_MODEL")
+    agent_llm_provider: str = Field(default="none", alias="AGENT_LLM_PROVIDER")
 
     universe_quote_currency: str = Field(default="TRY", alias="UNIVERSE_QUOTE_CURRENCY")
     universe_max_size: int = Field(default=20, alias="UNIVERSE_MAX_SIZE")

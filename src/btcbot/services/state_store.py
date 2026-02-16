@@ -269,6 +269,12 @@ class StateStore:
             ON agent_decision_audit(cycle_id, ts)
             """
         )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_decision_audit_cycle_correlation
+            ON agent_decision_audit(cycle_id, correlation_id)
+            """
+        )
 
     def _ensure_risk_budget_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -3506,6 +3512,16 @@ class StateStore:
                     prompt_json,
                     response_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id, correlation_id)
+                DO UPDATE SET
+                    context_json=excluded.context_json,
+                    decision_json=excluded.decision_json,
+                    safe_decision_json=excluded.safe_decision_json,
+                    diff_json=excluded.diff_json,
+                    diff_hash=excluded.diff_hash,
+                    prompt_json=excluded.prompt_json,
+                    response_json=excluded.response_json,
+                    ts=CURRENT_TIMESTAMP
                 """,
                 (
                     cycle_id,

@@ -23,7 +23,6 @@ class SafetyGuard:
 
     def apply(self, context: AgentContext, decision: AgentDecision) -> SafeDecision:
         blocked: list[str] = []
-        dropped: list[str] = []
 
         if self.kill_switch:
             blocked.append("kill_switch")
@@ -36,9 +35,8 @@ class SafetyGuard:
         if drawdown >= self.max_drawdown_pct:
             blocked.append("max_drawdown")
 
-        age_seconds = Decimal(str(context.risk_state.get("market_data_age_seconds", "0")))
-        if age_seconds >= Decimal(self.stale_data_seconds):
-            blocked.append("stale_data_inhibit")
+        if context.market_data_age_seconds >= Decimal(self.stale_data_seconds):
+            blocked.append("stale_data")
 
         cooldown_until_raw = context.risk_state.get("cooldown_until")
         if isinstance(cooldown_until_raw, str) and cooldown_until_raw:
@@ -62,34 +60,38 @@ class SafetyGuard:
                 decision=observe_decision,
                 blocked_reasons=sorted(set(blocked)),
                 observe_only_override=True,
-                diff={"action": [decision.action.value, DecisionAction.OBSERVE_ONLY.value]},
+                diff={
+                    "action": [decision.action.value, DecisionAction.OBSERVE_ONLY.value],
+                    "blocked": sorted(set(blocked)),
+                },
             )
 
         safe_intents = []
+        dropped_by_symbol: dict[str, list[str]] = {}
         for intent in decision.propose_intents:
+            reasons: list[str] = []
             if intent.symbol not in self.symbol_allowlist:
-                dropped.append(intent.symbol)
-                continue
+                reasons.append("symbol_not_allowed")
             if intent.notional_try < self.min_notional_try:
-                dropped.append(intent.symbol)
-                continue
+                reasons.append("below_min_notional")
             if intent.notional_try > self.max_order_notional_try:
-                dropped.append(intent.symbol)
-                continue
+                reasons.append("above_max_notional")
             spread = context.market_spreads_bps.get(intent.symbol, Decimal("0"))
             if spread > self.max_spread_bps:
-                dropped.append(intent.symbol)
+                reasons.append("spread_too_wide")
+            if reasons:
+                dropped_by_symbol[intent.symbol] = reasons
                 continue
             safe_intents.append(intent)
 
         updated = decision.model_copy(update={"propose_intents": safe_intents})
-        diff = {
-            "dropped_intents": len(decision.propose_intents) - len(safe_intents),
-            "kept_intents": len(safe_intents),
-        }
         return SafeDecision(
             decision=updated,
-            dropped_symbols=sorted(set(dropped)),
+            dropped_symbols=sorted(dropped_by_symbol.keys()),
             observe_only_override=False,
-            diff=diff,
+            diff={
+                "dropped_intents": len(decision.propose_intents) - len(safe_intents),
+                "kept_intents": len(safe_intents),
+                "dropped_by_symbol": dropped_by_symbol,
+            },
         )
