@@ -81,6 +81,7 @@ class DecisionPipelineService:
         live_mode: bool,
         preferred_symbols: list[str] | None = None,
         aggressive_scores: Mapping[str, Decimal] | None = None,
+        budget_notional_multiplier: Decimal = Decimal("1"),
     ) -> CycleDecisionReport:
         del cycle_id
         now_ts = self.now_provider()
@@ -129,12 +130,16 @@ class DecisionPipelineService:
                 max_position_try_per_symbol=self._to_decimal(
                     self.settings.max_position_try_per_symbol
                 ),
-                max_total_notional_try_per_cycle=self._to_decimal(
-                    self.settings.notional_cap_try_per_cycle
+                max_total_notional_try_per_cycle=(
+                    self._to_decimal(self.settings.notional_cap_try_per_cycle)
+                    * max(Decimal("0"), budget_notional_multiplier)
                 ),
                 investable_usage_mode=str(self.settings.investable_usage_mode),
                 investable_usage_fraction=self._to_decimal(self.settings.investable_usage_fraction),
-                max_try_per_cycle=self._to_decimal(self.settings.max_try_per_cycle),
+                max_try_per_cycle=(
+                    self._to_decimal(self.settings.max_try_per_cycle)
+                    * max(Decimal("0"), budget_notional_multiplier)
+                ),
             ),
         )
 
