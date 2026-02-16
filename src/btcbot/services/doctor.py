@@ -93,6 +93,18 @@ def run_health_checks(
             f"source={effective_universe.source}",
         )
     )
+    checks.append(
+        DoctorCheck(
+            "universe",
+            "metadata_validation",
+            "pass" if effective_universe.metadata_available else "warn",
+            (
+                "metadata validation performed"
+                if effective_universe.metadata_available
+                else "metadata unavailable; cannot validate symbols"
+            ),
+        )
+    )
     if effective_universe.rejected_symbols:
         warnings.append(
             "Rejected symbols via exchange metadata: "
@@ -103,9 +115,19 @@ def run_health_checks(
                 "universe",
                 "rejected_symbols",
                 "warn",
-                f"rejected symbols={effective_universe.rejected_symbols}",
+                f"rejected symbols={effective_universe.rejected_symbols} "
+                f"suggested={effective_universe.suggestions}",
             )
         )
+        if effective_universe.auto_corrected_symbols:
+            checks.append(
+                DoctorCheck(
+                    "universe",
+                    "auto_corrected_symbols",
+                    "warn",
+                    f"auto_corrected={effective_universe.auto_corrected_symbols}",
+                )
+            )
 
     _check_exchange_rules(settings, effective_universe.symbols, checks, errors, warnings, actions)
 

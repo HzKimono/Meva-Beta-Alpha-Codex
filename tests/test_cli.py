@@ -1223,4 +1223,5 @@ def test_run_cycle_kill_switch_reports_blocked_not_failed(monkeypatch) -> None:
     settings = Settings(DRY_RUN=True, KILL_SWITCH=True)
     assert cli.run_cycle(settings, force_dry_run=True) == 0
     assert captured_extra["orders_blocked_by_gate"] == 2
+    assert captured_extra["orders_suppressed_dry_run"] == 2
     assert captured_extra["orders_failed_exchange"] == 0

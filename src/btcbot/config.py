@@ -220,8 +220,9 @@ class Settings(BaseSettings):
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCTRY", "ETHTRY", "SOLTRY"],
         alias="SYMBOLS",
-        validation_alias=AliasChoices("SYMBOLS", "UNIVERSE_SYMBOLS"),
+        validation_alias=AliasChoices("UNIVERSE_SYMBOLS", "SYMBOLS"),
     )
+    universe_auto_correct: bool = Field(default=False, alias="UNIVERSE_AUTO_CORRECT")
     portfolio_targets: str | None = Field(default=None, alias="PORTFOLIO_TARGETS")
 
     @field_validator("symbols", mode="before")
@@ -627,8 +628,6 @@ class Settings(BaseSettings):
             found = _find_dotenv_key(env_path, keys=("UNIVERSE_SYMBOLS", "SYMBOLS"))
             if found is not None:
                 return f"dotenv:{env_path}:{found}"
-        if "symbols" in self.model_fields_set:
-            return "init"
         return "default"
 
 

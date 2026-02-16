@@ -163,35 +163,36 @@ Canary recommendation: keep low limits (`MAX_OPEN_ORDERS`, `MAX_POSITION_NOTIONA
 ## Operator quickstart (Windows PowerShell)
 
 ```powershell
-# doctor
-$env:SYMBOLS="BTCTRY"
+Start-Transcript -Path .\logs\btcbot-session.txt -Force
+
+# common env overrides
+$env:TRY_CASH_TARGET="300"
+$env:UNIVERSE_SYMBOLS="BTCTRY,ETHTRY,SOLTRY,XRPTTRY,ADATRY"
+$env:UNIVERSE_AUTO_CORRECT="false" # optional typo auto-fix mode
+$env:DRY_RUN="true"
+$env:KILL_SWITCH="true"
+$env:LOG_LEVEL="DEBUG"
+
+# doctor (shows effective universe, source, rejected symbols, suggestions)
 py -m btcbot.cli doctor --db .\btcbot_state.db --dataset .\data
 
-# dry-run single cycle
-py -m btcbot.cli stage4-run --dry-run --once
+# optional: enable auto-correct for obvious single-match typos
+$env:UNIVERSE_AUTO_CORRECT="true"
+py -m btcbot.cli doctor --db .\btcbot_state.db
 
-# dry-run loop (identical planning path, no side effects)
-py -m btcbot.cli stage4-run --dry-run --loop --cycle-seconds 30 --max-cycles 20 --jitter-seconds 2
+# health snapshot
+py -m btcbot.cli health
+
+# dry-run single cycle
+py -m btcbot.cli run --dry-run --once
+
+# dry-run loop
+py -m btcbot.cli run --dry-run --loop --sleep-seconds 30 --max-cycles 20 --jitter-seconds 2
 
 # dry-run infinite loop
-py -m btcbot.cli stage4-run --dry-run --loop --cycle-seconds 30 --max-cycles -1 --jitter-seconds 2
+py -m btcbot.cli run --dry-run --loop --sleep-seconds 30 --max-cycles -1 --jitter-seconds 2
 
-# live single cycle (all safety gates required)
-$env:DRY_RUN="false"
-$env:KILL_SWITCH="false"
-$env:LIVE_TRADING="true"
-$env:LIVE_TRADING_ACK="I_UNDERSTAND"
-$env:BTCTURK_API_KEY="<key>"
-$env:BTCTURK_API_SECRET="<secret>"
-py -m btcbot.cli stage4-run --once
-
-# live loop
-py -m btcbot.cli stage4-run --loop --cycle-seconds 30 --jitter-seconds 2
-
-# quality checks
-py -m ruff check .
-py -m ruff format --check .
-py -m pytest -q
+Stop-Transcript
 ```
 
 Notes:

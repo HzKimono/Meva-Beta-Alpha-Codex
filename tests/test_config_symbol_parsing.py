@@ -57,3 +57,10 @@ def test_symbols_source_prefers_universe_symbols_env(monkeypatch) -> None:
     monkeypatch.setenv("SYMBOLS", "BTCTRY")
     settings = Settings()
     assert settings.symbols_source() == "env:UNIVERSE_SYMBOLS"
+
+
+def test_symbols_source_legacy_alias_when_universe_symbols_missing(monkeypatch) -> None:
+    monkeypatch.delenv("UNIVERSE_SYMBOLS", raising=False)
+    monkeypatch.setenv("SYMBOLS", "BTCTRY")
+    settings = Settings()
+    assert settings.symbols_source() == "env:SYMBOLS"

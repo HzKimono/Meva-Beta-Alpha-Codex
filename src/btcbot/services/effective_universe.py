@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from difflib import get_close_matches
 
 from btcbot.adapters.btcturk_http import BtcturkHttpClient
 from btcbot.config import Settings
@@ -16,6 +17,8 @@ class EffectiveUniverse:
     rejected_symbols: list[str]
     metadata_available: bool
     source: str
+    suggestions: dict[str, list[str]]
+    auto_corrected_symbols: dict[str, str]
 
 
 def resolve_effective_universe(settings: Settings) -> EffectiveUniverse:
@@ -26,11 +29,14 @@ def resolve_effective_universe(settings: Settings) -> EffectiveUniverse:
     try:
         pairs = client.get_exchange_info()
         if not pairs:
+            logger.warning("metadata unavailable; cannot validate symbols")
             return EffectiveUniverse(
                 symbols=configured,
                 rejected_symbols=[],
                 metadata_available=False,
                 source=source,
+                suggestions={},
+                auto_corrected_symbols={},
             )
 
         valid: set[str] = set()
@@ -42,24 +48,48 @@ def resolve_effective_universe(settings: Settings) -> EffectiveUniverse:
                 continue
             valid.add(normalize_symbol(str(pair_symbol)))
 
-        rejected = [symbol for symbol in configured if symbol not in valid]
-        effective = [symbol for symbol in configured if symbol in valid]
+        rejected: list[str] = []
+        effective: list[str] = []
+        suggestions: dict[str, list[str]] = {}
+        auto_corrected_symbols: dict[str, str] = {}
+        for symbol in configured:
+            if symbol in valid:
+                effective.append(symbol)
+                continue
+
+            rejected.append(symbol)
+            matches = [
+                normalize_symbol(item)
+                for item in get_close_matches(symbol, sorted(valid), n=3, cutoff=0.75)
+            ]
+            suggestions[symbol] = matches
+            if settings.universe_auto_correct and len(matches) == 1:
+                candidate = matches[0]
+                if candidate in valid and candidate not in effective:
+                    effective.append(candidate)
+                    auto_corrected_symbols[symbol] = candidate
+
         return EffectiveUniverse(
             symbols=effective,
             rejected_symbols=rejected,
             metadata_available=True,
             source=source,
+            suggestions=suggestions,
+            auto_corrected_symbols=auto_corrected_symbols,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "universe_metadata_validation_skipped",
             extra={"extra": {"error_type": type(exc).__name__}},
         )
+        logger.warning("metadata unavailable; cannot validate symbols")
         return EffectiveUniverse(
             symbols=configured,
             rejected_symbols=[],
             metadata_available=False,
             source=source,
+            suggestions={},
+            auto_corrected_symbols={},
         )
     finally:
         client.close()

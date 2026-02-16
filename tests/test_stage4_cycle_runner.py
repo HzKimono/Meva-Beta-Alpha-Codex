@@ -229,16 +229,18 @@ def test_runner_order_of_stage4_pipeline(monkeypatch, tmp_path) -> None:
 
     settings = Settings(DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(tmp_path / "ord.sqlite"))
     assert runner.run_one_cycle(settings) == 0
-    assert order == [
-        "reconcile",
-        "accounting.fetch",
-        "accounting.fetch",
-        "accounting.fetch",
-        "accounting.apply",
-        "lifecycle",
-        "risk",
-        "execution",
-    ]
+    assert order[0] == "reconcile"
+    fetch_count = order.count("accounting.fetch")
+    assert fetch_count == len(settings.symbols)
+    first_fetch_idx = order.index("accounting.fetch")
+    last_fetch_idx = len(order) - 1 - order[::-1].index("accounting.fetch")
+    apply_idx = order.index("accounting.apply")
+    lifecycle_idx = order.index("lifecycle")
+    risk_idx = order.index("risk")
+    execution_idx = order.index("execution")
+
+    assert first_fetch_idx > 0
+    assert last_fetch_idx < apply_idx < lifecycle_idx < risk_idx < execution_idx
 
 
 def test_no_fill_history_does_not_warn_or_mark_cursor_stall(monkeypatch, tmp_path, caplog) -> None:

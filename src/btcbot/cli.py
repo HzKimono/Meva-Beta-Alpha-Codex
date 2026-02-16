@@ -67,6 +67,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="btcbot",
         epilog=(
+            "Env overrides: UNIVERSE_SYMBOLS (or legacy SYMBOLS), TRY_CASH_TARGET, "
+            "UNIVERSE_AUTO_CORRECT. "
             "PowerShell quickstart: stage7-backtest --dataset ./data/replay "
             "--out ./backtest.db ... | "
             "stage7-parity --out-a ./a.db --out-b ./b.db ... | "
@@ -551,6 +553,8 @@ def _apply_effective_universe(settings: Settings) -> Settings:
                 "universe_size": len(resolved.symbols),
                 "source": resolved.source,
                 "rejected_symbols": resolved.rejected_symbols,
+                "suggested_symbols": resolved.suggestions,
+                "auto_corrected_symbols": resolved.auto_corrected_symbols,
                 "metadata_available": resolved.metadata_available,
             }
         },
@@ -558,7 +562,13 @@ def _apply_effective_universe(settings: Settings) -> Settings:
     if resolved.rejected_symbols:
         logger.warning(
             "configured symbols rejected by exchange metadata",
-            extra={"extra": {"rejected_symbols": resolved.rejected_symbols}},
+            extra={
+                "extra": {
+                    "rejected_symbols": resolved.rejected_symbols,
+                    "suggested_symbols": resolved.suggestions,
+                    "auto_corrected_symbols": resolved.auto_corrected_symbols,
+                }
+            },
         )
     if not hasattr(settings, "model_copy"):
         return settings
@@ -698,6 +708,8 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
             if qty is not None and limit_price is not None:
                 planned_spend_try += Decimal(str(qty)) * Decimal(str(limit_price))
         state_store.set_last_cycle_id(cycle_id)
+        blocked_by_gate = len(approved_intents) if settings.kill_switch else 0
+        suppressed_dry_run = len(approved_intents) if dry_run else 0
         logger.info(
             "Cycle completed",
             extra={
@@ -711,17 +723,11 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     "raw_intents": len(raw_intents),
                     "approved_intents": len(approved_intents),
                     "orders_submitted": placed,
-                    "orders_blocked_by_gate": (
-                        len(approved_intents) if settings.kill_switch else 0
-                    ),
-                    "orders_suppressed_dry_run": (
-                        len(approved_intents) if (dry_run and not settings.kill_switch) else 0
-                    ),
+                    "orders_blocked_by_gate": blocked_by_gate,
+                    "orders_suppressed_dry_run": suppressed_dry_run,
                     "orders_failed_exchange": max(
                         0,
-                        len(approved_intents)
-                        - placed
-                        - (len(approved_intents) if settings.kill_switch else 0),
+                        len(approved_intents) - placed - blocked_by_gate - suppressed_dry_run,
                     ),
                     "fills_inserted": fills_inserted,
                     "positions": len(accounting_service.get_positions()),
