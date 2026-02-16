@@ -1094,3 +1094,133 @@ def test_main_supports_env_file_override(monkeypatch) -> None:
 
     assert cli.main() == 0
     assert captured["_env_file"] == ".env.live"
+
+
+def test_main_run_accepts_sleep_seconds_alias(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_load_settings", lambda env_file: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(cli, "_apply_effective_universe", lambda settings: settings)
+
+    def _fake_loop(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_with_optional_loop", _fake_loop)
+    monkeypatch.setattr(sys, "argv", ["btcbot", "run", "--loop", "--sleep-seconds", "10"])
+
+    assert cli.main() == 0
+    assert captured["cycle_seconds"] == 10
+
+
+def test_run_cycle_kill_switch_reports_blocked_not_failed(monkeypatch) -> None:
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_best_bids(self, symbols):
+            del symbols
+            return {}
+
+    class FakeSweepService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def build_order_intents(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del cycle_id
+            return 0
+
+    class FakeAccountingService:
+        def __init__(self, exchange, state_store) -> None:
+            del exchange, state_store
+
+        def refresh(self, symbols, mark_prices):
+            del symbols, mark_prices
+            return 0
+
+        def get_positions(self):
+            return []
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, **kwargs):
+            del kwargs
+
+            class Intent:
+                qty = 1
+                limit_price = 100
+
+            return [Intent(), Intent()]
+
+    class FakeRiskService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def filter(self, **kwargs):
+            del kwargs
+
+            class Intent:
+                qty = 1
+                limit_price = 100
+
+            return [Intent(), Intent()]
+
+    captured_extra: dict[str, object] = {}
+
+    def _capture_info(message, *args, **kwargs):
+        if message == "Cycle completed":
+            captured_extra.update(kwargs["extra"]["extra"])
+
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "SweepService", FakeSweepService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+    monkeypatch.setattr(cli, "AccountingService", FakeAccountingService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+    monkeypatch.setattr(cli.logger, "info", _capture_info)
+
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=True)
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+    assert captured_extra["orders_blocked_by_gate"] == 2
+    assert captured_extra["orders_failed_exchange"] == 0

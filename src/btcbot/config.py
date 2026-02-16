@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from btcbot.domain.anomalies import AnomalyCode
@@ -218,6 +220,7 @@ class Settings(BaseSettings):
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCTRY", "ETHTRY", "SOLTRY"],
         alias="SYMBOLS",
+        validation_alias=AliasChoices("SYMBOLS", "UNIVERSE_SYMBOLS"),
     )
     portfolio_targets: str | None = Field(default=None, alias="PORTFOLIO_TARGETS")
 
@@ -610,3 +613,37 @@ class Settings(BaseSettings):
 
     def is_live_trading_enabled(self) -> bool:
         return self.live_trading and self.live_trading_ack == "I_UNDERSTAND"
+
+    def symbols_source(self) -> str:
+        """Return the highest-precedence source for configured symbols."""
+        if os.getenv("UNIVERSE_SYMBOLS") is not None:
+            return "env:UNIVERSE_SYMBOLS"
+        if os.getenv("SYMBOLS") is not None:
+            return "env:SYMBOLS"
+
+        env_file = self.model_config.get("env_file")
+        env_path = Path(str(env_file)) if env_file else None
+        if env_path is not None and env_path.exists():
+            found = _find_dotenv_key(env_path, keys=("UNIVERSE_SYMBOLS", "SYMBOLS"))
+            if found is not None:
+                return f"dotenv:{env_path}:{found}"
+        if "symbols" in self.model_fields_set:
+            return "init"
+        return "default"
+
+
+def _find_dotenv_key(path: Path, *, keys: tuple[str, ...]) -> str | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].strip()
+        for key in keys:
+            if stripped.startswith(f"{key}="):
+                return key
+    return None

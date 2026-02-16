@@ -269,3 +269,26 @@ def test_doctor_exchange_rules_warns_explicitly_for_absent_non_try_min_notional(
     messages = [c.message for c in report.checks if c.category == "exchange_rules"]
     assert any("status=invalid_metadata:" in msg for msg in messages)
     assert any("safe_behavior=reject_and_continue" in msg for msg in messages)
+
+
+def test_doctor_reports_effective_universe_and_source(monkeypatch) -> None:
+    from btcbot.services.effective_universe import EffectiveUniverse
+
+    monkeypatch.setattr(
+        "btcbot.services.doctor.resolve_effective_universe",
+        lambda settings: EffectiveUniverse(
+            symbols=["BTCTRY"],
+            rejected_symbols=["INVALIDTRY"],
+            metadata_available=True,
+            source="env:UNIVERSE_SYMBOLS",
+        ),
+    )
+
+    report = run_health_checks(
+        Settings(UNIVERSE_SYMBOLS="BTCTRY,INVALIDTRY"), db_path=None, dataset_path=None
+    )
+
+    messages = [c.message for c in report.checks if c.category == "universe"]
+    assert any("source=env:UNIVERSE_SYMBOLS" in m for m in messages)
+    assert any("size=1" in m for m in messages)
+    assert any("INVALIDTRY" in w for w in report.warnings)

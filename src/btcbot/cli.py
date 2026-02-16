@@ -28,6 +28,7 @@ from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
 from btcbot.risk.policy import RiskPolicy
 from btcbot.services.doctor import DoctorReport, run_health_checks
+from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage3
 from btcbot.services.execution_service import ExecutionService
 from btcbot.services.market_data_replay import MarketDataReplay
@@ -88,7 +89,12 @@ def main() -> int:
     run_parser.add_argument("--loop", action="store_true", help="Run continuously")
     run_parser.add_argument("--once", action="store_true", help="Alias for single cycle")
     run_parser.add_argument(
-        "--cycle-seconds", type=int, default=60, help="Sleep seconds between cycles"
+        "--cycle-seconds",
+        "--sleep-seconds",
+        dest="cycle_seconds",
+        type=int,
+        default=10,
+        help="Sleep seconds between cycles (alias: --sleep-seconds)",
     )
     run_parser.add_argument(
         "--max-cycles",
@@ -105,7 +111,12 @@ def main() -> int:
     stage4_run_parser.add_argument("--loop", action="store_true", help="Run continuously")
     stage4_run_parser.add_argument("--once", action="store_true", help="Alias for single cycle")
     stage4_run_parser.add_argument(
-        "--cycle-seconds", type=int, default=60, help="Sleep seconds between cycles"
+        "--cycle-seconds",
+        "--sleep-seconds",
+        dest="cycle_seconds",
+        type=int,
+        default=10,
+        help="Sleep seconds between cycles (alias: --sleep-seconds)",
     )
     stage4_run_parser.add_argument(
         "--max-cycles",
@@ -299,6 +310,7 @@ def main() -> int:
     args = parser.parse_args()
     settings = _load_settings(args.env_file)
     setup_logging(settings.log_level)
+    settings = _apply_effective_universe(settings)
 
     if args.command == "run":
         return run_with_optional_loop(
@@ -508,8 +520,9 @@ def run_with_optional_loop(
             sleep_for = cycle_seconds + (
                 random.randint(0, jitter_seconds) if jitter_seconds > 0 else 0
             )
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+            if sleep_for <= 0:
+                sleep_for = 1
+            time.sleep(sleep_for)
     except KeyboardInterrupt:
         logger.info(
             "loop_runner_stopped",
@@ -522,7 +535,34 @@ def run_with_optional_loop(
                 }
             },
         )
+        print(f"{command}: interrupted, shutting down cleanly")
         return last_rc
+
+
+def _apply_effective_universe(settings: Settings) -> Settings:
+    if not hasattr(settings, "symbols"):
+        return settings
+    resolved = resolve_effective_universe(settings)
+    logger.info(
+        "effective_settings",
+        extra={
+            "extra": {
+                "symbols": resolved.symbols,
+                "universe_size": len(resolved.symbols),
+                "source": resolved.source,
+                "rejected_symbols": resolved.rejected_symbols,
+                "metadata_available": resolved.metadata_available,
+            }
+        },
+    )
+    if resolved.rejected_symbols:
+        logger.warning(
+            "configured symbols rejected by exchange metadata",
+            extra={"extra": {"rejected_symbols": resolved.rejected_symbols}},
+        )
+    if not hasattr(settings, "model_copy"):
+        return settings
+    return settings.model_copy(update={"symbols": resolved.symbols})
 
 
 def _log_arm_check(settings: Settings, *, dry_run: bool) -> None:
@@ -671,7 +711,18 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     "raw_intents": len(raw_intents),
                     "approved_intents": len(approved_intents),
                     "orders_submitted": placed,
-                    "orders_failed": max(0, len(approved_intents) - placed),
+                    "orders_blocked_by_gate": (
+                        len(approved_intents) if settings.kill_switch else 0
+                    ),
+                    "orders_suppressed_dry_run": (
+                        len(approved_intents) if (dry_run and not settings.kill_switch) else 0
+                    ),
+                    "orders_failed_exchange": max(
+                        0,
+                        len(approved_intents)
+                        - placed
+                        - (len(approved_intents) if settings.kill_switch else 0),
+                    ),
                     "fills_inserted": fills_inserted,
                     "positions": len(accounting_service.get_positions()),
                     "dry_run": dry_run,
