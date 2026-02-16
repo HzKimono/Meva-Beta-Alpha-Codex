@@ -4,28 +4,37 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-_RUN_ID: ContextVar[str | None] = ContextVar("run_id", default=None)
-_CYCLE_ID: ContextVar[str | None] = ContextVar("cycle_id", default=None)
+_FIELDS = ("run_id", "cycle_id", "client_order_id", "order_id", "symbol")
+_CONTEXT_VARS: dict[str, ContextVar[str | None]] = {
+    field: ContextVar(field, default=None) for field in _FIELDS
+}
 
 
 def get_logging_context() -> dict[str, str | None]:
     context: dict[str, str | None] = {}
-    run_id = _RUN_ID.get()
-    cycle_id = _CYCLE_ID.get()
-    if run_id is not None:
-        context["run_id"] = run_id
-    if cycle_id is not None:
-        context["cycle_id"] = cycle_id
+    for field, context_var in _CONTEXT_VARS.items():
+        value = context_var.get()
+        if value is not None:
+            context[field] = value
     return context
 
 
 @contextmanager
-def with_cycle_context(cycle_id: str, run_id: str | None = None) -> Iterator[None]:
-    run_token = _RUN_ID.set(run_id) if run_id is not None else None
-    cycle_token = _CYCLE_ID.set(cycle_id)
+def with_logging_context(**context: str | None) -> Iterator[None]:
+    tokens: dict[str, object] = {}
     try:
+        for key, value in context.items():
+            context_var = _CONTEXT_VARS.get(key)
+            if context_var is None or value is None:
+                continue
+            tokens[key] = context_var.set(value)
         yield
     finally:
-        if run_token is not None:
-            _RUN_ID.reset(run_token)
-        _CYCLE_ID.reset(cycle_token)
+        for key, token in tokens.items():
+            _CONTEXT_VARS[key].reset(token)
+
+
+@contextmanager
+def with_cycle_context(cycle_id: str, run_id: str | None = None) -> Iterator[None]:
+    with with_logging_context(cycle_id=cycle_id, run_id=run_id):
+        yield

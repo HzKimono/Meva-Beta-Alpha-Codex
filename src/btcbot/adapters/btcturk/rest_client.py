@@ -16,6 +16,7 @@ from btcbot.adapters.btcturk.instrumentation import MetricsSink
 from btcbot.adapters.btcturk.rate_limit import AsyncTokenBucket
 from btcbot.adapters.btcturk.retry import RetryDecision, async_retry, compute_delay
 from btcbot.domain.models import ExchangeError
+from btcbot.observability import get_instrumentation
 
 logger = logging.getLogger(__name__)
 
@@ -121,13 +122,16 @@ class BtcturkRestClient:
                 headers.update(self._auth_headers())
             started = monotonic()
             try:
-                response = await self._client.request(
-                    method,
-                    path,
-                    params=params,
-                    json=json_body,
-                    headers=headers,
-                )
+                with get_instrumentation().trace(
+                    "rest_call", attrs={"method": method, "path": path}
+                ):
+                    response = await self._client.request(
+                        method,
+                        path,
+                        params=params,
+                        json=json_body,
+                        headers=headers,
+                    )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 raise RestRequestError(kind=RestErrorKind.NETWORK, message=str(exc)) from exc
 
@@ -137,6 +141,7 @@ class BtcturkRestClient:
             )
             if response.status_code == 429:
                 self.metrics.inc("429_count")
+                self.metrics.inc("rest_429_rate")
 
             if response.status_code >= 400:
                 self._raise_http_error(response)
@@ -183,6 +188,7 @@ class BtcturkRestClient:
                 jitter_seed=17,
             )
             self.metrics.inc("rest_retries")
+            self.metrics.inc("rest_retry_rate")
             return RetryDecision(retry=True, delay_seconds=delay)
 
         try:

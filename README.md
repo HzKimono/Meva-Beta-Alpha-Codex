@@ -273,3 +273,11 @@ python scripts/capture_exchangeinfo_fixture.py
 ```
 
 This writes a sanitized payload to `tests/fixtures/btcturk_exchangeinfo_live_capture.json` for parser regression tests.
+
+
+## Reproducible builds
+- Python dependencies are pinned in `pyproject.toml` and `constraints.txt`.
+- Build the container image with a multi-stage Dockerfile:
+  - `docker build -t btcbot:local .`
+- Local orchestration:
+  - `docker compose up --build`

@@ -22,10 +22,8 @@ class JsonFormatter(logging.Formatter):
             payload.update(extras)
 
         context = get_logging_context()
-        if context.get("run_id"):
-            payload["run_id"] = context["run_id"]
-        if context.get("cycle_id"):
-            payload["cycle_id"] = context["cycle_id"]
+        for field in ("run_id", "cycle_id", "client_order_id", "order_id", "symbol"):
+            payload[field] = context.get(field)
 
         if record.exc_info:
             exc_type, exc_value, _ = record.exc_info
