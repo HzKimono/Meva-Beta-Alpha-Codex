@@ -1419,3 +1419,119 @@ def test_main_emits_effective_state_banner_once_for_loop_run(monkeypatch, capsys
     out = capsys.readouterr().out
     assert rc == 0
     assert out.count("Effective Side-Effects State:") == 1
+
+
+def test_run_cycle_stale_market_data_fail_closed(monkeypatch, caplog) -> None:
+    calls: list[str] = []
+    audits: list[dict[str, object]] = []
+
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            calls.append("state.set_last_cycle_id")
+            del cycle_id
+
+        def record_cycle_audit(self, cycle_id: str, counts, decisions, envelope=None) -> None:
+            del cycle_id
+            audits.append(
+                {
+                    "counts": counts,
+                    "decisions": decisions,
+                    "envelope": envelope,
+                }
+            )
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class Freshness:
+        is_stale = True
+        observed_age_ms = 20_000
+        max_age_ms = 5_000
+        source_mode = "ws"
+        connected = False
+        missing_symbols = ("BTC_TRY",)
+
+    class FakeMarketDataService:
+        def __init__(self, exchange, **kwargs) -> None:
+            del exchange, kwargs
+
+        def get_best_bids(self, symbols):
+            return {symbol: 100.0 for symbol in symbols}
+
+        def get_market_data_freshness(self, *, max_age_ms: int):
+            del max_age_ms
+            return Freshness()
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            calls.append("execution.cancel_stale")
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            calls.append("execution.execute")
+            del intents, cycle_id
+            return 0
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, **kwargs):
+            calls.append("strategy.generate")
+            del kwargs
+            return []
+
+    class FakeRiskService:
+        def __init__(self, risk_policy, state_store) -> None:
+            del risk_policy, state_store
+
+        def filter(self, cycle_id: str, intents, **kwargs):
+            calls.append("risk.filter")
+            del cycle_id, kwargs
+            return intents
+
+    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+
+    caplog.set_level("INFO", logger="btcbot.cli")
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SAFE_MODE=False, MAX_MARKET_DATA_AGE_MS=5000)
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+
+    assert "strategy.generate" not in calls
+    assert "risk.filter" not in calls
+    assert "execution.execute" not in calls
+    assert "execution.cancel_stale" not in calls
+
+    decision_events = [record for record in caplog.records if record.getMessage() == "decision_event"]
+    assert decision_events
+    payload = json.loads(JsonFormatter().format(decision_events[-1]))
+    assert payload["decision_layer"] == "market_data"
+    assert payload["reason_code"] == "market_data:stale"
+    assert payload["action"] == "BLOCK"
+    assert payload["scope"] == "global"
+    assert payload["observed_age_ms"] == 20000
+    assert payload["max_age_ms"] == 5000
+    assert payload["missing_symbols"] == ["BTC_TRY"]
+
+    assert audits
+    assert audits[-1]["decisions"] == ["market_data:stale"]
