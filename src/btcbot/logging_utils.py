@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from btcbot.logging_context import get_logging_context
+from btcbot.security.redaction import redact_value
 
 
 class JsonFormatter(logging.Formatter):
@@ -33,7 +34,7 @@ class JsonFormatter(logging.Formatter):
         elif record.exc_text:
             payload["traceback"] = record.exc_text
 
-        return json.dumps(payload, default=str)
+        return json.dumps(redact_value(payload), default=str)
 
 
 def _resolve_log_level(level: str | int | None) -> int:

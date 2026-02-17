@@ -6,32 +6,12 @@ from hashlib import sha256
 from typing import Any
 
 from btcbot.agent.contracts import AgentContext, AgentDecision, SafeDecision
+from btcbot.security.redaction import redact_value
 from btcbot.services.state_store import StateStore
-
-SENSITIVE_KEYWORDS = (
-    "secret",
-    "token",
-    "password",
-    "api_key",
-    "apikey",
-    "auth",
-    "private_key",
-    "access_key",
-)
 
 
 def redact_secrets(value: Any) -> Any:
-    if isinstance(value, dict):
-        sanitized: dict[str, Any] = {}
-        for key, item in value.items():
-            if any(word in key.lower() for word in SENSITIVE_KEYWORDS):
-                sanitized[key] = "***REDACTED***"
-            else:
-                sanitized[key] = redact_secrets(item)
-        return sanitized
-    if isinstance(value, list):
-        return [redact_secrets(item) for item in value]
-    return value
+    return redact_value(value)
 
 
 def store_compact_text(text: str, *, max_chars: int) -> dict[str, object]:
