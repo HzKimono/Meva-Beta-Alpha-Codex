@@ -197,7 +197,7 @@ def test_stage7_doctor_reports_missing_dataset(capsys) -> None:
     settings = Settings()
     code = cli.run_doctor(settings, db_path=None, dataset_path="./does-not-exist")
     out = capsys.readouterr().out
-    assert code == 1
+    assert code == 2
     assert "dataset path does not exist" in out
 
 
@@ -387,3 +387,19 @@ def test_stage7_report_reads_stage4_plan_from_persisted_cycle(
     assert "KILL_SWITCH" in out
     assert "stage4_plan_summary=" in out
     assert "allocation_plan=source=cycle_id" in out
+
+
+def test_report_includes_slo_status(capsys, tmp_path: Path) -> None:
+    settings = Settings(STATE_DB_PATH=str(tmp_path / "s7.db"))
+    store = StateStore(db_path=settings.state_db_path)
+    _seed_metrics(store)
+
+    assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5) == 0
+    report = capsys.readouterr().out
+    assert "slo_status" in report
+    assert "window_status=PASS" in report
+
+    assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5, json_output=True) == 0
+    payload = capsys.readouterr().out
+    assert '"summary"' in payload
+    assert '"slo_status"' in payload

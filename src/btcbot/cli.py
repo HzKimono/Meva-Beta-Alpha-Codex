@@ -40,7 +40,13 @@ from btcbot.security.secrets import (
     log_secret_validation,
     validate_secret_controls,
 )
-from btcbot.services.doctor import DoctorReport, run_health_checks
+from btcbot.services.doctor import (
+    DoctorReport,
+    doctor_status,
+    evaluate_slo_status_for_rows,
+    normalize_drawdown_ratio,
+    run_health_checks,
+)
 from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage3
 from btcbot.services.execution_service import ExecutionService
@@ -170,6 +176,7 @@ def main() -> int:
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
     )
     report_parser.add_argument("--last", type=int, default=10)
+    report_parser.add_argument("--json", action="store_true", help="Export report rows as JSON")
 
     export_parser = subparsers.add_parser("stage7-export", help="Export recent Stage 7 metrics")
     export_parser.add_argument(
@@ -374,7 +381,7 @@ def main() -> int:
         return run_health(settings)
 
     if args.command == "stage7-report":
-        return run_stage7_report(settings, db_path=args.db, last=args.last)
+        return run_stage7_report(settings, db_path=args.db, last=args.last, json_output=args.json)
 
     if args.command == "stage7-export":
         return run_stage7_export(
@@ -427,11 +434,13 @@ def main() -> int:
         return run_stage7_db_count(settings=settings, db_path=args.db)
 
     if args.command == "doctor":
+        # Doctor remains runnable without DB on first-time setup; SLO coverage then warns/skips.
         resolved_db_path = _resolve_stage7_db_path(
-            "doctor", db_path=args.db, settings_db_path=settings.state_db_path
+            "doctor",
+            db_path=args.db,
+            settings_db_path=settings.state_db_path,
+            silent=True,
         )
-        if resolved_db_path is None:
-            return 2
         return run_doctor(
             settings=settings,
             db_path=resolved_db_path,
@@ -1262,7 +1271,11 @@ def _csv_safe_value(value: object) -> object:
 
 
 def _resolve_stage7_db_path(
-    command: str, *, db_path: str | None, settings_db_path: str | None = None
+    command: str,
+    *,
+    db_path: str | None,
+    settings_db_path: str | None = None,
+    silent: bool = False,
 ) -> str | None:
     candidate = db_path.strip() if db_path and db_path.strip() else None
     if candidate is None:
@@ -1273,13 +1286,20 @@ def _resolve_stage7_db_path(
     if candidate is not None:
         return candidate
 
-    print(f"{command}: missing database path.")
-    print("Provide --db <path> or set STATE_DB_PATH.")
-    print(f"Example: btcbot {command} --db ./btcbot_state.db")
+    if not silent:
+        print(f"{command}: missing database path.")
+        print("Provide --db <path> or set STATE_DB_PATH.")
+        print(f"Example: btcbot {command} --db ./btcbot_state.db")
     return None
 
 
-def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int:
+def run_stage7_report(
+    settings: Settings,
+    db_path: str | None,
+    last: int,
+    *,
+    json_output: bool = False,
+) -> int:
     resolved_db_path = _resolve_stage7_db_path(
         "stage7-report", db_path=db_path, settings_db_path=settings.state_db_path
     )
@@ -1287,15 +1307,65 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
         return 2
     store = StateStore(db_path=resolved_db_path)
     rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
-    print("cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason")
+    ledger_metrics = store.get_latest_stage7_ledger_metrics()
+    drawdown_ratio = (
+        normalize_drawdown_ratio(
+            ledger_metrics.get("max_drawdown_ratio") if ledger_metrics is not None else None,
+            ledger_metrics.get("max_drawdown_pct") if ledger_metrics is not None else None,
+        )
+        if ledger_metrics is not None
+        else None
+    )
+    enriched_rows: list[dict[str, object]] = []
     for row in rows:
+        cycle_status, _, _ = evaluate_slo_status_for_rows(
+            settings,
+            [row],
+            drawdown_ratio=normalize_drawdown_ratio(
+                row.get("max_drawdown_ratio"),
+                row.get("max_drawdown_pct"),
+            ),
+        )
+        enriched_rows.append({**row, "slo_status": cycle_status})
+
+    window_status, _, window_notes = evaluate_slo_status_for_rows(
+        settings,
+        rows,
+        drawdown_ratio=drawdown_ratio,
+    )
+
+    if json_output:
+        export_rows = store.fetch_stage7_cycles_for_export(limit=last)
+        by_cycle = {str(item.get("cycle_id")): item for item in export_rows}
+        payload_rows = []
+        for row in enriched_rows:
+            cycle_id = str(row.get("cycle_id"))
+            payload_rows.append({**by_cycle.get(cycle_id, row), "slo_status": row["slo_status"]})
+        print(
+            json.dumps(
+                {
+                    "summary": {
+                        "status": window_status,
+                        "notes": window_notes,
+                        "window_size": len(enriched_rows),
+                    },
+                    "rows": payload_rows,
+                },
+                sort_keys=True,
+                default=str,
+            )
+        )
+        return 0
+
+    print("cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason slo_status")
+    for row in enriched_rows:
         no_trades_reason = row.get("no_trades_reason") or "-"
         no_metrics_reason = row.get("no_metrics_reason") or "-"
         print(
             f"{row['cycle_id']} {row['ts']} {row['mode_final']} "
             f"{row['net_pnl_try']} {row['max_drawdown_pct']} {row['turnover_try']} "
             f"{row['intents_planned_count']} {row['oms_rejected_count']} "
-            f"{_as_int(row.get('oms_throttled_count', 0))} {no_trades_reason}"
+            f"{_as_int(row.get('oms_throttled_count', 0))} {no_trades_reason} {row['slo_status'].upper()}"
         )
         print(f"  no_metrics_reason={no_metrics_reason}")
 
@@ -1378,6 +1448,7 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
                 print(f"  deferred_symbols={deferred}")
             if no_trades_reason in {"-", None, ""} and plan_items:
                 print("  no_trades_reason=NOT_ARMED")
+    print(f"stage7-report: window_status={window_status.upper()} rows={len(rows)}")
     return 0
 
 
@@ -1707,8 +1778,10 @@ def run_replay_capture(
 
 
 def _doctor_report_json(report: DoctorReport) -> str:
+    status = doctor_status(report).upper()
     payload = {
-        "status": "ok" if report.ok else "fail",
+        "status": status,
+        "ok": report.ok,
         "checks": [check.__dict__ for check in report.checks],
         "warnings": report.warnings,
         "errors": report.errors,
@@ -1725,32 +1798,34 @@ def run_doctor(
     json_output: bool = False,
 ) -> int:
     report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)
+    status = doctor_status(report)
 
     if json_output:
         print(_doctor_report_json(report))
-        return 0 if report.ok else 1
+    else:
+        for check in report.checks:
+            print(f"doctor: {check.status.upper()} [{check.category}] {check.name} - {check.message}")
 
-    for check in report.checks:
-        print(f"doctor: {check.status.upper()} [{check.category}] {check.name} - {check.message}")
+        check_messages = {check.message for check in report.checks}
+        for message in report.warnings:
+            if message in check_messages:
+                continue
+            print(f"doctor: WARN - {message}")
+        for message in report.errors:
+            if message in check_messages:
+                continue
+            print(f"doctor: FAIL - {message}")
 
-    check_messages = {check.message for check in report.checks}
-    for message in report.warnings:
-        if message in check_messages:
-            continue
-        print(f"doctor: WARN - {message}")
-    for message in report.errors:
-        if message in check_messages:
-            continue
-        print(f"doctor: FAIL - {message}")
+        if report.actions:
+            for action in report.actions:
+                print(f"doctor: ACTION - {action}")
+        print(f"doctor_status={status.upper()}")
 
-    if report.actions:
-        for action in report.actions:
-            print(f"doctor: ACTION - {action}")
-
-    if report.ok:
-        print("doctor: OK")
-
-    return 0 if report.ok else 1
+    if status == "fail":
+        return 2
+    if status == "warn":
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
