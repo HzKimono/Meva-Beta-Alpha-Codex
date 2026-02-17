@@ -101,6 +101,7 @@ class DecisionPipelineService:
                 pair_info=pair_info,
                 now_ts=now_ts,
                 live_mode=live_mode,
+                budget_notional_multiplier=budget_notional_multiplier,
             )
             self._log_report(report)
             return report
@@ -204,10 +205,13 @@ class DecisionPipelineService:
         pair_info: list[PairInfo] | None,
         now_ts: datetime,
         live_mode: bool,
+        budget_notional_multiplier: Decimal,
     ) -> CycleDecisionReport:
         cash_try = self._to_decimal(balances.get("TRY", Decimal("0")))
         try_cash_target = self._to_decimal(self.settings.try_cash_target)
         investable_total_try = max(Decimal("0"), cash_try - try_cash_target)
+        scaled_multiplier = max(Decimal("0"), budget_notional_multiplier)
+        investable_total_try = investable_total_try * scaled_multiplier
         fee_buffer_ratio = self._resolve_fee_buffer_ratio()
         deploy_budget_try = investable_total_try / (Decimal("1") + fee_buffer_ratio)
 

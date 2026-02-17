@@ -48,7 +48,7 @@ class RiskBudgetPolicy:
         p = self.policy
         capital = quantize_money(max(accounting.trading_capital_try, Decimal("0")))
         treasury = quantize_money(max(accounting.treasury_try, Decimal("0")))
-        available = quantize_money(max(capital - treasury, Decimal("0")))
+        available = capital
 
         daily_loss_limit = quantize_money(capital * p.halt_daily_loss_ratio)
         drawdown_limit = quantize_money(max(peak_equity_try, Decimal("0")) * p.halt_drawdown_ratio)

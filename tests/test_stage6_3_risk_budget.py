@@ -6,9 +6,10 @@ from decimal import Decimal
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
+from btcbot.risk.budget import RiskBudgetView
 from btcbot.services import stage4_cycle_runner as runner_module
 from btcbot.services.ledger_service import PnlReport
-from btcbot.services.risk_budget_service import RiskBudgetService
+from btcbot.services.risk_budget_service import BudgetDecision, RiskBudgetService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
@@ -37,6 +38,30 @@ def _signals(**overrides: Decimal) -> RiskSignals:
     base.update(overrides)
     return RiskSignals(**base)
 
+
+
+
+def _budget_decision(mode: Mode = Mode.NORMAL, multiplier: Decimal = Decimal("1")) -> BudgetDecision:
+    return BudgetDecision(
+        risk_decision=RiskDecision(
+            mode=mode,
+            reasons=["TEST"],
+            limits=_limits(),
+            signals=_signals(),
+            decided_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+        budget_view=RiskBudgetView(
+            trading_capital_try=Decimal("1000"),
+            treasury_try=Decimal("0"),
+            available_risk_capital_try=Decimal("1000"),
+            daily_loss_limit_try=Decimal("50"),
+            drawdown_halt_limit_try=Decimal("150"),
+            max_gross_exposure_try=Decimal("1200") * multiplier,
+            max_order_notional_try=Decimal("200") * multiplier,
+            position_sizing_multiplier=multiplier,
+            mode=mode,
+        ),
+    )
 
 def test_decide_mode_is_deterministic_for_same_inputs() -> None:
     first = decide_mode(_limits(), _signals(drawdown_try=Decimal("250")))
@@ -102,8 +127,8 @@ def test_risk_budget_service_fees_is_idempotent(tmp_path) -> None:
         kill_switch_active=False,
     )
 
-    assert first.signals.fees_try_today == Decimal("12.5")
-    assert second.signals.fees_try_today == Decimal("12.5")
+    assert first.risk_decision.signals.fees_try_today == Decimal("12.5")
+    assert second.risk_decision.signals.fees_try_today == Decimal("12.5")
     assert fees_first == fees_second
 
 
@@ -138,7 +163,7 @@ def test_compute_decision_invalid_stored_mode_is_safe() -> None:
     )
 
     assert prev_mode is None
-    assert isinstance(decision, RiskDecision)
+    assert isinstance(decision.risk_decision, RiskDecision)
     assert decision.mode in (Mode.NORMAL, Mode.REDUCE_RISK_ONLY, Mode.OBSERVE_ONLY)
 
 
@@ -150,13 +175,7 @@ def test_risk_budget_service_persist_is_single_atomic_call() -> None:
             calls.append(kwargs)
 
     service = RiskBudgetService(FakeStore())  # type: ignore[arg-type]
-    decision = RiskDecision(
-        mode=Mode.NORMAL,
-        reasons=["OK"],
-        limits=_limits(),
-        signals=_signals(),
-        decided_at=datetime(2026, 1, 1, tzinfo=UTC),
-    )
+    decision = _budget_decision(Mode.NORMAL, Decimal("1"))
 
     service.persist_decision(
         cycle_id="cycle-1",
@@ -269,15 +288,8 @@ def test_runner_mode_gating(monkeypatch, tmp_path) -> None:
 
         def compute_decision(self, **kwargs):
             del kwargs
-            decision = RiskDecision(
-                mode=self.mode,
-                reasons=["TEST"],
-                limits=_limits(),
-                signals=_signals(),
-                decided_at=datetime(2026, 1, 1, tzinfo=UTC),
-            )
             return (
-                decision,
+                _budget_decision(self.mode, Decimal("0.3")),
                 None,
                 Decimal("1000"),
                 Decimal("0"),

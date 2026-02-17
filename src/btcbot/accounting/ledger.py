@@ -195,6 +195,23 @@ class AccountingLedger:
 
     def _dedupe_events(self, events: list[AccountingLedgerEvent]) -> list[AccountingLedgerEvent]:
         deduped: dict[str, AccountingLedgerEvent] = {}
+
+        def _sort_key(event: AccountingLedgerEvent) -> tuple:
+            return (
+                event.canonical_ts(),
+                str(event.type),
+                str(event.symbol or ""),
+                str(event.side or ""),
+                str(event.qty),
+                str(event.price_try or Decimal("0")),
+                str(event.amount_try or Decimal("0")),
+                str(event.fee_currency or ""),
+                str(event.reference_id or ""),
+                tuple(sorted((str(key), str(value)) for key, value in event.metadata.items())),
+            )
+
         for event in events:
-            deduped[event.event_id] = event
+            current = deduped.get(event.event_id)
+            if current is None or _sort_key(event) < _sort_key(current):
+                deduped[event.event_id] = event
         return list(deduped.values())

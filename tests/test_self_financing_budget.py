@@ -57,3 +57,17 @@ def test_budget_halts_when_daily_loss_exceeds_limit() -> None:
     )
     assert decision.mode == Mode.OBSERVE_ONLY
     assert decision.position_sizing_multiplier == Decimal("0")
+
+
+def test_available_risk_capital_uses_trading_capital_without_treasury_offset() -> None:
+    policy = RiskBudgetPolicy()
+    decision = policy.evaluate(
+        accounting=_state(Decimal("1000"), treasury=Decimal("250")),
+        peak_equity_try=Decimal("1200"),
+        realized_pnl_today_try=Decimal("0"),
+        consecutive_loss_streak=0,
+        volatility_regime="normal",
+    )
+
+    assert decision.available_risk_capital_try == Decimal("1000.00000000")
+    assert decision.max_order_notional_try == Decimal("200.00000000")
