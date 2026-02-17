@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from btcbot.logging_context import get_logging_context
-from btcbot.security.redaction import redact_value
+from btcbot.security.redaction import redact_data, sanitize_text
 
 
 class JsonFormatter(logging.Formatter):
@@ -16,7 +16,7 @@ class JsonFormatter(logging.Formatter):
             "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": sanitize_text(record.getMessage()),
         }
         extras = getattr(record, "extra", None)
         if isinstance(extras, dict):
@@ -29,12 +29,12 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             exc_type, exc_value, _ = record.exc_info
             payload["error_type"] = exc_type.__name__ if exc_type else "Exception"
-            payload["error_message"] = str(exc_value) if exc_value is not None else ""
-            payload["traceback"] = self.formatException(record.exc_info)
+            payload["error_message"] = sanitize_text(str(exc_value)) if exc_value is not None else ""
+            payload["traceback"] = sanitize_text(self.formatException(record.exc_info))
         elif record.exc_text:
-            payload["traceback"] = record.exc_text
+            payload["traceback"] = sanitize_text(record.exc_text)
 
-        return json.dumps(redact_value(payload), default=str)
+        return json.dumps(redact_data(payload), default=str)
 
 
 def _resolve_log_level(level: str | int | None) -> int:

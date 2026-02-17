@@ -34,6 +34,7 @@ from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_repl
 from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
 from btcbot.risk.policy import RiskPolicy
+from btcbot.security.redaction import redact_data
 from btcbot.security.secrets import (
     build_default_provider,
     inject_runtime_secrets,
@@ -180,6 +181,11 @@ def main() -> int:
             "--export-out",
             default=None,
             help="Optional JSONL export path for the last canary Stage 7 rows",
+        )
+        canary_mode_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Print canary summary as machine-readable JSON",
         )
 
     canary_loop_parser.add_argument(
@@ -433,6 +439,7 @@ def main() -> int:
             market_data_mode=args.market_data_mode,
             allow_warn=args.allow_warn,
             export_out=args.export_out,
+            json_output=args.json,
         )
 
     if args.command == "stage4-run":
@@ -847,6 +854,7 @@ def run_canary(
     market_data_mode: str | None,
     allow_warn: bool,
     export_out: str | None,
+    json_output: bool = False,
 ) -> int:
     if cycle_seconds < 0 or ttl_seconds <= 0:
         print("canary: cycle-seconds must be >= 0 and ttl-seconds must be > 0")
@@ -939,12 +947,23 @@ def run_canary(
 
             started_at_iso = started_at.isoformat()
             summary = _canary_summary_counts(resolved_db_path, started_at_iso)
-            print(
-                "canary summary: "
-                f"mode={mode} cycles={cycles_run} orders_submitted={summary['orders_submitted']} "
-                f"orders_filled={summary['orders_filled']} orders_rejected={summary['orders_rejected']} "
-                f"stale_blocks={summary['stale_blocks']} final_doctor_status={final_doctor_status.upper()}"
+            canary_payload = redact_data(
+                {
+                    "mode": mode,
+                    "cycles": cycles_run,
+                    **summary,
+                    "final_doctor_status": final_doctor_status.upper(),
+                }
             )
+            if json_output:
+                print(json.dumps(canary_payload, sort_keys=True, default=str))
+            else:
+                print(
+                    "canary summary: "
+                    f"mode={mode} cycles={cycles_run} orders_submitted={summary['orders_submitted']} "
+                    f"orders_filled={summary['orders_filled']} orders_rejected={summary['orders_rejected']} "
+                    f"stale_blocks={summary['stale_blocks']} final_doctor_status={final_doctor_status.upper()}"
+                )
 
             if export_out:
                 run_stage7_export(
@@ -1678,14 +1697,14 @@ def run_stage7_report(
             payload_rows.append({**by_cycle.get(cycle_id, row), "slo_status": row["slo_status"]})
         print(
             json.dumps(
-                {
+                redact_data({
                     "summary": {
                         "status": window_status,
                         "notes": window_notes,
                         "window_size": len(enriched_rows),
                     },
                     "rows": payload_rows,
-                },
+                }),
                 sort_keys=True,
                 default=str,
             )
@@ -2122,7 +2141,7 @@ def _doctor_report_json(report: DoctorReport) -> str:
         "errors": report.errors,
         "actions": report.actions,
     }
-    return json.dumps(payload, sort_keys=True)
+    return json.dumps(redact_data(payload), sort_keys=True)
 
 
 def run_doctor(

@@ -1,4 +1,13 @@
-from btcbot.security.redaction import REDACTED, redact_text, redact_value
+from btcbot.security.redaction import (
+    REDACTED,
+    SENSITIVE_KEYS,
+    redact_data,
+    redact_text,
+    redact_value,
+    safe_repr,
+    sanitize_mapping,
+    sanitize_text,
+)
 from btcbot.security.secrets import (
     ChainedSecretProvider,
     DotenvSecretProvider,
@@ -12,8 +21,13 @@ from btcbot.security.secrets import (
 
 __all__ = [
     "REDACTED",
+    "SENSITIVE_KEYS",
+    "redact_data",
     "redact_text",
     "redact_value",
+    "safe_repr",
+    "sanitize_mapping",
+    "sanitize_text",
     "EnvSecretProvider",
     "DotenvSecretProvider",
     "ChainedSecretProvider",
