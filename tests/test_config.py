@@ -90,6 +90,7 @@ def test_live_trading_requires_ack() -> None:
 
     enabled = Settings(
         LIVE_TRADING=True,
+        SAFE_MODE=False,
         LIVE_TRADING_ACK="I_UNDERSTAND",
         KILL_SWITCH=False,
         BTCTURK_API_KEY="key",
@@ -107,6 +108,7 @@ def test_live_trading_requires_keys_and_kill_switch_off() -> None:
     with pytest.raises(ValueError):
         Settings(
             LIVE_TRADING=True,
+            SAFE_MODE=False,
             LIVE_TRADING_ACK="I_UNDERSTAND",
             DRY_RUN=False,
             KILL_SWITCH=True,
@@ -119,6 +121,7 @@ def test_live_trading_cannot_be_enabled_in_dry_run() -> None:
     with pytest.raises(ValueError):
         Settings(
             LIVE_TRADING=True,
+            SAFE_MODE=False,
             LIVE_TRADING_ACK="I_UNDERSTAND",
             DRY_RUN=True,
             KILL_SWITCH=False,
@@ -133,6 +136,7 @@ def test_settings_defaults_are_prod_safe() -> None:
     assert settings.kill_switch is True
     assert settings.dry_run is True
     assert settings.live_trading is False
+    assert settings.safe_mode is True
 
 
 def test_parse_symbols_csv_handles_whitespace_and_case() -> None:
