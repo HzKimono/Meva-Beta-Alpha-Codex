@@ -57,13 +57,6 @@ class Settings(BaseSettings):
         default=False,
         alias="WS_MARKET_DATA_REST_FALLBACK",
     )
-    market_data_mode: str = Field(default="rest", alias="MARKET_DATA_MODE")
-    max_market_data_age_ms: int = Field(default=15_000, alias="MAX_MARKET_DATA_AGE_MS")
-    ws_market_data_rest_fallback: bool = Field(
-        default=False,
-        alias="WS_MARKET_DATA_REST_FALLBACK",
-    )
-
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     dry_run: bool = Field(default=True, alias="DRY_RUN")
     live_trading: bool = Field(default=False, alias="LIVE_TRADING")
@@ -218,6 +211,25 @@ class Settings(BaseSettings):
         alias="DEGRADE_WARN_CODES_CSV",
     )
     clock_skew_seconds_threshold: int = Field(default=30, alias="CLOCK_SKEW_SECONDS_THRESHOLD")
+
+    doctor_slo_enabled: bool = Field(default=True, alias="DOCTOR_SLO_ENABLED")
+    doctor_slo_lookback: int = Field(default=20, alias="DOCTOR_SLO_LOOKBACK")
+    doctor_slo_max_drawdown_ratio_warn: float = Field(
+        default=0.10, alias="DOCTOR_SLO_MAX_DRAWDOWN_RATIO_WARN"
+    )
+    doctor_slo_max_drawdown_ratio_fail: float = Field(
+        default=0.20, alias="DOCTOR_SLO_MAX_DRAWDOWN_RATIO_FAIL"
+    )
+    doctor_slo_max_reject_rate_warn: float = Field(
+        default=0.05, alias="DOCTOR_SLO_MAX_REJECT_RATE_WARN"
+    )
+    doctor_slo_max_reject_rate_fail: float = Field(
+        default=0.10, alias="DOCTOR_SLO_MAX_REJECT_RATE_FAIL"
+    )
+    doctor_slo_max_latency_ms_warn: int = Field(default=1000, alias="DOCTOR_SLO_MAX_LATENCY_MS_WARN")
+    doctor_slo_max_latency_ms_fail: int = Field(default=2000, alias="DOCTOR_SLO_MAX_LATENCY_MS_FAIL")
+    doctor_slo_min_fill_rate_warn: float = Field(default=0.90, alias="DOCTOR_SLO_MIN_FILL_RATE_WARN")
+    doctor_slo_min_fill_rate_fail: float = Field(default=0.80, alias="DOCTOR_SLO_MIN_FILL_RATE_FAIL")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -665,6 +677,31 @@ class Settings(BaseSettings):
             raise ValueError("Stage7 risk integer settings must be >= 1")
         return value
 
+    @field_validator("doctor_slo_lookback")
+    def validate_doctor_slo_lookback(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("DOCTOR_SLO_LOOKBACK must be >= 1")
+        return value
+
+    @field_validator(
+        "doctor_slo_max_drawdown_ratio_warn",
+        "doctor_slo_max_drawdown_ratio_fail",
+        "doctor_slo_max_reject_rate_warn",
+        "doctor_slo_max_reject_rate_fail",
+        "doctor_slo_min_fill_rate_warn",
+        "doctor_slo_min_fill_rate_fail",
+    )
+    def validate_doctor_slo_rate_range(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("Doctor SLO rate thresholds must be in [0, 1]")
+        return value
+
+    @field_validator("doctor_slo_max_latency_ms_warn", "doctor_slo_max_latency_ms_fail")
+    def validate_doctor_slo_latency(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("Doctor SLO latency thresholds must be >= 0")
+        return value
+
     @field_validator("stage7_loss_guardrail_mode")
     def validate_stage7_loss_guardrail_mode(cls, value: str) -> str:
         normalized = value.strip().lower()
@@ -708,6 +745,26 @@ class Settings(BaseSettings):
         self.log_level = self.log_level.strip().upper()
         if self.log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
             raise ValueError("LOG_LEVEL must be one of CRITICAL, ERROR, WARNING, INFO, DEBUG")
+        return self
+
+    @model_validator(mode="after")
+    def validate_doctor_slo_threshold_order(self) -> Settings:
+        if self.doctor_slo_max_drawdown_ratio_warn > self.doctor_slo_max_drawdown_ratio_fail:
+            raise ValueError(
+                "DOCTOR_SLO_MAX_DRAWDOWN_RATIO_WARN must be <= DOCTOR_SLO_MAX_DRAWDOWN_RATIO_FAIL"
+            )
+        if self.doctor_slo_max_reject_rate_warn > self.doctor_slo_max_reject_rate_fail:
+            raise ValueError(
+                "DOCTOR_SLO_MAX_REJECT_RATE_WARN must be <= DOCTOR_SLO_MAX_REJECT_RATE_FAIL"
+            )
+        if self.doctor_slo_max_latency_ms_warn > self.doctor_slo_max_latency_ms_fail:
+            raise ValueError(
+                "DOCTOR_SLO_MAX_LATENCY_MS_WARN must be <= DOCTOR_SLO_MAX_LATENCY_MS_FAIL"
+            )
+        if self.doctor_slo_min_fill_rate_warn < self.doctor_slo_min_fill_rate_fail:
+            raise ValueError(
+                "DOCTOR_SLO_MIN_FILL_RATE_WARN must be >= DOCTOR_SLO_MIN_FILL_RATE_FAIL"
+            )
         return self
 
     def parsed_degrade_warn_codes(self) -> set[AnomalyCode]:

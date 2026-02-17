@@ -216,3 +216,16 @@ def test_ws_market_data_rest_fallback_invalid_in_rest_mode() -> None:
 def test_max_market_data_age_ms_accepts_legacy_alias() -> None:
     settings = Settings(BTCTURK_MARKETDATA_MAX_AGE_MS=1234)
     assert settings.max_market_data_age_ms == 1234
+
+
+def test_doctor_slo_lookback_validation() -> None:
+    with pytest.raises(ValueError):
+        Settings(DOCTOR_SLO_LOOKBACK=0)
+
+
+def test_doctor_slo_threshold_order_validation() -> None:
+    with pytest.raises(ValueError):
+        Settings(DOCTOR_SLO_MAX_REJECT_RATE_WARN=0.2, DOCTOR_SLO_MAX_REJECT_RATE_FAIL=0.1)
+
+    with pytest.raises(ValueError):
+        Settings(DOCTOR_SLO_MIN_FILL_RATE_WARN=0.7, DOCTOR_SLO_MIN_FILL_RATE_FAIL=0.8)
