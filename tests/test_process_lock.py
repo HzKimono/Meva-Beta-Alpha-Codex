@@ -37,3 +37,16 @@ def test_single_instance_lock_writes_pid(tmp_path: Path) -> None:
     assert pid_raw == str(lock.pid)
 
     assert lock_path.exists()
+
+
+def test_single_instance_lock_path_is_deterministic_for_scope(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "state.db")
+
+    with single_instance_lock(db_path=db_path, account_key="acct-a") as first:
+        first_path = first.path
+
+    with single_instance_lock(db_path=db_path, account_key="acct-a") as second:
+        assert second.path == first_path
+
+    with single_instance_lock(db_path=db_path, account_key="acct-b") as different_account:
+        assert different_account.path != first_path
