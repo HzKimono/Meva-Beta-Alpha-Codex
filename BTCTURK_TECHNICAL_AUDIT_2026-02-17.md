@@ -1,106 +1,79 @@
-- Module Map (table)
+Auth & Signing Review
 
-| Category | Primary modules/packages | What is here |
+- Primary live adapter in runtime path: `BtcturkHttpClient` (`src/btcbot/adapters/btcturk_http.py`).
+- Private auth header construction:
+  - Uses `X-PCK`, `X-Stamp`, `X-Signature` via `build_auth_headers()`.
+  - Signature = `base64(hmac_sha256(base64_decode(api_secret), f"{api_key}{stamp_ms}"))`.
+  - Secret must be valid base64, otherwise `ValueError`.
+- Timestamp/nonce handling:
+  - Uses `MonotonicNonceGenerator.next_stamp_ms()` to enforce strictly increasing ms stamp in-process.
+  - This reduces same-process nonce regressions.
+- Runtime secondary async adapter (`src/btcbot/adapters/btcturk/rest_client.py`):
+  - Calls `clock_sync.maybe_sync()` before requests.
+  - Private auth recomputed per request with `stamped_now_ms()`.
+- Endpoint usage observed in adapters:
+  - Public: `/api/v2/server/exchangeinfo`, `/api/v2/orderbook`.
+  - Private: `/api/v1/order` (POST/DELETE), `/api/v1/openOrders`, `/api/v1/allOrders`, `/api/v1/order/{id}`, `/api/v1/users/balances`, `/api/v1/users/transactions/trade`.
+- Security observations:
+  - Request/response data is sanitized in error paths (`sanitize_text`, `sanitize_mapping`).
+  - Missing artifact for final closure: UNKNOWN whether exchange nonce/clock drift tolerance is externally monitored in production.
+
+Rate Limit & Retry Review
+
+- Sync runtime adapter (`btcturk_http.py`):
+  - Public GET retries via `retry_with_backoff` for timeout/transport/http status failures.
+  - Retry candidates include network, 429, and >=500.
+  - Private GET retries in explicit loop for status `{429,500,502,503,504}` with total wait cap.
+  - Backoff base 0.4s, max 4.0s, attempts 4.
+  - Uses `Retry-After` when present for 429.
+- Async adapter (`btcturk/rest_client.py`):
+  - Explicit async token bucket limiter (`AsyncTokenBucket`) before each call.
+  - Error classification:
+    - `NETWORK` (timeout/transport), `RATE_LIMIT` (429), `SERVER` (>=500), `CLIENT` (4xx), `EXCHANGE` (payload-level failures).
+  - Retry only for `NETWORK|SERVER|RATE_LIMIT`, with bounded backoff.
+- Observed risks:
+  - Fixed jitter seed (`17`) appears in retry paths -> correlated retry waves across replicas possible.
+  - Active Stage3 runtime path uses sync client; async limiter/reliability controls may not govern the default run path.
+
+Order Lifecycle Coverage Matrix (table: feature vs implemented yes/no, where)
+
+| Feature | Implemented (Yes/No) | Where |
 |---|---|---|
-| exchange | `src/btcbot/adapters/btcturk_http.py`, `src/btcbot/adapters/btcturk/`, `src/btcbot/adapters/exchange*.py`, `src/btcbot/services/exchange_factory.py` | BTCTurk REST/WS adapters, exchange interfaces, dry-run/live client construction |
-| strategy | `src/btcbot/strategies/`, `src/btcbot/services/strategy_service.py`, `src/btcbot/domain/strategy_core.py` | Strategy implementations (`profit_v1`, baseline), strategy context, intent generation |
-| risk | `src/btcbot/risk/`, `src/btcbot/services/risk_service.py`, `src/btcbot/services/risk_policy.py`, `src/btcbot/services/stage7_risk_budget_service.py` | Stage3 risk filtering, Stage4 risk policy, Stage7 risk budgeting/guardrails |
-| execution | `src/btcbot/services/execution_service.py`, `src/btcbot/services/execution_service_stage4.py`, `src/btcbot/services/oms_service.py` | Order submit/cancel lifecycle, idempotency, reconciliation, stage-specific execution |
-| data | `src/btcbot/services/market_data_service.py`, `src/btcbot/services/market_data_replay.py`, `src/btcbot/replay/`, `data/` | Market data access/freshness, replay dataset capture/validation, fixtures |
-| infra | `src/btcbot/config.py`, `src/btcbot/services/process_lock.py`, `src/btcbot/observability*.py`, `src/btcbot/logging_*.py`, `src/btcbot/security/` | Config/env validation, single-instance locking, metrics/tracing, logging context, secret handling |
-| utils | `src/btcbot/services/retry.py`, `src/btcbot/services/client_order_id_service.py`, `scripts/` | Retry helpers, deterministic client order IDs, repo maintenance/debug scripts |
-| persistence/state | `src/btcbot/services/state_store.py`, `src/btcbot/accounting/accounting_service.py`, `src/btcbot/services/startup_recovery.py` | SQLite schema + state transitions, fills/positions accounting, restart recovery |
-| domain/contracts | `src/btcbot/domain/` | Typed models, enums, symbols/rules, lifecycle/order/risk domain objects |
-| tests | `tests/`, `tests/chaos/`, `tests/soak/`, `tests/fixtures/` | Unit/integration-style tests, chaos/resilience scenarios, fixtures |
-| docs | `README.md`, `docs/`, `*_AUDIT*.md`, `*_REPORT*.md` | Architecture, operations, audit and quality-gate docs |
+| Submit limit order | Yes | `BtcturkHttpClient.place_limit_order`, `submit_limit_order`, `ExecutionService.execute_intents` |
+| Cancel by exchange order id | Yes | `BtcturkHttpClient.cancel_order`, `cancel_order_by_exchange_id`; `ExecutionService.cancel_stale_orders` |
+| Cancel by client order id | Yes | `BtcturkHttpClient.cancel_order_by_client_order_id` |
+| Query open orders | Yes | `BtcturkHttpClient.get_open_orders`, `list_open_orders`; `ExecutionService.refresh_order_lifecycle` |
+| Query historical/all orders for reconciliation | Yes | `BtcturkHttpClient.get_all_orders`; used in `ExecutionService.refresh_order_lifecycle` and stale pending recovery |
+| Fills fetch/reconciliation | Yes | `BtcturkHttpClient.get_recent_fills`; accounting refresh + Stage4 reconcile/fills flow |
+| Partial fill status handling | Yes | Exchange status mapping to `OrderStatus.PARTIAL` in adapter/listing paths |
+| Uncertain submit reconciliation | Yes | `ExecutionService._reconcile_submit` path, fallback to open/all orders and UNKNOWN state persistence |
+| Idempotent submit dedupe | Yes (local-store scope) | `StateStore.idempotency_keys` + `ExecutionService.reserve/finalize` flow |
+| Cancel/replace (atomic amend) | No | No explicit single API flow; cancel + new submit exists as separate operations |
+| Exactly-once exchange-side guarantee | No (not provable from repo) | Compensating controls exist (idempotency keys + client_order_id reconciliation), but transport retries remain at-least-once |
 
-- Entrypoints
+Critical Bugs/Risks (ranked)
 
-- CLI/package entrypoints:
-  - `src/btcbot/__main__.py` -> `btcbot.cli:main`.
-  - `pyproject.toml` exposes console script `btcbot = "btcbot.cli:main"`.
-- CLI commands / runtime modes (in `src/btcbot/cli.py`):
-  - `run`: Stage3 cycle runner (single cycle or loop `--loop`).
-  - `canary once|loop`: constrained canary flows.
-  - `stage4-run`: Stage4 cycle runner (single/loop).
-  - `stage7-run`: Stage7 dry-run cycle.
-  - `health`, `doctor`.
-  - Stage7 reporting/export/alerts/backtest/parity/db-count commands.
-  - Replay tooling: `replay-init`, `replay-capture`.
-- Runtime orchestration entry services:
-  - Stage3: `run_stage3_runtime()` -> `run_with_optional_loop()` -> `run_cycle()`.
-  - Stage4: `run_cycle_stage4()` -> `Stage4CycleRunner.run_one_cycle()`.
-  - Stage7: `run_cycle_stage7()` -> `Stage7CycleRunner.run_one_cycle()`.
+1. High — WS integration gap in active Stage3 loop
+- Risk: WS client exists, but default runtime path is timer+REST oriented; WS market-data production wiring is not clearly active in Stage3 execution path.
+- Impact: If operators expect WS semantics, they may still run on REST/fallback behavior; stale gating may block cycles.
+- Files: `src/btcbot/cli.py`, `src/btcbot/services/market_data_service.py`, `src/btcbot/adapters/btcturk/ws_client.py`.
 
-- Dependency Graph (bullets)
+2. High — Retry burst correlation
+- Risk: Deterministic/fixed jitter seed can synchronize retries across multiple bot instances during incident windows.
+- Impact: Amplified throttling/429 storms and slower recovery.
+- Files: `src/btcbot/adapters/btcturk_http.py`, `src/btcbot/adapters/btcturk/rest_client.py`.
 
-- Package-level import edges (observed from `src/btcbot/**/*.py`):
-  - `cli -> services, config, adapters, risk, strategies, accounting, security, observability`.
-  - `services -> domain` (heaviest edge), plus `services -> adapters, config, risk, strategies, accounting`.
-  - `risk -> domain, services`.
-  - `strategies -> domain, config`.
-  - `adapters -> domain, services, observability, security`.
-  - `accounting -> domain, adapters, services`.
-  - `__main__ -> cli`.
-- Suspected cyclic dependencies (package level):
-  - `services <-> risk` (both directions exist).
-  - `services <-> accounting` (both directions exist).
-  - No direct cycle detected between `cli` and other top-level packages (primarily outbound from CLI).
-- Notes:
-  - These are package-level cycles; whether they are harmful depends on module-level import timing.
-  - Stage-specific flows (Stage4/Stage7) concentrate much of the cross-package coupling in `services/`.
+3. Medium — Reconciliation failure can degrade silently over long windows
+- Risk: `refresh_order_lifecycle` catches broad exceptions and continues.
+- Impact: Persistent divergence between local state and exchange may not trigger hard escalation quickly.
+- Files: `src/btcbot/services/execution_service.py`.
 
-- Navigation Index
+4. Medium — Dual adapter reliability semantics (sync active vs async richer controls)
+- Risk: Default runtime uses sync adapter while async adapter has stronger explicit limiter/error model.
+- Impact: Operator assumptions about configured rate-limit/reliability knobs can diverge from active path.
+- Files: `src/btcbot/services/exchange_factory.py`, `src/btcbot/adapters/btcturk_http.py`, `src/btcbot/adapters/btcturk/rest_client.py`.
 
-- Placing orders:
-  - Start: `src/btcbot/services/execution_service.py` (`execute_intents`, `cancel_stale_orders`).
-  - Exchange boundary: `src/btcbot/adapters/btcturk_http.py` (`place_limit_order`, cancel/get orders).
-  - Client construction: `src/btcbot/services/exchange_factory.py`.
-  - CLI wiring: `src/btcbot/cli.py` (`run_cycle`).
-- Receiving market data:
-  - Start: `src/btcbot/services/market_data_service.py`.
-  - REST source: exchange client calls via `ExchangeClient.get_orderbook`.
-  - WS adapter implementation: `src/btcbot/adapters/btcturk/ws_client.py` (async queue/task model).
-- Strategy decision:
-  - Start: `src/btcbot/services/strategy_service.py`.
-  - Strategy implementation: `src/btcbot/strategies/profit_v1.py` (current Stage3 default).
-  - Domain intent model: `src/btcbot/domain/intent.py`.
-- Risk checks:
-  - Stage3 path: `src/btcbot/services/risk_service.py` + `src/btcbot/risk/policy.py`.
-  - Stage4 path: `src/btcbot/services/risk_policy.py`.
-  - Stage7 risk budget: `src/btcbot/services/stage7_risk_budget_service.py`.
-- Persistence/state:
-  - Start: `src/btcbot/services/state_store.py` (SQLite schema + CRUD + idempotency).
-  - Accounting persistence effects: `src/btcbot/accounting/accounting_service.py`.
-  - Restart recovery hook: `src/btcbot/services/startup_recovery.py`.
-- Scheduling/async orchestration:
-  - Sync scheduler loop: `src/btcbot/cli.py` (`run_with_optional_loop`).
-  - Single-instance runtime lock: `src/btcbot/services/process_lock.py`.
-  - Async WS orchestration (not default Stage3 loop): `src/btcbot/adapters/btcturk/ws_client.py`.
-
-- Missing Components (bullets)
-
-- Logging:
-  - Present: structured logging + context helpers.
-  - Potential gap: no explicit centralized log schema/versioning contract document for all stages.
-- Idempotency:
-  - Present: SQLite-backed idempotency keys + dedupe keys + recovery flow.
-  - Potential gap: cross-process/multi-host global idempotency store is absent (single-DB scope).
-- Retry:
-  - Present: retry/backoff helpers in adapters/services.
-  - Potential gap: fixed jitter seed usage in some paths can correlate retries across replicas.
-- Circuit breaker:
-  - Partial: kill-switch/safe-mode/observe-only gating exists.
-  - Gap: no explicit generalized circuit-breaker component (stateful open/half-open/closed) per external dependency.
-- Rate limit:
-  - Present in async adapter components (`btcturk/rate_limit.py`, token bucket usage).
-  - Potential gap: active Stage3 sync path does not visibly use the async limiter abstraction.
-- Secrets:
-  - Present: secret provider injection + controls + redaction.
-  - Potential gap: repo does not show external secret manager integration artifact (deployment-dependent).
-- Config layering:
-  - Present: env + dotenv + pydantic validation.
-  - Potential gap: very large unified settings object across Stage3/4/7 increases misconfiguration surface.
-- Tests:
-  - Present: broad test suite including WS/REST/CLI and chaos folders.
-  - Potential gap: limited explicit contract tests validating package import DAG / cycle regression and runtime mode wiring consistency.
+5. Medium — Replace order lifecycle not explicit
+- Risk: No atomic cancel/replace capability in integration layer.
+- Impact: Slippage/queue-position risk during two-step modify flows.
+- Files: `src/btcbot/adapters/btcturk_http.py`, `src/btcbot/services/execution_service.py`.
