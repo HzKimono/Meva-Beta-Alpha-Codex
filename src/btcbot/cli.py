@@ -126,6 +126,69 @@ def main() -> int:
         "--jitter-seconds", type=int, default=0, help="Optional random jitter added to cycle sleep"
     )
 
+    canary_parser = subparsers.add_parser("canary", help="Guarded live canary workflows")
+    canary_subparsers = canary_parser.add_subparsers(dest="canary_command", required=True)
+
+    canary_once_parser = canary_subparsers.add_parser(
+        "once", help="Single-cycle live canary (Stage 2 equivalent)"
+    )
+    canary_loop_parser = canary_subparsers.add_parser(
+        "loop", help="Bounded live canary loop (Stage 3 equivalent)"
+    )
+
+    for canary_mode_parser in (canary_once_parser, canary_loop_parser):
+        canary_mode_parser.add_argument(
+            "--symbol",
+            default=None,
+            help="Single canary symbol (defaults to configured symbol only when exactly one exists)",
+        )
+        canary_mode_parser.add_argument(
+            "--notional-try",
+            type=Decimal,
+            default=Decimal("150"),
+            help="Canary notional cap TRY per cycle and per order",
+        )
+        canary_mode_parser.add_argument(
+            "--cycle-seconds",
+            type=int,
+            default=10,
+            help="Sleep seconds between canary cycles",
+        )
+        canary_mode_parser.add_argument(
+            "--ttl-seconds",
+            type=int,
+            default=30,
+            help="Forced order TTL in canary mode",
+        )
+        canary_mode_parser.add_argument(
+            "--db-path",
+            default=None,
+            help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+        )
+        canary_mode_parser.add_argument(
+            "--market-data-mode",
+            choices=["rest", "ws"],
+            default=None,
+            help="Optional market data mode override for canary only",
+        )
+        canary_mode_parser.add_argument(
+            "--allow-warn",
+            action="store_true",
+            help="Allow doctor WARN status to proceed",
+        )
+        canary_mode_parser.add_argument(
+            "--export-out",
+            default=None,
+            help="Optional JSONL export path for the last canary Stage 7 rows",
+        )
+
+    canary_loop_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=60,
+        help="Maximum canary loop cycles",
+    )
+
     stage4_run_parser = subparsers.add_parser("stage4-run", help="Run one Stage 4 cycle")
     stage4_run_parser.add_argument("--dry-run", action="store_true", help="Do not place orders")
     stage4_run_parser.add_argument("--loop", action="store_true", help="Run continuously")
@@ -355,6 +418,21 @@ def main() -> int:
             cycle_seconds=args.cycle_seconds,
             max_cycles=args.max_cycles,
             jitter_seconds=args.jitter_seconds,
+        )
+
+    if args.command == "canary":
+        return run_canary(
+            settings,
+            mode=args.canary_command,
+            symbol=args.symbol,
+            notional_try=args.notional_try,
+            cycle_seconds=args.cycle_seconds,
+            max_cycles=getattr(args, "max_cycles", None),
+            ttl_seconds=args.ttl_seconds,
+            db_path=args.db_path,
+            market_data_mode=args.market_data_mode,
+            allow_warn=args.allow_warn,
+            export_out=args.export_out,
         )
 
     if args.command == "stage4-run":
@@ -626,6 +704,253 @@ def run_stage3_runtime(
         logger.error("stage3_runtime_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
         print(str(exc))
         return 2
+
+
+def _resolve_canary_symbol(settings: Settings, requested_symbol: str | None) -> str | None:
+    if requested_symbol:
+        return normalize_symbol(requested_symbol)
+    symbols = [normalize_symbol(symbol) for symbol in getattr(settings, "symbols", []) if symbol]
+    if len(symbols) == 1:
+        return symbols[0]
+    return None
+
+
+def _build_canary_settings(
+    settings: Settings,
+    *,
+    symbol: str,
+    notional_try: Decimal,
+    ttl_seconds: int,
+    db_path: str,
+    market_data_mode: str | None,
+) -> Settings:
+    overrides: dict[str, object] = {
+        "symbols": [symbol],
+        "max_orders_per_cycle": 1,
+        "max_open_orders_per_symbol": 1,
+        "notional_cap_try_per_cycle": notional_try,
+        "max_notional_per_order_try": notional_try,
+        "ttl_seconds": ttl_seconds,
+        "state_db_path": db_path,
+    }
+    if market_data_mode:
+        overrides["market_data_mode"] = market_data_mode
+    return settings.model_copy(update=overrides)
+
+
+def _check_canary_min_notional(settings: Settings, symbol: str, requested_notional: Decimal) -> tuple[bool, str]:
+    exchange = build_exchange_stage3(settings, force_dry_run=True)
+    try:
+        min_notional: Decimal | None = None
+        for pair in exchange.get_exchange_info():
+            if normalize_symbol(pair.pair_symbol) != symbol:
+                continue
+            if pair.min_total_amount is None:
+                continue
+            value = Decimal(str(pair.min_total_amount))
+            min_notional = value if min_notional is None else max(min_notional, value)
+        if min_notional is not None and requested_notional < min_notional:
+            return (
+                False,
+                f"canary: requested --notional-try={requested_notional} is below exchange minimum "
+                f"for {symbol} (min_notional={min_notional})",
+            )
+        return True, ""
+    finally:
+        _close_best_effort(exchange, "exchange")
+
+
+def _run_canary_doctor_gate(
+    settings: Settings,
+    *,
+    db_path: str,
+    allow_warn: bool,
+) -> tuple[str, int]:
+    report = run_health_checks(settings, db_path=db_path, dataset_path=None)
+    status = doctor_status(report)
+    if status == "fail":
+        print("canary: doctor gate FAIL; aborting")
+        return status, 2
+    if status == "warn" and not allow_warn:
+        print("canary: doctor gate WARN; pass --allow-warn to proceed")
+        return status, 1
+    return status, 0
+
+
+def _canary_summary_counts(db_path: str, started_at_iso: str) -> dict[str, int]:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            orders_submitted = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE created_at >= ?",
+                    (started_at_iso,),
+                ).fetchone()[0]
+            )
+            orders_filled = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE updated_at >= ? AND status = ?",
+                    (started_at_iso, "FILLED"),
+                ).fetchone()[0]
+            )
+            orders_rejected = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE updated_at >= ? AND status = ?",
+                    (started_at_iso, "REJECTED"),
+                ).fetchone()[0]
+            )
+            stale_blocks = int(
+                conn.execute(
+                    """
+                    SELECT COALESCE(SUM(CAST(json_extract(counts_json, '$.blocked_by_market_data') AS INTEGER)), 0)
+                    FROM cycle_audit
+                    WHERE ts >= ?
+                    """,
+                    (started_at_iso,),
+                ).fetchone()[0]
+            )
+    except sqlite3.OperationalError:
+        return {
+            "orders_submitted": 0,
+            "orders_filled": 0,
+            "orders_rejected": 0,
+            "stale_blocks": 0,
+        }
+    return {
+        "orders_submitted": orders_submitted,
+        "orders_filled": orders_filled,
+        "orders_rejected": orders_rejected,
+        "stale_blocks": stale_blocks,
+    }
+
+
+def _print_canary_evidence_commands(export_out: str | None) -> None:
+    print("canary: recommended evidence commands:")
+    print("  btcbot doctor --json")
+    print("  btcbot stage7-report --last 20")
+    if export_out:
+        print(f"  btcbot stage7-export --last 50 --format jsonl --out {export_out}")
+    else:
+        print("  btcbot stage7-export --last 50 --format jsonl --out ./stage7-canary.jsonl")
+
+
+def run_canary(
+    settings: Settings,
+    *,
+    mode: str,
+    symbol: str | None,
+    notional_try: Decimal,
+    cycle_seconds: int,
+    max_cycles: int | None,
+    ttl_seconds: int,
+    db_path: str | None,
+    market_data_mode: str | None,
+    allow_warn: bool,
+    export_out: str | None,
+) -> int:
+    if cycle_seconds < 0 or ttl_seconds <= 0:
+        print("canary: cycle-seconds must be >= 0 and ttl-seconds must be > 0")
+        return 2
+    if notional_try <= 0:
+        print("canary: notional-try must be > 0")
+        return 2
+    if mode == "loop" and (max_cycles is None or max_cycles <= 0):
+        print("canary: --max-cycles must be >= 1 in loop mode")
+        return 2
+
+    resolved_symbol = _resolve_canary_symbol(settings, symbol)
+    if resolved_symbol is None:
+        print(
+            "canary: --symbol is required when configured UNIVERSE_SYMBOLS contains multiple symbols"
+        )
+        return 2
+
+    resolved_db_path = db_path or settings.state_db_path
+    canary_settings = _build_canary_settings(
+        settings,
+        symbol=resolved_symbol,
+        notional_try=notional_try,
+        ttl_seconds=ttl_seconds,
+        db_path=resolved_db_path,
+        market_data_mode=market_data_mode,
+    )
+    _print_effective_side_effects_state(
+        canary_settings,
+        force_dry_run=False,
+        include_safe_mode=True,
+    )
+
+    _, arm_policy = _compute_live_policy(
+        canary_settings,
+        force_dry_run=False,
+        include_safe_mode=True,
+    )
+    if not getattr(arm_policy, "allowed", False):
+        print(getattr(arm_policy, "message", LIVE_TRADING_NOT_ARMED_MESSAGE))
+        return 2
+
+    min_notional_ok, min_notional_message = _check_canary_min_notional(
+        canary_settings,
+        resolved_symbol,
+        notional_try,
+    )
+    if not min_notional_ok:
+        print(min_notional_message)
+        return 2
+
+    final_doctor_status, doctor_rc = _run_canary_doctor_gate(
+        canary_settings,
+        db_path=resolved_db_path,
+        allow_warn=allow_warn,
+    )
+    if doctor_rc != 0:
+        return doctor_rc
+
+    started_at = datetime.now(UTC)
+    cycles_run = 0
+    rc = 0
+    doctor_recheck_every_cycles = 5
+    while True:
+        rc = run_cycle(canary_settings, force_dry_run=False)
+        cycles_run += 1
+        if rc != 0:
+            break
+        if mode == "once" or (max_cycles is not None and cycles_run >= max_cycles):
+            break
+
+        if cycles_run % doctor_recheck_every_cycles == 0:
+            final_doctor_status, doctor_rc = _run_canary_doctor_gate(
+                canary_settings,
+                db_path=resolved_db_path,
+                allow_warn=allow_warn,
+            )
+            if doctor_rc != 0:
+                rc = doctor_rc
+                break
+
+        sleep_for = cycle_seconds if cycle_seconds > 0 else 1
+        time.sleep(sleep_for)
+
+    started_at_iso = started_at.isoformat()
+    summary = _canary_summary_counts(resolved_db_path, started_at_iso)
+    print(
+        "canary summary: "
+        f"mode={mode} cycles={cycles_run} orders_submitted={summary['orders_submitted']} "
+        f"orders_filled={summary['orders_filled']} orders_rejected={summary['orders_rejected']} "
+        f"stale_blocks={summary['stale_blocks']} final_doctor_status={final_doctor_status.upper()}"
+    )
+
+    if export_out:
+        run_stage7_export(
+            canary_settings,
+            db_path=resolved_db_path,
+            last=50,
+            export_format="jsonl",
+            out_path=export_out,
+        )
+        print(f"canary: exported stage7 rows to {export_out}")
+    _print_canary_evidence_commands(export_out)
+    return rc
 
 
 def _apply_effective_universe(settings: Settings) -> Settings:
