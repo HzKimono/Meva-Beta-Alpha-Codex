@@ -58,6 +58,7 @@ class ExecutionService:
         unknown_reprobe_escalation_attempts: int = 8,
         unknown_reprobe_force_observe_only: bool = False,
         unknown_reprobe_force_kill_switch: bool = False,
+        unknown_reprobe_max_lookback_seconds: int = 24 * 60 * 60,
     ) -> None:
         self.exchange = exchange
         self.state_store = state_store
@@ -77,6 +78,9 @@ class ExecutionService:
         )
         self.unknown_reprobe_force_observe_only = unknown_reprobe_force_observe_only
         self.unknown_reprobe_force_kill_switch = unknown_reprobe_force_kill_switch
+        self.unknown_reprobe_max_lookback_seconds = max(
+            60 * 60, unknown_reprobe_max_lookback_seconds
+        )
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -91,6 +95,12 @@ class ExecutionService:
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         for symbol in normalized_symbols:
             recent: list[OrderSnapshot] | None = None
+            due_unknown_orders = [
+                local
+                for local in orders_by_symbol.get(symbol, [])
+                if local.status == OrderStatus.UNKNOWN
+                and self._is_unknown_probe_due(local.unknown_next_probe_at, now_ms)
+            ]
             try:
                 open_orders = self.exchange.get_open_orders(symbol)
             except Exception:  # noqa: BLE001
@@ -131,7 +141,10 @@ class ExecutionService:
                     try:
                         recent = self.exchange.get_all_orders(
                             pair_symbol=symbol,
-                            start_ms=now_ms - 60 * 60 * 1000,
+                            start_ms=self._compute_all_orders_start_ms(
+                                now_ms=now_ms,
+                                due_unknown_orders=due_unknown_orders,
+                            ),
                             end_ms=now_ms,
                         )
                     except Exception:  # noqa: BLE001
@@ -158,11 +171,39 @@ class ExecutionService:
                     last_seen_at=matched.update_time or matched.timestamp,
                 )
 
+    def _compute_all_orders_start_ms(
+        self, *, now_ms: int, due_unknown_orders: list
+    ) -> int:
+        default_start = now_ms - 60 * 60 * 1000
+        max_lookback_start = now_ms - self.unknown_reprobe_max_lookback_seconds * 1000
+        start_ms = default_start
+
+        unknown_first_seen_candidates: list[int] = []
+        for order in due_unknown_orders:
+            first_seen = order.unknown_first_seen_at
+            if first_seen is None:
+                continue
+            if first_seen <= 0:
+                continue
+            if first_seen > now_ms:
+                continue
+            unknown_first_seen_candidates.append(first_seen)
+
+        if unknown_first_seen_candidates:
+            buffer_ms = 60 * 1000
+            candidate_start = min(unknown_first_seen_candidates) - buffer_ms
+            start_ms = min(default_start, candidate_start)
+
+        return max(max_lookback_start, start_ms)
+
     def _is_unknown_probe_due(self, next_probe_at: int | None, now_ms: int) -> bool:
         return next_probe_at is None or next_probe_at <= now_ms
 
     def _mark_unknown_unresolved(self, local_order, now_ms: int) -> None:
-        next_attempt = local_order.unknown_probe_attempts + 1
+        raw_attempts = local_order.unknown_probe_attempts
+        safe_attempts = raw_attempts if isinstance(raw_attempts, int) else 0
+        safe_attempts = max(0, min(safe_attempts, 60))
+        next_attempt = safe_attempts + 1
         backoff_seconds = min(
             self.unknown_reprobe_max_seconds,
             self.unknown_reprobe_initial_seconds * (2 ** (next_attempt - 1)),

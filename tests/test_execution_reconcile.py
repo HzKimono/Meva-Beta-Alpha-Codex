@@ -18,6 +18,7 @@ from btcbot.domain.models import (
     PairInfo,
     SymbolRules,
 )
+import btcbot.services.execution_service as execution_service_module
 from btcbot.services.execution_service import ExecutionService
 from btcbot.services.state_store import StateStore
 
@@ -36,6 +37,8 @@ class LifecycleExchange(ExchangeClient):
         self.open_snapshots: list[OrderSnapshot] = []
         self.all_snapshots: list[OrderSnapshot] = []
         self.get_all_orders_calls = 0
+        self.last_start_ms: int | None = None
+        self.last_end_ms: int | None = None
 
     def get_balances(self) -> list[Balance]:
         return []
@@ -78,8 +81,9 @@ class LifecycleExchange(ExchangeClient):
     def get_all_orders(
         self, pair_symbol: str, start_ms: int, end_ms: int
     ) -> list[OrderSnapshot]:
-        del start_ms, end_ms
         self.get_all_orders_calls += 1
+        self.last_start_ms = start_ms
+        self.last_end_ms = end_ms
         return [
             snapshot
             for snapshot in self.all_snapshots
@@ -418,6 +422,151 @@ def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_s
 
     assert row is not None
     assert row["status"] == "filled"
+
+
+def test_unknown_probe_dynamic_lookback_uses_first_seen(tmp_path) -> None:
+    exchange = LifecycleExchange()
+    service = _service(tmp_path, exchange)
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="101",
+            client_order_id="cid-101",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=100,
+            quantity=0.1,
+            status=OrderStatus.OPEN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    service.state_store.update_order_status(
+        order_id="101",
+        status=OrderStatus.UNKNOWN,
+        reconciled=True,
+    )
+
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    first_seen_ms = now_ms - 2 * 60 * 60 * 1000
+    with service.state_store._connect() as conn:
+        conn.execute(
+            """
+            UPDATE orders
+            SET unknown_first_seen_at = ?, unknown_next_probe_at = 0
+            WHERE order_id = ?
+            """,
+            (first_seen_ms, "101"),
+        )
+
+    service.refresh_order_lifecycle(["BTC_TRY"])
+
+    assert exchange.get_all_orders_calls == 1
+    assert exchange.last_start_ms is not None
+    assert exchange.last_end_ms is not None
+    assert exchange.last_start_ms <= first_seen_ms
+    assert abs(exchange.last_end_ms - now_ms) < 30_000
+
+
+def test_unknown_reprobe_clamps_corrupted_attempts(tmp_path) -> None:
+    exchange = LifecycleExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=StateStore(str(tmp_path / "state.db")),
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        unknown_reprobe_initial_seconds=1,
+        unknown_reprobe_max_seconds=60,
+    )
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="101",
+            client_order_id="cid-101",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=100,
+            quantity=0.1,
+            status=OrderStatus.UNKNOWN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    with service.state_store._connect() as conn:
+        conn.execute(
+            """
+            UPDATE orders
+            SET unknown_probe_attempts = ?, unknown_next_probe_at = 0
+            WHERE order_id = ?
+            """,
+            (10**12, "101"),
+        )
+
+    service.refresh_order_lifecycle(["BTC_TRY"])
+
+    with service.state_store._connect() as conn:
+        row = conn.execute(
+            "SELECT unknown_next_probe_at, unknown_last_probe_at FROM orders WHERE order_id = ?",
+            ("101",),
+        ).fetchone()
+
+    assert row is not None
+    assert row["unknown_last_probe_at"] is not None
+    assert row["unknown_next_probe_at"] is not None
+
+
+def test_unknown_escalation_emits_metric_and_forces_observe_only(
+    tmp_path, monkeypatch
+) -> None:
+    class FakeInstrumentation:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int, dict | None]] = []
+
+        def counter(self, name: str, value: int = 1, *, attrs=None) -> None:
+            self.calls.append((name, value, attrs))
+
+    fake_metrics = FakeInstrumentation()
+    monkeypatch.setattr(
+        execution_service_module, "get_instrumentation", lambda: fake_metrics
+    )
+
+    exchange = LifecycleExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=StateStore(str(tmp_path / "state.db")),
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        unknown_reprobe_escalation_attempts=1,
+        unknown_reprobe_force_observe_only=True,
+    )
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="101",
+            client_order_id="cid-101",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=100,
+            quantity=0.1,
+            status=OrderStatus.UNKNOWN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    with service.state_store._connect() as conn:
+        conn.execute(
+            "UPDATE orders SET unknown_next_probe_at = 0 WHERE order_id = ?", ("101",)
+        )
+
+    service.refresh_order_lifecycle(["BTC_TRY"])
+
+    assert service.safe_mode is True
+    assert len(fake_metrics.calls) == 1
+    assert fake_metrics.calls[0][0] == "unknown_order_retry_escalations_total"
 
 
 def test_unknown_state_preserved_and_not_reacted(tmp_path) -> None:

@@ -2042,9 +2042,7 @@ class StateStore:
     ) -> None:
         now_iso = datetime.now(UTC).isoformat()
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
-        unknown_first_seen = now_ms if status == OrderStatus.UNKNOWN else None
-        unknown_next_probe = now_ms if status == OrderStatus.UNKNOWN else None
-        unknown_probe_attempts = 0 if status != OrderStatus.UNKNOWN else None
+        is_unknown = 1 if status == OrderStatus.UNKNOWN else 0
         with self._connect() as conn:
             conn.execute(
                 """
@@ -2055,23 +2053,23 @@ class StateStore:
                     exchange_status_raw = COALESCE(?, exchange_status_raw),
                     reconciled = COALESCE(?, reconciled),
                     unknown_first_seen_at = CASE
-                        WHEN ? IS NOT NULL THEN COALESCE(unknown_first_seen_at, ?)
+                        WHEN ? = 1 THEN COALESCE(unknown_first_seen_at, ?)
                         ELSE NULL
                     END,
                     unknown_last_probe_at = CASE
-                        WHEN ? IS NOT NULL THEN unknown_last_probe_at
+                        WHEN ? = 1 THEN unknown_last_probe_at
                         ELSE NULL
                     END,
                     unknown_next_probe_at = CASE
-                        WHEN ? IS NOT NULL THEN COALESCE(unknown_next_probe_at, ?)
+                        WHEN ? = 1 THEN COALESCE(unknown_next_probe_at, ?)
                         ELSE NULL
                     END,
                     unknown_probe_attempts = CASE
-                        WHEN ? IS NOT NULL THEN unknown_probe_attempts
-                        ELSE ?
+                        WHEN ? = 1 THEN COALESCE(unknown_probe_attempts, 0)
+                        ELSE 0
                     END,
                     unknown_escalated_at = CASE
-                        WHEN ? IS NOT NULL THEN unknown_escalated_at
+                        WHEN ? = 1 THEN unknown_escalated_at
                         ELSE NULL
                     END
                 WHERE order_id = ?
@@ -2082,14 +2080,13 @@ class StateStore:
                     last_seen_at,
                     exchange_status_raw,
                     (1 if reconciled else 0) if reconciled is not None else None,
-                    unknown_first_seen,
-                    unknown_first_seen,
-                    unknown_first_seen,
-                    unknown_next_probe,
-                    unknown_next_probe,
-                    unknown_first_seen,
-                    unknown_probe_attempts,
-                    unknown_first_seen,
+                    is_unknown,
+                    now_ms,
+                    is_unknown,
+                    is_unknown,
+                    now_ms,
+                    is_unknown,
+                    is_unknown,
                     order_id,
                 ),
             )

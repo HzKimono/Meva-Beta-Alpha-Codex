@@ -132,6 +132,62 @@ def test_save_order_persists_exact_price_qty_strings(tmp_path) -> None:
     assert str(stored.quantity) == "0.123456789"
 
 
+def test_update_order_status_unknown_fields_set_and_cleared(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    order = Order(
+        order_id="oid-unknown-fields",
+        client_order_id="cid-unknown-fields",
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=100.0,
+        quantity=0.1,
+        status=OrderStatus.OPEN,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    store.save_order(order)
+
+    store.update_order_status(order_id=order.order_id, status=OrderStatus.UNKNOWN)
+
+    with store._connect() as conn:
+        unknown_row = conn.execute(
+            """
+            SELECT unknown_first_seen_at, unknown_last_probe_at, unknown_next_probe_at,
+                   unknown_probe_attempts, unknown_escalated_at
+            FROM orders
+            WHERE order_id = ?
+            """,
+            (order.order_id,),
+        ).fetchone()
+
+    assert unknown_row is not None
+    assert unknown_row["unknown_first_seen_at"] is not None
+    assert unknown_row["unknown_next_probe_at"] is not None
+    assert unknown_row["unknown_probe_attempts"] == 0
+    assert unknown_row["unknown_last_probe_at"] is None
+    assert unknown_row["unknown_escalated_at"] is None
+
+    store.update_order_status(order_id=order.order_id, status=OrderStatus.OPEN)
+
+    with store._connect() as conn:
+        open_row = conn.execute(
+            """
+            SELECT unknown_first_seen_at, unknown_last_probe_at, unknown_next_probe_at,
+                   unknown_probe_attempts, unknown_escalated_at
+            FROM orders
+            WHERE order_id = ?
+            """,
+            (order.order_id,),
+        ).fetchone()
+
+    assert open_row is not None
+    assert open_row["unknown_first_seen_at"] is None
+    assert open_row["unknown_last_probe_at"] is None
+    assert open_row["unknown_next_probe_at"] is None
+    assert open_row["unknown_probe_attempts"] == 0
+    assert open_row["unknown_escalated_at"] is None
+
+
 def test_update_order_status_marks_reconciled_for_terminal_exchange_status(
     monkeypatch, tmp_path
 ) -> None:
