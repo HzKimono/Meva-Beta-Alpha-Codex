@@ -65,6 +65,7 @@ from btcbot.services.stage4_cycle_runner import (
     Stage4ConfigurationError,
     Stage4CycleRunner,
     Stage4ExchangeError,
+    Stage4InvariantError,
 )
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
@@ -1183,28 +1184,10 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 )
 
                 balances = portfolio_service.get_balances()
-                freshness = None
-                get_bids_with_freshness = getattr(
-                    market_data_service,
-                    "get_best_bids_with_freshness",
-                    None,
+                bids, freshness = market_data_service.get_best_bids_with_freshness(
+                    settings.symbols,
+                    max_age_ms=settings.max_market_data_age_ms,
                 )
-                if callable(get_bids_with_freshness):
-                    bids, freshness = get_bids_with_freshness(
-                        settings.symbols,
-                        max_age_ms=settings.max_market_data_age_ms,
-                    )
-                else:
-                    bids = market_data_service.get_best_bids(settings.symbols)
-                    get_market_data_freshness = getattr(
-                        market_data_service,
-                        "get_market_data_freshness",
-                        None,
-                    )
-                    if callable(get_market_data_freshness):
-                        freshness = get_market_data_freshness(
-                            max_age_ms=settings.max_market_data_age_ms,
-                        )
                 if freshness is not None and bool(getattr(freshness, "is_stale", False)):
                     observed_age_ms = getattr(freshness, "observed_age_ms", None)
                     max_age_ms = int(getattr(freshness, "max_age_ms", settings.max_market_data_age_ms))
@@ -1462,6 +1445,18 @@ def run_cycle_stage4(
             extra={"extra": {"error_type": type(exc).__name__, "safe_message": str(exc)}},
         )
         return 2
+    except Stage4InvariantError as exc:
+        logger.exception(
+            "Stage 4 cycle failed due to capital/invariant policy",
+            extra={
+                "extra": {
+                    "error_type": type(exc).__name__,
+                    "error_category": "capital_invariant",
+                    "safe_message": str(exc),
+                }
+            },
+        )
+        return 1
     except Stage4ExchangeError as exc:
         logger.exception(
             "Stage 4 cycle failed",
