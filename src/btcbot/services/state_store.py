@@ -46,6 +46,11 @@ class StoredOrder:
     last_seen_at: int | None
     reconciled: bool
     exchange_status_raw: str | None
+    unknown_first_seen_at: int | None = None
+    unknown_last_probe_at: int | None = None
+    unknown_next_probe_at: int | None = None
+    unknown_probe_attempts: int = 0
+    unknown_escalated_at: int | None = None
 
 
 @dataclass
@@ -303,8 +308,12 @@ class StateStore:
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(ts)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_decisions_mode ON risk_decisions(mode)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_risk_decisions_mode ON risk_decisions(mode)"
+        )
         if not self._table_exists(conn, "risk_state_current"):
             msg = "risk_state_current not created"
             raise RuntimeError(msg)
@@ -329,8 +338,12 @@ class StateStore:
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_ts ON anomaly_events(ts)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_code ON anomaly_events(code)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_events_ts ON anomaly_events(ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_events_code ON anomaly_events(code)"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_anomaly_events_cycle_id ON anomaly_events(cycle_id)"
         )
@@ -350,7 +363,8 @@ class StateStore:
             """
         )
         columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(degrade_state_current)")
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(degrade_state_current)")
         }
         if "warn_window_count" not in columns:
             conn.execute(
@@ -390,7 +404,8 @@ class StateStore:
             """
         )
         columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_cycle_trace)")
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(stage7_cycle_trace)")
         }
         if "universe_scores_json" not in columns:
             conn.execute(
@@ -427,7 +442,8 @@ class StateStore:
             """
         )
         ledger_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_ledger_metrics)")
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(stage7_ledger_metrics)")
         }
         if "max_drawdown_ratio" not in ledger_columns:
             conn.execute(
@@ -488,7 +504,8 @@ class StateStore:
             """
         )
         run_metric_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_run_metrics)")
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(stage7_run_metrics)")
         }
         if "fills_written_count" not in run_metric_columns:
             conn.execute(
@@ -522,9 +539,13 @@ class StateStore:
         if "run_id" not in run_metric_columns:
             conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN run_id TEXT")
         if "no_trades_reason" not in run_metric_columns:
-            conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN no_trades_reason TEXT")
+            conn.execute(
+                "ALTER TABLE stage7_run_metrics ADD COLUMN no_trades_reason TEXT"
+            )
         if "no_metrics_reason" not in run_metric_columns:
-            conn.execute("ALTER TABLE stage7_run_metrics ADD COLUMN no_metrics_reason TEXT")
+            conn.execute(
+                "ALTER TABLE stage7_run_metrics ADD COLUMN no_metrics_reason TEXT"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_stage7_run_metrics_ts ON stage7_run_metrics(ts)"
         )
@@ -652,7 +673,8 @@ class StateStore:
             """
         )
         columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_cycle_trace)")
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(stage7_cycle_trace)")
         }
         if "active_param_version" not in columns:
             conn.execute(
@@ -665,7 +687,9 @@ class StateStore:
                 "ADD COLUMN param_change_json TEXT NOT NULL DEFAULT '{}'"
             )
 
-    def save_stage7_run_metrics(self, cycle_id: str, metrics_dict: dict[str, object]) -> None:
+    def save_stage7_run_metrics(
+        self, cycle_id: str, metrics_dict: dict[str, object]
+    ) -> None:
         with self._connect() as conn:
             self._save_stage7_run_metrics_with_conn(
                 conn=conn, cycle_id=cycle_id, metrics_dict=metrics_dict
@@ -760,7 +784,11 @@ class StateStore:
                 str(metrics_dict["fees_try"]),
                 str(metrics_dict["slippage_try"]),
                 str(metrics_dict["max_drawdown_pct"]),
-                str(metrics_dict.get("max_drawdown_ratio", metrics_dict["max_drawdown_pct"])),
+                str(
+                    metrics_dict.get(
+                        "max_drawdown_ratio", metrics_dict["max_drawdown_pct"]
+                    )
+                ),
                 str(metrics_dict["turnover_try"]),
                 int(metrics_dict["latency_ms_total"]),
                 int(metrics_dict["selection_ms"]),
@@ -827,7 +855,9 @@ class StateStore:
             record = {key: row[key] for key in row.keys()}
             record["quality_flags"] = json.loads(str(record.pop("quality_flags_json")))
             record["alert_flags"] = json.loads(str(record.pop("alert_flags_json")))
-            record["intents_summary"] = json.loads(str(record.get("intents_summary_json") or "{}"))
+            record["intents_summary"] = json.loads(
+                str(record.get("intents_summary_json") or "{}")
+            )
             record["mode_payload"] = json.loads(str(record.get("mode_json") or "{}"))
             exports.append(record)
         return exports
@@ -844,12 +874,22 @@ class StateStore:
         payload["selected_universe"] = json.loads(
             str(payload.pop("selected_universe_json") or "[]")
         )
-        payload["universe_scores"] = json.loads(str(payload.pop("universe_scores_json") or "[]"))
-        payload["intents_summary"] = json.loads(str(payload.pop("intents_summary_json") or "{}"))
+        payload["universe_scores"] = json.loads(
+            str(payload.pop("universe_scores_json") or "[]")
+        )
+        payload["intents_summary"] = json.loads(
+            str(payload.pop("intents_summary_json") or "{}")
+        )
         payload["mode_payload"] = json.loads(str(payload.pop("mode_json") or "{}"))
-        payload["order_decisions"] = json.loads(str(payload.pop("order_decisions_json") or "[]"))
-        payload["portfolio_plan"] = json.loads(str(payload.pop("portfolio_plan_json") or "{}"))
-        payload["order_intents"] = json.loads(str(payload.pop("order_intents_json") or "[]"))
+        payload["order_decisions"] = json.loads(
+            str(payload.pop("order_decisions_json") or "[]")
+        )
+        payload["portfolio_plan"] = json.loads(
+            str(payload.pop("portfolio_plan_json") or "{}")
+        )
+        payload["order_intents"] = json.loads(
+            str(payload.pop("order_intents_json") or "[]")
+        )
         return payload
 
     def save_stage7_cycle(
@@ -905,7 +945,9 @@ class StateStore:
                         )
                         raise RuntimeError(msg)
                 trace_payload = (
-                    order_intents_trace if order_intents_trace is not None else derived_trace
+                    order_intents_trace
+                    if order_intents_trace is not None
+                    else derived_trace
                 )
                 try:
                     conn.execute(
@@ -940,9 +982,11 @@ class StateStore:
                             json.dumps(portfolio_plan, sort_keys=True),
                             json.dumps(trace_payload, sort_keys=True),
                             int(active_param_version),
-                            json.dumps(param_change.to_dict(), sort_keys=True)
-                            if param_change
-                            else "{}",
+                            (
+                                json.dumps(param_change.to_dict(), sort_keys=True)
+                                if param_change
+                                else "{}"
+                            ),
                         ),
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1174,10 +1218,14 @@ class StateStore:
                 ),
             )
 
-    def save_stage7_order_intents(self, cycle_id: str, intents: list[OrderIntent]) -> None:
+    def save_stage7_order_intents(
+        self, cycle_id: str, intents: list[OrderIntent]
+    ) -> None:
         now = datetime.now(UTC)
         with self.transaction() as conn:
-            self._save_stage7_order_intents(conn=conn, cycle_id=cycle_id, ts=now, intents=intents)
+            self._save_stage7_order_intents(
+                conn=conn, cycle_id=cycle_id, ts=now, intents=intents
+            )
 
     def upsert_stage7_orders(self, orders: list[Stage7Order]) -> None:
         if not orders:
@@ -1214,9 +1262,11 @@ class StateStore:
                         str(order.price_try),
                         str(order.qty),
                         str(order.filled_qty),
-                        str(order.avg_fill_price_try)
-                        if order.avg_fill_price_try is not None
-                        else None,
+                        (
+                            str(order.avg_fill_price_try)
+                            if order.avg_fill_price_try is not None
+                            else None
+                        ),
                         order.status.value,
                         order.intent_hash,
                         ensure_utc(order.last_update).isoformat(),
@@ -1247,7 +1297,9 @@ class StateStore:
                 )
                 inserted += int(cur.rowcount > 0)
         attempted = len(events)
-        return AppendResult(attempted=attempted, inserted=inserted, ignored=attempted - inserted)
+        return AppendResult(
+            attempted=attempted, inserted=inserted, ignored=attempted - inserted
+        )
 
     def append_stage7_order_event(self, event: OrderEvent) -> bool:
         """Append a single Stage7 order event with duplicate-event protection."""
@@ -1322,7 +1374,9 @@ class StateStore:
             return None
         return self._row_to_stage7_order(row)
 
-    def get_stage7_order_events_by_client_id(self, client_order_id: str) -> list[OrderEvent]:
+    def get_stage7_order_events_by_client_id(
+        self, client_order_id: str
+    ) -> list[OrderEvent]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -1433,7 +1487,9 @@ class StateStore:
             WHERE client_order_id IS NOT NULL
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_stage4_orders_status ON stage4_orders(status)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage4_orders_status ON stage4_orders(status)"
+        )
         order_columns = {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(stage4_orders)")
         }
@@ -1492,12 +1548,16 @@ class StateStore:
             )
             """
         )
-        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(pnl_snapshots)")}
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(pnl_snapshots)")
+        }
         if "realized_total_try" not in columns:
             conn.execute(
                 "ALTER TABLE pnl_snapshots ADD COLUMN realized_total_try TEXT NOT NULL DEFAULT '0'"
             )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_snapshots_ts ON pnl_snapshots(ts)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pnl_snapshots_ts ON pnl_snapshots(ts)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cursors (
@@ -1537,30 +1597,48 @@ class StateStore:
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_allocation_plans_ts ON allocation_plans(ts)")
-        cycle_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(cycle_audit)")}
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_allocation_plans_ts ON allocation_plans(ts)"
+        )
+        cycle_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(cycle_audit)")
+        }
         if "envelope_json" not in cycle_columns:
             conn.execute("ALTER TABLE cycle_audit ADD COLUMN envelope_json TEXT")
         allocation_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(allocation_plans)")
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(allocation_plans)")
         }
-        if "try_cash_target" not in allocation_columns and "cash_target_try" in allocation_columns:
+        if (
+            "try_cash_target" not in allocation_columns
+            and "cash_target_try" in allocation_columns
+        ):
             conn.execute("ALTER TABLE allocation_plans ADD COLUMN try_cash_target TEXT")
-            conn.execute("UPDATE allocation_plans SET try_cash_target = cash_target_try")
+            conn.execute(
+                "UPDATE allocation_plans SET try_cash_target = cash_target_try"
+            )
         if (
             "investable_total_try" not in allocation_columns
             and "investable_try" in allocation_columns
         ):
-            conn.execute("ALTER TABLE allocation_plans ADD COLUMN investable_total_try TEXT")
-            conn.execute("UPDATE allocation_plans SET investable_total_try = investable_try")
+            conn.execute(
+                "ALTER TABLE allocation_plans ADD COLUMN investable_total_try TEXT"
+            )
+            conn.execute(
+                "UPDATE allocation_plans SET investable_total_try = investable_try"
+            )
         if "investable_this_cycle_try" not in allocation_columns:
-            conn.execute("ALTER TABLE allocation_plans ADD COLUMN investable_this_cycle_try TEXT")
+            conn.execute(
+                "ALTER TABLE allocation_plans ADD COLUMN investable_this_cycle_try TEXT"
+            )
             conn.execute(
                 "UPDATE allocation_plans SET investable_this_cycle_try = "
                 "COALESCE(investable_total_try, investable_try, '0')"
             )
         if "deploy_budget_try" not in allocation_columns:
-            conn.execute("ALTER TABLE allocation_plans ADD COLUMN deploy_budget_try TEXT")
+            conn.execute(
+                "ALTER TABLE allocation_plans ADD COLUMN deploy_budget_try TEXT"
+            )
             conn.execute(
                 "UPDATE allocation_plans SET deploy_budget_try = COALESCE(planned_total_try, '0')"
             )
@@ -1568,8 +1646,12 @@ class StateStore:
             "unused_budget_try" not in allocation_columns
             and "unused_investable_try" in allocation_columns
         ):
-            conn.execute("ALTER TABLE allocation_plans ADD COLUMN unused_budget_try TEXT")
-            conn.execute("UPDATE allocation_plans SET unused_budget_try = unused_investable_try")
+            conn.execute(
+                "ALTER TABLE allocation_plans ADD COLUMN unused_budget_try TEXT"
+            )
+            conn.execute(
+                "UPDATE allocation_plans SET unused_budget_try = unused_investable_try"
+            )
         if "deferred_json" not in allocation_columns:
             conn.execute("ALTER TABLE allocation_plans ADD COLUMN deferred_json TEXT")
             conn.execute(
@@ -1653,10 +1735,14 @@ class StateStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cycle_metrics_ts_start ON cycle_metrics(ts_start)"
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_cycle_metrics_mode ON cycle_metrics(mode)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cycle_metrics_mode ON cycle_metrics(mode)"
+        )
 
     def _ensure_actions_metadata_columns(self, conn: sqlite3.Connection) -> None:
-        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(actions)")}
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(actions)")
+        }
         if "client_order_id" not in columns:
             conn.execute("ALTER TABLE actions ADD COLUMN client_order_id TEXT")
         if "order_id" not in columns:
@@ -1665,19 +1751,35 @@ class StateStore:
             conn.execute("ALTER TABLE actions ADD COLUMN metadata_json TEXT")
 
     def _ensure_orders_columns(self, conn: sqlite3.Connection) -> None:
-        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(orders)")}
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(orders)")
+        }
         if "client_order_id" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN client_order_id TEXT")
         if "last_seen_at" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN last_seen_at INTEGER")
         if "reconciled" not in columns:
-            conn.execute("ALTER TABLE orders ADD COLUMN reconciled INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE orders ADD COLUMN reconciled INTEGER NOT NULL DEFAULT 0"
+            )
         if "exchange_status_raw" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN exchange_status_raw TEXT")
         if "idempotency_key" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN idempotency_key TEXT")
         if "intent_id" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN intent_id TEXT")
+        if "unknown_first_seen_at" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN unknown_first_seen_at INTEGER")
+        if "unknown_last_probe_at" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN unknown_last_probe_at INTEGER")
+        if "unknown_next_probe_at" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN unknown_next_probe_at INTEGER")
+        if "unknown_probe_attempts" not in columns:
+            conn.execute(
+                "ALTER TABLE orders ADD COLUMN unknown_probe_attempts INTEGER NOT NULL DEFAULT 0"
+            )
+        if "unknown_escalated_at" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN unknown_escalated_at INTEGER")
 
     def record_action(
         self,
@@ -1749,9 +1851,13 @@ class StateStore:
 
     def get_action_by_id(self, action_id: int) -> sqlite3.Row | None:
         with self._connect() as conn:
-            return conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            return conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
 
-    def get_latest_action(self, action_type: str, payload_hash: str) -> sqlite3.Row | None:
+    def get_latest_action(
+        self, action_type: str, payload_hash: str
+    ) -> sqlite3.Row | None:
         with self._connect() as conn:
             return conn.execute(
                 """
@@ -1919,7 +2025,9 @@ class StateStore:
                 """
             ).fetchall()
         return {
-            (str(row["symbol"]), str(row["side"])): datetime.fromisoformat(str(row["created_at"]))
+            (str(row["symbol"]), str(row["side"])): datetime.fromisoformat(
+                str(row["created_at"])
+            )
             for row in rows
         }
 
@@ -1932,6 +2040,9 @@ class StateStore:
         reconciled: bool | None = None,
         last_seen_at: int | None = None,
     ) -> None:
+        now_iso = datetime.now(UTC).isoformat()
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        is_unknown = 1 if status == OrderStatus.UNKNOWN else 0
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1940,23 +2051,86 @@ class StateStore:
                     updated_at = ?,
                     last_seen_at = COALESCE(?, last_seen_at),
                     exchange_status_raw = COALESCE(?, exchange_status_raw),
-                    reconciled = COALESCE(?, reconciled)
+                    reconciled = COALESCE(?, reconciled),
+                    unknown_first_seen_at = CASE
+                        WHEN ? = 1 THEN COALESCE(unknown_first_seen_at, ?)
+                        ELSE NULL
+                    END,
+                    unknown_last_probe_at = CASE
+                        WHEN ? = 1 THEN unknown_last_probe_at
+                        ELSE NULL
+                    END,
+                    unknown_next_probe_at = CASE
+                        WHEN ? = 1 THEN COALESCE(unknown_next_probe_at, ?)
+                        ELSE NULL
+                    END,
+                    unknown_probe_attempts = CASE
+                        WHEN ? = 1 THEN COALESCE(unknown_probe_attempts, 0)
+                        ELSE 0
+                    END,
+                    unknown_escalated_at = CASE
+                        WHEN ? = 1 THEN unknown_escalated_at
+                        ELSE NULL
+                    END
                 WHERE order_id = ?
                 """,
                 (
                     status.value,
-                    datetime.now(UTC).isoformat(),
+                    now_iso,
                     last_seen_at,
                     exchange_status_raw,
                     (1 if reconciled else 0) if reconciled is not None else None,
+                    is_unknown,
+                    now_ms,
+                    is_unknown,
+                    is_unknown,
+                    now_ms,
+                    is_unknown,
+                    is_unknown,
                     order_id,
                 ),
             )
 
-    def find_open_or_unknown_orders(self, symbols: list[str] | None = None) -> list[StoredOrder]:
+    def mark_unknown_probe_result(
+        self,
+        *,
+        order_id: str,
+        last_probe_at: int,
+        next_probe_at: int,
+        escalate: bool,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE orders
+                SET unknown_first_seen_at = COALESCE(unknown_first_seen_at, ?),
+                    unknown_last_probe_at = ?,
+                    unknown_next_probe_at = ?,
+                    unknown_probe_attempts = COALESCE(unknown_probe_attempts, 0) + 1,
+                    unknown_escalated_at = CASE
+                        WHEN ? THEN COALESCE(unknown_escalated_at, ?)
+                        ELSE unknown_escalated_at
+                    END
+                WHERE order_id = ?
+                """,
+                (
+                    last_probe_at,
+                    last_probe_at,
+                    next_probe_at,
+                    1 if escalate else 0,
+                    last_probe_at,
+                    order_id,
+                ),
+            )
+
+    def find_open_or_unknown_orders(
+        self, symbols: list[str] | None = None
+    ) -> list[StoredOrder]:
         query = """
             SELECT order_id, symbol, client_order_id, side, price, qty, status,
-                   last_seen_at, reconciled, exchange_status_raw
+                   last_seen_at, reconciled, exchange_status_raw,
+                   unknown_first_seen_at, unknown_last_probe_at, unknown_next_probe_at,
+                   unknown_probe_attempts, unknown_escalated_at
             FROM orders
             WHERE status IN ('new', 'open', 'partial', 'unknown')
         """
@@ -1979,10 +2153,33 @@ class StateStore:
                 quantity=Decimal(str(row["qty"])),
                 status=OrderStatus(str(row["status"])),
                 last_seen_at=(
-                    int(row["last_seen_at"]) if row["last_seen_at"] is not None else None
+                    int(row["last_seen_at"])
+                    if row["last_seen_at"] is not None
+                    else None
                 ),
                 reconciled=bool(row["reconciled"]),
                 exchange_status_raw=row["exchange_status_raw"],
+                unknown_first_seen_at=(
+                    int(row["unknown_first_seen_at"])
+                    if row["unknown_first_seen_at"] is not None
+                    else None
+                ),
+                unknown_last_probe_at=(
+                    int(row["unknown_last_probe_at"])
+                    if row["unknown_last_probe_at"] is not None
+                    else None
+                ),
+                unknown_next_probe_at=(
+                    int(row["unknown_next_probe_at"])
+                    if row["unknown_next_probe_at"] is not None
+                    else None
+                ),
+                unknown_probe_attempts=int(row["unknown_probe_attempts"] or 0),
+                unknown_escalated_at=(
+                    int(row["unknown_escalated_at"])
+                    if row["unknown_escalated_at"] is not None
+                    else None
+                ),
             )
             for row in rows
         ]
@@ -2002,7 +2199,9 @@ class StateStore:
 
     def get_last_cycle_id(self) -> str | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT value FROM meta WHERE key='last_cycle_id'").fetchone()
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='last_cycle_id'"
+            ).fetchone()
         return row["value"] if row else None
 
     def set_last_stage7_cycle_id(self, cycle_id: str) -> None:
@@ -2058,8 +2257,12 @@ class StateStore:
             status=str(row["status"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
-            exchange_order_id=(str(row["exchange_order_id"]) if row["exchange_order_id"] else None),
-            client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+            exchange_order_id=(
+                str(row["exchange_order_id"]) if row["exchange_order_id"] else None
+            ),
+            client_order_id=(
+                str(row["client_order_id"]) if row["client_order_id"] else None
+            ),
             exchange_client_id=(
                 str(row["exchange_client_id"]) if row["exchange_client_id"] else None
             ),
@@ -2074,9 +2277,7 @@ class StateStore:
     ):
         from btcbot.domain.stage4 import Order as Stage4Order
 
-        query = (
-            "SELECT * FROM stage4_orders WHERE status IN ('open','submitted','cancel_requested')"
-        )
+        query = "SELECT * FROM stage4_orders WHERE status IN ('open','submitted','cancel_requested')"
         if not include_external:
             query += " AND mode != 'external'"
         params: list[str] = []
@@ -2099,9 +2300,13 @@ class StateStore:
                 exchange_order_id=(
                     str(row["exchange_order_id"]) if row["exchange_order_id"] else None
                 ),
-                client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+                client_order_id=(
+                    str(row["client_order_id"]) if row["client_order_id"] else None
+                ),
                 exchange_client_id=(
-                    str(row["exchange_client_id"]) if row["exchange_client_id"] else None
+                    str(row["exchange_client_id"])
+                    if row["exchange_client_id"]
+                    else None
                 ),
                 mode=str(row["mode"]),
             )
@@ -2141,7 +2346,9 @@ class StateStore:
                 (internal_client_order_id, exchange_client_order_id),
             ).fetchone()
         if row is None:
-            return SubmitDedupeDecision(should_dedupe=False, dedupe_key=exchange_client_order_id)
+            return SubmitDedupeDecision(
+                should_dedupe=False, dedupe_key=exchange_client_order_id
+            )
 
         status = str(row["status"]).lower()
         created_at = datetime.fromisoformat(str(row["created_at"]))
@@ -2212,7 +2419,14 @@ class StateStore:
                         exchange_order_id=?, status=?, mode=?, updated_at=?
                     WHERE client_order_id=?
                     """,
-                    (exchange_client_id, exchange_order_id, status, mode, now, client_order_id),
+                    (
+                        exchange_client_id,
+                        exchange_order_id,
+                        status,
+                        mode,
+                        now,
+                        client_order_id,
+                    ),
                 )
 
     def record_stage4_order_simulated_submit(
@@ -2336,7 +2550,9 @@ class StateStore:
             status="rejected",
         )
 
-    def update_stage4_order_exchange_id(self, client_order_id: str, exchange_order_id: str) -> None:
+    def update_stage4_order_exchange_id(
+        self, client_order_id: str, exchange_order_id: str
+    ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
@@ -2420,8 +2636,12 @@ class StateStore:
             status=str(row["status"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
-            exchange_order_id=(str(row["exchange_order_id"]) if row["exchange_order_id"] else None),
-            client_order_id=(str(row["client_order_id"]) if row["client_order_id"] else None),
+            exchange_order_id=(
+                str(row["exchange_order_id"]) if row["exchange_order_id"] else None
+            ),
+            client_order_id=(
+                str(row["client_order_id"]) if row["client_order_id"] else None
+            ),
             exchange_client_id=(
                 str(row["exchange_client_id"]) if row["exchange_client_id"] else None
             ),
@@ -2500,7 +2720,9 @@ class StateStore:
 
     def list_stage4_positions(self) -> list[Stage4Position]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM stage4_positions ORDER BY symbol").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM stage4_positions ORDER BY symbol"
+            ).fetchall()
         return [
             Stage4Position(
                 symbol=str(row["symbol"]),
@@ -2624,7 +2846,9 @@ class StateStore:
 
     def get_latest_allocation_plan(self) -> dict[str, object] | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM allocation_plans ORDER BY ts DESC LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT * FROM allocation_plans ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
         if row is None:
             return None
         payload = {key: row[key] for key in row.keys()}
@@ -2719,7 +2943,9 @@ class StateStore:
         if row is None:
             return None
         payload = {key: row[key] for key in row.keys()}
-        payload["selected_symbols"] = json.loads(str(payload.pop("selected_symbols_json") or "[]"))
+        payload["selected_symbols"] = json.loads(
+            str(payload.pop("selected_symbols_json") or "[]")
+        )
         payload["scores"] = json.loads(str(payload.pop("scores_json") or "{}"))
         payload["filters"] = json.loads(str(payload.pop("filters_json") or "{}"))
         payload["ineligible_counts"] = json.loads(
@@ -2750,11 +2976,17 @@ class StateStore:
                     datetime.now(UTC).isoformat(),
                     json.dumps(counts, sort_keys=True),
                     json.dumps(decisions, sort_keys=True),
-                    json.dumps(envelope, sort_keys=True) if envelope is not None else None,
+                    (
+                        json.dumps(envelope, sort_keys=True)
+                        if envelope is not None
+                        else None
+                    ),
                 ),
             )
 
-    def save_account_snapshot(self, *, cycle_id: str, snapshot: AccountSnapshot) -> None:
+    def save_account_snapshot(
+        self, *, cycle_id: str, snapshot: AccountSnapshot
+    ) -> None:
         holdings_payload = {
             asset: {"free": str(item.free), "locked": str(item.locked)}
             for asset, item in snapshot.holdings.items()
@@ -2834,7 +3066,9 @@ class StateStore:
                 )
                 inserted += int(bool(cur.rowcount))
         attempted = len(events)
-        return AppendResult(attempted=attempted, inserted=inserted, ignored=attempted - inserted)
+        return AppendResult(
+            attempted=attempted, inserted=inserted, ignored=attempted - inserted
+        )
 
     def load_ledger_events(
         self,
@@ -2868,10 +3102,14 @@ class StateStore:
                     type=LedgerEventType(str(row["type"])),
                     side=(str(row["side"]) if row["side"] is not None else None),
                     qty=Decimal(str(row["qty"])),
-                    price=(Decimal(str(row["price"])) if row["price"] is not None else None),
+                    price=(
+                        Decimal(str(row["price"])) if row["price"] is not None else None
+                    ),
                     fee=(Decimal(str(row["fee"])) if row["fee"] is not None else None),
                     fee_currency=(
-                        str(row["fee_currency"]) if row["fee_currency"] is not None else None
+                        str(row["fee_currency"])
+                        if row["fee_currency"] is not None
+                        else None
                     ),
                     exchange_trade_id=(
                         str(row["exchange_trade_id"])
@@ -2884,7 +3122,9 @@ class StateStore:
                         else None
                     ),
                     client_order_id=(
-                        str(row["client_order_id"]) if row["client_order_id"] is not None else None
+                        str(row["client_order_id"])
+                        if row["client_order_id"] is not None
+                        else None
                     ),
                     meta=json.loads(str(row["meta_json"])),
                 )
@@ -2893,7 +3133,9 @@ class StateStore:
 
     def get_cursor(self, key: str) -> str | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT value FROM cursors WHERE key=?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT value FROM cursors WHERE key=?", (key,)
+            ).fetchone()
         return str(row["value"]) if row else None
 
     def set_cursor(self, key: str, value: str) -> None:
@@ -2968,7 +3210,9 @@ class StateStore:
     def get_risk_state_current(self) -> dict[str, str | None]:
         with self._connect() as conn:
             self._ensure_risk_budget_schema(conn)
-            row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
+            row = conn.execute(
+                "SELECT * FROM risk_state_current WHERE state_id = 1"
+            ).fetchone()
         if row is None:
             return {
                 "current_mode": None,
@@ -2978,15 +3222,23 @@ class StateStore:
                 "fees_day": None,
             }
         return {
-            "current_mode": str(row["current_mode"]) if row["current_mode"] is not None else None,
+            "current_mode": (
+                str(row["current_mode"]) if row["current_mode"] is not None else None
+            ),
             "peak_equity_try": (
-                str(row["peak_equity_try"]) if row["peak_equity_try"] is not None else None
+                str(row["peak_equity_try"])
+                if row["peak_equity_try"] is not None
+                else None
             ),
             "peak_equity_date": (
-                str(row["peak_equity_date"]) if row["peak_equity_date"] is not None else None
+                str(row["peak_equity_date"])
+                if row["peak_equity_date"] is not None
+                else None
             ),
             "fees_try_today": (
-                str(row["fees_try_today"]) if row["fees_try_today"] is not None else None
+                str(row["fees_try_today"])
+                if row["fees_try_today"] is not None
+                else None
             ),
             "fees_day": str(row["fees_day"]) if row["fees_day"] is not None else None,
         }
@@ -3145,11 +3397,15 @@ class StateStore:
         if not events:
             return
         with self._connect() as conn:
-            self._save_anomaly_events_with_conn(conn=conn, cycle_id=cycle_id, events=events)
+            self._save_anomaly_events_with_conn(
+                conn=conn, cycle_id=cycle_id, events=events
+            )
 
     def get_degrade_state_current(self) -> dict[str, str]:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM degrade_state_current WHERE state_id = 1").fetchone()
+            row = conn.execute(
+                "SELECT * FROM degrade_state_current WHERE state_id = 1"
+            ).fetchone()
         if row is None:
             return {}
         result: dict[str, str] = {}
@@ -3205,7 +3461,9 @@ class StateStore:
         last_reject_count: int,
     ) -> None:
         with self.transaction() as conn:
-            self._save_anomaly_events_with_conn(conn=conn, cycle_id=cycle_id, events=events)
+            self._save_anomaly_events_with_conn(
+                conn=conn, cycle_id=cycle_id, events=events
+            )
             self._upsert_degrade_state_current_with_conn(
                 conn=conn,
                 cooldown_until=cooldown_until,
@@ -3294,7 +3552,9 @@ class StateStore:
             ),
         )
 
-    def get_active_stage7_params(self, *, settings: object, now_utc: datetime) -> Stage7Params:
+    def get_active_stage7_params(
+        self, *, settings: object, now_utc: datetime
+    ) -> Stage7Params:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT version, params_json FROM stage7_params_active WHERE key = 'active'"
@@ -3351,7 +3611,9 @@ class StateStore:
             )
             return defaults
 
-    def set_active_stage7_params(self, params: Stage7Params, change: ParamChange) -> None:
+    def set_active_stage7_params(
+        self, params: Stage7Params, change: ParamChange
+    ) -> None:
         with self.transaction() as conn:
             params_json = json.dumps(params.to_dict(), sort_keys=True)
             ts_iso = params.updated_at.isoformat()
@@ -3444,9 +3706,11 @@ class StateStore:
                 """,
                 (
                     int(active_param_version),
-                    json.dumps(param_change.to_dict(), sort_keys=True)
-                    if param_change is not None
-                    else "{}",
+                    (
+                        json.dumps(param_change.to_dict(), sort_keys=True)
+                        if param_change is not None
+                        else "{}"
+                    ),
                     cycle_id,
                 ),
             )

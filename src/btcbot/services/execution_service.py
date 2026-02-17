@@ -53,6 +53,12 @@ class ExecutionService:
         kill_switch: bool = True,
         live_trading_enabled: bool = False,
         safe_mode: bool = False,
+        unknown_reprobe_initial_seconds: int = 30,
+        unknown_reprobe_max_seconds: int = 900,
+        unknown_reprobe_escalation_attempts: int = 8,
+        unknown_reprobe_force_observe_only: bool = False,
+        unknown_reprobe_force_kill_switch: bool = False,
+        unknown_reprobe_max_lookback_seconds: int = 24 * 60 * 60,
     ) -> None:
         self.exchange = exchange
         self.state_store = state_store
@@ -62,6 +68,19 @@ class ExecutionService:
         self.kill_switch = kill_switch
         self.live_trading_enabled = live_trading_enabled
         self.safe_mode = safe_mode
+        self.unknown_reprobe_initial_seconds = max(1, unknown_reprobe_initial_seconds)
+        self.unknown_reprobe_max_seconds = max(
+            self.unknown_reprobe_initial_seconds,
+            unknown_reprobe_max_seconds,
+        )
+        self.unknown_reprobe_escalation_attempts = max(
+            1, unknown_reprobe_escalation_attempts
+        )
+        self.unknown_reprobe_force_observe_only = unknown_reprobe_force_observe_only
+        self.unknown_reprobe_force_kill_switch = unknown_reprobe_force_kill_switch
+        self.unknown_reprobe_max_lookback_seconds = max(
+            60 * 60, unknown_reprobe_max_lookback_seconds
+        )
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -75,6 +94,13 @@ class ExecutionService:
 
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         for symbol in normalized_symbols:
+            recent: list[OrderSnapshot] | None = None
+            due_unknown_orders = [
+                local
+                for local in orders_by_symbol.get(symbol, [])
+                if local.status == OrderStatus.UNKNOWN
+                and self._is_unknown_probe_due(local.unknown_next_probe_at, now_ms)
+            ]
             try:
                 open_orders = self.exchange.get_open_orders(symbol)
             except Exception:  # noqa: BLE001
@@ -84,7 +110,9 @@ class ExecutionService:
                 )
                 continue
 
-            open_snapshots = self._open_items_to_snapshots([*open_orders.bids, *open_orders.asks])
+            open_snapshots = self._open_items_to_snapshots(
+                [*open_orders.bids, *open_orders.asks]
+            )
             open_ids = {snapshot.order_id for snapshot in open_snapshots}
 
             for snapshot in open_snapshots:
@@ -100,24 +128,38 @@ class ExecutionService:
             for local in orders_by_symbol.get(symbol, []):
                 if local.order_id in open_ids:
                     continue
-                if local.status == OrderStatus.UNKNOWN:
+                if (
+                    local.status == OrderStatus.UNKNOWN
+                    and not self._is_unknown_probe_due(
+                        local.unknown_next_probe_at,
+                        now_ms,
+                    )
+                ):
                     continue
 
-                try:
-                    recent = self.exchange.get_all_orders(
-                        pair_symbol=symbol,
-                        start_ms=now_ms - 60 * 60 * 1000,
-                        end_ms=now_ms,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Lifecycle refresh failed to load all orders",
-                        extra={"extra": {"symbol": symbol}},
-                    )
-                    continue
+                if recent is None:
+                    try:
+                        recent = self.exchange.get_all_orders(
+                            pair_symbol=symbol,
+                            start_ms=self._compute_all_orders_start_ms(
+                                now_ms=now_ms,
+                                due_unknown_orders=due_unknown_orders,
+                            ),
+                            end_ms=now_ms,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Lifecycle refresh failed to load all orders",
+                            extra={"extra": {"symbol": symbol}},
+                        )
+                        continue
 
-                matched = self._match_existing_order(local.order_id, local.client_order_id, recent)
+                matched = self._match_existing_order(
+                    local.order_id, local.client_order_id, recent
+                )
                 if matched is None:
+                    if local.status == OrderStatus.UNKNOWN:
+                        self._mark_unknown_unresolved(local, now_ms)
                     continue
 
                 mapped = self._map_exchange_status(matched.status)
@@ -128,6 +170,79 @@ class ExecutionService:
                     reconciled=True,
                     last_seen_at=matched.update_time or matched.timestamp,
                 )
+
+    def _compute_all_orders_start_ms(
+        self, *, now_ms: int, due_unknown_orders: list
+    ) -> int:
+        default_start = now_ms - 60 * 60 * 1000
+        max_lookback_start = now_ms - self.unknown_reprobe_max_lookback_seconds * 1000
+        start_ms = default_start
+
+        unknown_first_seen_candidates: list[int] = []
+        for order in due_unknown_orders:
+            first_seen = order.unknown_first_seen_at
+            if first_seen is None:
+                continue
+            if first_seen <= 0:
+                continue
+            if first_seen > now_ms:
+                continue
+            unknown_first_seen_candidates.append(first_seen)
+
+        if unknown_first_seen_candidates:
+            buffer_ms = 60 * 1000
+            candidate_start = min(unknown_first_seen_candidates) - buffer_ms
+            start_ms = min(default_start, candidate_start)
+
+        return max(max_lookback_start, start_ms)
+
+    def _is_unknown_probe_due(self, next_probe_at: int | None, now_ms: int) -> bool:
+        return next_probe_at is None or next_probe_at <= now_ms
+
+    def _mark_unknown_unresolved(self, local_order, now_ms: int) -> None:
+        raw_attempts = local_order.unknown_probe_attempts
+        safe_attempts = raw_attempts if isinstance(raw_attempts, int) else 0
+        safe_attempts = max(0, min(safe_attempts, 60))
+        next_attempt = safe_attempts + 1
+        backoff_seconds = min(
+            self.unknown_reprobe_max_seconds,
+            self.unknown_reprobe_initial_seconds * (2 ** (next_attempt - 1)),
+        )
+        next_probe_at = now_ms + backoff_seconds * 1000
+        should_escalate = (
+            next_attempt >= self.unknown_reprobe_escalation_attempts
+            and local_order.unknown_escalated_at is None
+        )
+        self.state_store.mark_unknown_probe_result(
+            order_id=local_order.order_id,
+            last_probe_at=now_ms,
+            next_probe_at=next_probe_at,
+            escalate=should_escalate,
+        )
+
+        if not should_escalate:
+            return
+
+        get_instrumentation().counter(
+            "unknown_order_retry_escalations_total",
+            attrs={"symbol": local_order.symbol, "order_id": local_order.order_id},
+        )
+        logger.error(
+            "Unknown order exceeded retry threshold",
+            extra={
+                "extra": {
+                    "order_id": local_order.order_id,
+                    "symbol": local_order.symbol,
+                    "attempts": next_attempt,
+                }
+            },
+        )
+        if self.unknown_reprobe_force_observe_only:
+            self.safe_mode = True
+            logger.error("Escalation forcing observe-only mode")
+        if self.unknown_reprobe_force_kill_switch:
+            self.kill_switch = True
+            logger.error("Escalation forcing kill switch")
 
     def cancel_stale_orders(self, cycle_id: str) -> int:
         try:
@@ -144,7 +259,9 @@ class ExecutionService:
             for order in open_orders:
                 logger.info(
                     "Kill switch active; would cancel order",
-                    extra={"extra": {"order_id": order.order_id, "symbol": order.symbol}},
+                    extra={
+                        "extra": {"order_id": order.order_id, "symbol": order.symbol}
+                    },
                 )
             return 0
 
@@ -155,7 +272,9 @@ class ExecutionService:
             if created_at is None or created_at.tzinfo is None:
                 logger.warning(
                     "Skipping stale check due to missing/naive timestamp",
-                    extra={"extra": {"order_id": order.order_id, "symbol": order.symbol}},
+                    extra={
+                        "extra": {"order_id": order.order_id, "symbol": order.symbol}
+                    },
                 )
                 continue
 
@@ -175,7 +294,9 @@ class ExecutionService:
 
             payload_hash = self._cancel_hash(order.order_id)
             action_type = "would_cancel_order" if self.dry_run else "cancel_order"
-            action_id = self.state_store.record_action(cycle_id, action_type, payload_hash)
+            action_id = self.state_store.record_action(
+                cycle_id, action_type, payload_hash
+            )
             if action_id is None:
                 logger.info(
                     "Skipping duplicate cancel action",
@@ -192,7 +313,9 @@ class ExecutionService:
             if self.dry_run:
                 logger.info(
                     "Dry-run mode; would cancel stale order",
-                    extra={"extra": {"order_id": order.order_id, "symbol": order.symbol}},
+                    extra={
+                        "extra": {"order_id": order.order_id, "symbol": order.symbol}
+                    },
                 )
                 canceled += 1
                 continue
@@ -227,7 +350,9 @@ class ExecutionService:
                 )
                 if outcome.status == ReconcileStatus.UNKNOWN:
                     self.state_store.update_order_status(
-                        order_id=order.order_id, status=OrderStatus.UNKNOWN, reconciled=True
+                        order_id=order.order_id,
+                        status=OrderStatus.UNKNOWN,
+                        reconciled=True,
                     )
                 elif outcome.status == ReconcileStatus.CONFIRMED:
                     resolved = (
@@ -264,8 +389,12 @@ class ExecutionService:
         for raw in intents:
             if isinstance(raw, Intent):
                 if cycle_id is None:
-                    raise ValueError("cycle_id is required when executing Stage 3 Intent inputs")
-                normalized_intents.append((to_order_intent(raw, cycle_id=cycle_id), raw))
+                    raise ValueError(
+                        "cycle_id is required when executing Stage 3 Intent inputs"
+                    )
+                normalized_intents.append(
+                    (to_order_intent(raw, cycle_id=cycle_id), raw)
+                )
             else:
                 normalized_intents.append((raw, None))
 
@@ -296,9 +425,13 @@ class ExecutionService:
             if not self.dry_run:
                 self._ensure_live_side_effects_allowed()
 
-            payload_hash = raw_intent.idempotency_key if raw_intent else self._place_hash(intent)
+            payload_hash = (
+                raw_intent.idempotency_key if raw_intent else self._place_hash(intent)
+            )
             action_type = "would_place_order" if self.dry_run else "place_order"
-            action_id = self.state_store.record_action(intent.cycle_id, action_type, payload_hash)
+            action_id = self.state_store.record_action(
+                intent.cycle_id, action_type, payload_hash
+            )
             if action_id is None:
                 logger.info(
                     "Skipping duplicate place action",
@@ -321,7 +454,9 @@ class ExecutionService:
                     reconciled=False,
                     reconcile_status=None,
                     reconcile_reason=None,
-                    idempotency_key=(raw_intent.idempotency_key if raw_intent else payload_hash),
+                    idempotency_key=(
+                        raw_intent.idempotency_key if raw_intent else payload_hash
+                    ),
                     intent_id=(raw_intent.intent_id if raw_intent else None),
                 )
                 placed += 1
@@ -360,7 +495,8 @@ class ExecutionService:
                                     "error_type": type(exc).__name__,
                                     "status_code": exc.status_code,
                                     "error_code": exc.error_code,
-                                    "safe_message": exc.error_message or "exchange submit failed",
+                                    "safe_message": exc.error_message
+                                    or "exchange submit failed",
                                     "request_method": exc.request_method,
                                     "request_path": exc.request_path,
                                     "request_params": exc.request_params,
@@ -380,7 +516,10 @@ class ExecutionService:
                     quantity=quantity,
                     client_order_id=client_order_id,
                 )
-                if outcome.status != ReconcileStatus.CONFIRMED or outcome.order_id is None:
+                if (
+                    outcome.status != ReconcileStatus.CONFIRMED
+                    or outcome.order_id is None
+                ):
                     self.state_store.attach_action_metadata(
                         action_id=action_id,
                         client_order_id=client_order_id,
@@ -409,7 +548,9 @@ class ExecutionService:
                 self.state_store.save_order(
                     order,
                     reconciled=True,
-                    idempotency_key=(raw_intent.idempotency_key if raw_intent else payload_hash),
+                    idempotency_key=(
+                        raw_intent.idempotency_key if raw_intent else payload_hash
+                    ),
                     intent_id=(raw_intent.intent_id if raw_intent else None),
                 )
                 self.state_store.update_order_status(
@@ -424,7 +565,9 @@ class ExecutionService:
                     reconciled=True,
                     reconcile_status=outcome.status.value,
                     reconcile_reason=outcome.reason,
-                    idempotency_key=(raw_intent.idempotency_key if raw_intent else payload_hash),
+                    idempotency_key=(
+                        raw_intent.idempotency_key if raw_intent else payload_hash
+                    ),
                     intent_id=(raw_intent.intent_id if raw_intent else None),
                 )
                 placed += 1
@@ -432,7 +575,9 @@ class ExecutionService:
 
             self.state_store.save_order(
                 order,
-                idempotency_key=(raw_intent.idempotency_key if raw_intent else payload_hash),
+                idempotency_key=(
+                    raw_intent.idempotency_key if raw_intent else payload_hash
+                ),
                 intent_id=(raw_intent.intent_id if raw_intent else None),
             )
             self.state_store.attach_action_metadata(
@@ -442,7 +587,9 @@ class ExecutionService:
                 reconciled=False,
                 reconcile_status=None,
                 reconcile_reason=None,
-                idempotency_key=(raw_intent.idempotency_key if raw_intent else payload_hash),
+                idempotency_key=(
+                    raw_intent.idempotency_key if raw_intent else payload_hash
+                ),
                 intent_id=(raw_intent.intent_id if raw_intent else None),
             )
             placed += 1
@@ -459,7 +606,9 @@ class ExecutionService:
     ) -> ReconcileOutcome:
         try:
             open_orders = self.exchange.get_open_orders(symbol_normalized)
-            snapshots = self._open_items_to_snapshots([*open_orders.bids, *open_orders.asks])
+            snapshots = self._open_items_to_snapshots(
+                [*open_orders.bids, *open_orders.asks]
+            )
             matched = match_order_by_client_id(snapshots, client_order_id)
             if matched is not None:
                 return ReconcileOutcome(
@@ -545,7 +694,9 @@ class ExecutionService:
                 start_ms=int((datetime.now(UTC).timestamp() - 3600) * 1000),
                 end_ms=int(datetime.now(UTC).timestamp() * 1000),
             )
-            matched = self._match_existing_order(order.order_id, order.client_order_id, recent)
+            matched = self._match_existing_order(
+                order.order_id, order.client_order_id, recent
+            )
             if matched is None:
                 return ReconcileOutcome(
                     status=ReconcileStatus.UNKNOWN,
@@ -610,9 +761,11 @@ class ExecutionService:
                     quantity=Decimal(str(item.quantity)),
                     status=ExchangeOrderStatus.OPEN,
                     timestamp=int(item.time),
-                    update_time=int(item.update_time)
-                    if getattr(item, "update_time", None) is not None
-                    else None,
+                    update_time=(
+                        int(item.update_time)
+                        if getattr(item, "update_time", None) is not None
+                        else None
+                    ),
                     status_raw=str(getattr(item, "status", "open")),
                 )
             )
