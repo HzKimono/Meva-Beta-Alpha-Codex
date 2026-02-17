@@ -18,6 +18,13 @@ class LiveSideEffectsPolicyResult:
     message: str
 
 
+@dataclass(frozen=True)
+class LiveSideEffectsPolicyResult:
+    allowed: bool
+    reasons: list[str]
+    message: str
+
+
 def validate_live_side_effects_policy(
     *,
     dry_run: bool,
