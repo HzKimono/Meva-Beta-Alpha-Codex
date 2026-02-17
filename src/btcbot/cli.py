@@ -682,7 +682,6 @@ def _print_effective_side_effects_state(
         settings, force_dry_run=force_dry_run, include_safe_mode=include_safe_mode
     )
     banner = _format_effective_side_effects_banner(inputs, policy)
-    logger.warning(banner) if not policy.allowed else logger.info(banner)
     print(banner)
 
 
@@ -739,7 +738,8 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     dry_run=dry_run,
                     ttl_seconds=settings.ttl_seconds,
                     kill_switch=(settings.kill_switch or effective_safe_mode),
-                    live_trading_enabled=settings.is_live_trading_enabled(),
+                    live_trading_enabled=settings.live_trading,
+                    live_trading_ack=settings.live_trading_ack == "I_UNDERSTAND",
                     safe_mode=effective_safe_mode,
                 )
                 accounting_service = AccountingService(exchange=exchange, state_store=state_store)

@@ -41,6 +41,10 @@ CANCEL_ORDER_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 class LiveTradingNotArmedError(RuntimeError):
     """Raised when a live side-effect is attempted without explicit arming."""
 
+    def __init__(self, message: str, reasons: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.reasons = tuple(reasons or ())
+
 
 class ExecutionService:
     def __init__(
@@ -52,6 +56,7 @@ class ExecutionService:
         ttl_seconds: int = 120,
         kill_switch: bool = True,
         live_trading_enabled: bool = False,
+        live_trading_ack: bool = False,
         safe_mode: bool = False,
         unknown_reprobe_initial_seconds: int = 30,
         unknown_reprobe_max_seconds: int = 900,
@@ -69,6 +74,7 @@ class ExecutionService:
         self.ttl_seconds = ttl_seconds
         self.kill_switch = kill_switch
         self.live_trading_enabled = live_trading_enabled
+        self.live_trading_ack = live_trading_ack
         self.safe_mode = safe_mode
         self.unknown_reprobe_initial_seconds = max(1, unknown_reprobe_initial_seconds)
         self.unknown_reprobe_max_seconds = max(
@@ -1193,9 +1199,10 @@ class ExecutionService:
             dry_run=self.dry_run,
             kill_switch=self.kill_switch,
             live_trading_enabled=self.live_trading_enabled,
+            live_trading_ack=self.live_trading_ack,
         )
         if not policy.allowed:
-            raise LiveTradingNotArmedError(policy.message)
+            raise LiveTradingNotArmedError(policy.message, reasons=policy.reasons)
 
     def _place_hash(self, intent: OrderIntent) -> str:
         raw = (

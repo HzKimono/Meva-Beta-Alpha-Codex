@@ -22,7 +22,7 @@ def validate_live_side_effects_policy(
     dry_run: bool,
     kill_switch: bool,
     live_trading_enabled: bool,
-    live_trading_ack: bool = True,
+    live_trading_ack: bool,
 ) -> LiveSideEffectsPolicyResult:
     reasons: list[str] = []
     message_fragments: list[str] = []
