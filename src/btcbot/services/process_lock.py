@@ -25,9 +25,46 @@ def _pid_file_path(lock_path: Path) -> Path:
     return lock_path.with_suffix(".pid")
 
 
+def _read_pid_text(pid_path: Path) -> str | None:
+    try:
+        text = pid_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _write_pid_file(pid_path: Path, pid: int) -> None:
+    tmp_path = pid_path.with_suffix(f".pid.{pid}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as pid_file:
+        pid_file.write(f"{pid}\n")
+        pid_file.flush()
+        os.fsync(pid_file.fileno())
+    os.replace(tmp_path, pid_path)
+
+
+def _remove_pid_file_if_owned(pid_path: Path, pid: int) -> None:
+    try:
+        pid_raw = pid_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if pid_raw != str(pid):
+        return
+    try:
+        pid_path.unlink()
+    except OSError:
+        return
+
+
 @contextmanager
 def single_instance_lock(*, db_path: str, account_key: str = "default"):
-    lock_key = f"{os.path.abspath(db_path)}::{account_key}"
+    """Acquire a singleton runtime lock.
+
+    This lock uses OS file locking (flock/msvcrt) and is intended for local filesystems.
+    Lock behavior over network filesystems (for example some NFS setups) may vary.
+    """
+
+    abs_db_path = os.path.abspath(db_path)
+    lock_key = f"{abs_db_path}::{account_key}"
     path = _lock_file_path(lock_key)
     pid_path = _pid_file_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,11 +86,24 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             lock_acquired = True
         except OSError as exc:
+            owner_pid = _read_pid_text(pid_path)
+            owner_text = f" owner_pid={owner_pid}" if owner_pid else ""
             raise RuntimeError(
-                f"Another btcbot instance is already running for db/account lock: {path}"
+                "LOCKED: Another btcbot instance is already running "
+                f"for db/account scope db_path={abs_db_path} account_key={account_key} "
+                f"lock_path={path}.{owner_text}"
             ) from exc
 
-        pid_path.write_text(f"{pid}\n", encoding="utf-8")
+        try:
+            fh.seek(0)
+            fh.truncate(0)
+            fh.write(f"{pid}\n".encode("utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        except OSError:
+            pass
+
+        _write_pid_file(pid_path, pid)
         yield ProcessLock(path=str(path), handle=fh, pid=pid)
     finally:
         try:
@@ -74,3 +124,5 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
             fh.close()
         except OSError:
             pass
+        if lock_acquired:
+            _remove_pid_file_if_owned(pid_path, pid)

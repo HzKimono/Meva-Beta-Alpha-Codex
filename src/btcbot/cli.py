@@ -323,12 +323,13 @@ def main() -> int:
     args = parser.parse_args()
     settings = _load_settings(args.env_file)
     setup_logging(settings.log_level)
-    configure_instrumentation(
-        enabled=bool(getattr(settings, "observability_enabled", False)),
-        metrics_exporter=str(getattr(settings, "observability_metrics_exporter", "none")),
-        otlp_endpoint=getattr(settings, "observability_otlp_endpoint", None),
-        prometheus_port=int(getattr(settings, "observability_prometheus_port", 9464)),
-    )
+    if args.command != "run":
+        configure_instrumentation(
+            enabled=bool(getattr(settings, "observability_enabled", False)),
+            metrics_exporter=str(getattr(settings, "observability_metrics_exporter", "none")),
+            otlp_endpoint=getattr(settings, "observability_otlp_endpoint", None),
+            prometheus_port=int(getattr(settings, "observability_prometheus_port", 9464)),
+        )
     settings = _apply_effective_universe(settings)
 
     if args.command in {"run", "stage4-run"}:
@@ -597,6 +598,12 @@ def run_stage3_runtime(
 ) -> int:
     try:
         with single_instance_lock(db_path=settings.state_db_path, account_key="stage3"):
+            configure_instrumentation(
+                enabled=bool(getattr(settings, "observability_enabled", False)),
+                metrics_exporter=str(getattr(settings, "observability_metrics_exporter", "none")),
+                otlp_endpoint=getattr(settings, "observability_otlp_endpoint", None),
+                prometheus_port=int(getattr(settings, "observability_prometheus_port", 9464)),
+            )
             return run_with_optional_loop(
                 command="run",
                 cycle_fn=lambda: run_cycle(settings, force_dry_run=force_dry_run),
