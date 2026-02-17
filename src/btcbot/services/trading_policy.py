@@ -5,9 +5,17 @@ from enum import StrEnum
 
 
 class PolicyBlockReason(StrEnum):
-    KILL_SWITCH = "kill_switch"
-    DRY_RUN = "dry_run"
-    LIVE_NOT_ARMED = "live_not_armed"
+    KILL_SWITCH = "KILL_SWITCH"
+    DRY_RUN = "DRY_RUN"
+    NOT_ARMED = "NOT_ARMED"
+    ACK_MISSING = "ACK_MISSING"
+
+
+@dataclass(frozen=True)
+class LiveSideEffectsPolicyResult:
+    allowed: bool
+    reasons: list[str]
+    message: str
 
 
 @dataclass(frozen=True)
@@ -28,17 +36,17 @@ def validate_live_side_effects_policy(
     message_fragments: list[str] = []
 
     if kill_switch:
-        reasons.append("KILL_SWITCH")
+        reasons.append(PolicyBlockReason.KILL_SWITCH.value)
         message_fragments.append(policy_block_message(PolicyBlockReason.KILL_SWITCH))
     if dry_run:
-        reasons.append("DRY_RUN")
+        reasons.append(PolicyBlockReason.DRY_RUN.value)
         message_fragments.append(policy_block_message(PolicyBlockReason.DRY_RUN))
     if not live_trading_enabled:
-        reasons.append("NOT_ARMED")
+        reasons.append(PolicyBlockReason.NOT_ARMED.value)
     if not live_trading_ack:
-        reasons.append("ACK_MISSING")
+        reasons.append(PolicyBlockReason.ACK_MISSING.value)
     if not live_trading_enabled or not live_trading_ack:
-        reasons_message = policy_block_message(PolicyBlockReason.LIVE_NOT_ARMED)
+        reasons_message = policy_block_message(PolicyBlockReason.NOT_ARMED)
         if not message_fragments:
             message_fragments.append(reasons_message)
 
@@ -58,8 +66,14 @@ def validate_live_side_effects_policy(
 
 
 def policy_block_message(reason: PolicyBlockReason) -> str:
-    if reason is PolicyBlockReason.KILL_SWITCH:
-        return "KILL_SWITCH=true blocks side effects"
-    if reason is PolicyBlockReason.DRY_RUN:
-        return "DRY_RUN=true blocks side effects"
-    return "Live trading is not armed; set LIVE_TRADING=true and LIVE_TRADING_ACK=I_UNDERSTAND"
+    messages = {
+        PolicyBlockReason.KILL_SWITCH: "KILL_SWITCH=true blocks side effects",
+        PolicyBlockReason.DRY_RUN: "DRY_RUN=true blocks side effects",
+        PolicyBlockReason.NOT_ARMED: (
+            "Live trading is not armed; set LIVE_TRADING=true and LIVE_TRADING_ACK=I_UNDERSTAND"
+        ),
+        PolicyBlockReason.ACK_MISSING: (
+            "Live trading is not armed; set LIVE_TRADING=true and LIVE_TRADING_ACK=I_UNDERSTAND"
+        ),
+    }
+    return messages[reason]
