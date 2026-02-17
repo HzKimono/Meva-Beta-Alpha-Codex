@@ -312,6 +312,14 @@ class Stage4CycleRunner:
                 )
 
             pnl_report = ledger_service.report(mark_prices=mark_prices, cash_try=try_cash)
+            ledger_checkpoint = ledger_service.checkpoint()
+            risk_budget_service.apply_self_financing_checkpoint(
+                cycle_id=cycle_id,
+                realized_pnl_total_try=pnl_report.realized_pnl_total,
+                ledger_event_count=ledger_checkpoint.event_count,
+                ledger_checkpoint_id=ledger_checkpoint.checkpoint_id,
+                seed_trading_capital_try=try_cash,
+            )
             current_open_orders = state_store.list_stage4_open_orders()
             positions = state_store.list_stage4_positions()
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}
