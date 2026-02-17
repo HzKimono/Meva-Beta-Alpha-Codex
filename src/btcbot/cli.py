@@ -820,14 +820,28 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 )
 
                 balances = portfolio_service.get_balances()
-                bids = market_data_service.get_best_bids(settings.symbols)
-
                 freshness = None
-                get_market_data_freshness = getattr(market_data_service, "get_market_data_freshness", None)
-                if callable(get_market_data_freshness):
-                    freshness = get_market_data_freshness(
+                get_bids_with_freshness = getattr(
+                    market_data_service,
+                    "get_best_bids_with_freshness",
+                    None,
+                )
+                if callable(get_bids_with_freshness):
+                    bids, freshness = get_bids_with_freshness(
+                        settings.symbols,
                         max_age_ms=settings.max_market_data_age_ms,
                     )
+                else:
+                    bids = market_data_service.get_best_bids(settings.symbols)
+                    get_market_data_freshness = getattr(
+                        market_data_service,
+                        "get_market_data_freshness",
+                        None,
+                    )
+                    if callable(get_market_data_freshness):
+                        freshness = get_market_data_freshness(
+                            max_age_ms=settings.max_market_data_age_ms,
+                        )
                 if freshness is not None and bool(getattr(freshness, "is_stale", False)):
                     observed_age_ms = getattr(freshness, "observed_age_ms", None)
                     max_age_ms = int(getattr(freshness, "max_age_ms", settings.max_market_data_age_ms))
@@ -903,6 +917,13 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 }
                 stale_count = len([symbol for symbol, price in bids.items() if price <= 0])
                 if settings.symbols:
+                    instrumentation.counter(
+                        "invalid_best_bid_count",
+                        stale_count,
+                        attrs={"cycle_id": cycle_id},
+                    )
+                    # Deprecated compatibility metric; retains prior behavior
+                    # (count of non-positive best bids) under the old name.
                     instrumentation.counter(
                         "stale_market_data_rate",
                         stale_count,

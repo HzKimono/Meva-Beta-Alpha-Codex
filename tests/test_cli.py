@@ -1466,12 +1466,9 @@ def test_run_cycle_stale_market_data_fail_closed(monkeypatch, caplog) -> None:
         def __init__(self, exchange, **kwargs) -> None:
             del exchange, kwargs
 
-        def get_best_bids(self, symbols):
-            return {symbol: 100.0 for symbol in symbols}
-
-        def get_market_data_freshness(self, *, max_age_ms: int):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del max_age_ms
-            return Freshness()
+            return {symbol: 100.0 for symbol in symbols}, Freshness()
 
     class FakeExecutionService:
         def __init__(self, **kwargs) -> None:

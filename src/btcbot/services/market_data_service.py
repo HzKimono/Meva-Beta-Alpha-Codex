@@ -37,12 +37,7 @@ class MarketDataProvider:
 
 
 class RestMarketDataProvider(MarketDataProvider):
-    def __init__(
-        self,
-        *,
-        exchange: ExchangeClient,
-        now_provider: Callable[[], datetime],
-    ) -> None:
+    def __init__(self, *, exchange: ExchangeClient, now_provider: Callable[[], datetime]) -> None:
         self.exchange = exchange
         self.now_provider = now_provider
 
@@ -72,20 +67,22 @@ class WsMarketDataProvider(MarketDataProvider):
 
     def get_snapshot(self, symbols: list[str]) -> MarketDataSnapshot:
         bids: dict[str, float] = {}
-        seen_ts: list[datetime] = []
+        seen_timestamps: list[datetime] = []
         missing_symbols: list[str] = []
+
         for symbol in symbols:
             cached = self._best_bids.get(symbol)
             if cached is None:
                 missing_symbols.append(symbol)
                 continue
-            bid, ts = cached
+            bid, observed_at = cached
             bids[symbol] = bid
-            seen_ts.append(ts)
+            seen_timestamps.append(observed_at)
+
         return MarketDataSnapshot(
             bids=bids,
             source="ws",
-            fetched_at=min(seen_ts) if seen_ts else None,
+            fetched_at=min(seen_timestamps) if seen_timestamps else None,
             connected=self._connected,
             missing_symbols=tuple(sorted(missing_symbols)),
         )
@@ -100,7 +97,7 @@ class MarketDataService:
         mode: str = "rest",
         ws_rest_fallback: bool = False,
         now_provider: Callable[[], datetime] | None = None,
-    ):
+    ) -> None:
         self.exchange = exchange
         self.rules_cache_ttl_seconds = rules_cache_ttl_seconds
         self._rules_cache: dict[str, SymbolRules] = {}
@@ -116,47 +113,48 @@ class MarketDataService:
         return self.exchange.get_orderbook(symbol)
 
     def get_best_bids(self, symbols: list[str]) -> dict[str, float]:
-        snapshot = self._resolve_provider_snapshot(symbols)
+        # Backwards-compatible API for existing callers.
+        snapshot = self._resolve_snapshot(symbols)
         self._last_snapshot = snapshot
         return snapshot.bids
 
-    def _resolve_provider_snapshot(self, symbols: list[str]) -> MarketDataSnapshot:
+    def get_best_bids_with_freshness(
+        self,
+        symbols: list[str],
+        *,
+        max_age_ms: int,
+    ) -> tuple[dict[str, float], MarketDataFreshness]:
+        """Deterministic API for Stage3: bids and freshness come from the same snapshot."""
+        snapshot = self._resolve_snapshot(symbols)
+        freshness = self._freshness_from_snapshot(snapshot=snapshot, max_age_ms=max_age_ms)
+
+        # WS policy: if enabled, fallback to REST when WS snapshot is not usable.
+        if self.mode == "ws" and self.ws_rest_fallback and freshness.is_stale:
+            fallback_snapshot = self._rest_provider.get_snapshot(symbols)
+            fallback_snapshot = MarketDataSnapshot(
+                bids=fallback_snapshot.bids,
+                source="rest_fallback",
+                fetched_at=fallback_snapshot.fetched_at,
+                connected=fallback_snapshot.connected,
+                missing_symbols=fallback_snapshot.missing_symbols,
+            )
+            snapshot = fallback_snapshot
+            freshness = self._freshness_from_snapshot(snapshot=snapshot, max_age_ms=max_age_ms)
+
+        self._last_snapshot = snapshot
+        return snapshot.bids, freshness
+
+    def _resolve_snapshot(self, symbols: list[str]) -> MarketDataSnapshot:
         if self.mode == "ws":
-            ws_snapshot = self._ws_provider.get_snapshot(symbols)
-            if (
-                self.ws_rest_fallback
-                and (
-                    not ws_snapshot.connected
-                    or bool(ws_snapshot.missing_symbols)
-                    or ws_snapshot.fetched_at is None
-                )
-            ):
-                return self._rest_provider.get_snapshot(symbols)
-            return ws_snapshot
+            return self._ws_provider.get_snapshot(symbols)
         return self._rest_provider.get_snapshot(symbols)
 
-    def set_ws_connected(self, connected: bool) -> None:
-        self._ws_provider.set_connected(connected)
-
-    def ingest_ws_best_bid(self, symbol: str, bid: float, *, observed_at: datetime | None = None) -> None:
-        self._ws_provider.ingest_best_bid(
-            symbol,
-            bid,
-            observed_at=observed_at or self.now_provider(),
-        )
-
-    def get_market_data_freshness(self, *, max_age_ms: int) -> MarketDataFreshness:
-        snapshot = self._last_snapshot
-        if snapshot is None:
-            return MarketDataFreshness(
-                is_stale=True,
-                observed_age_ms=None,
-                max_age_ms=max_age_ms,
-                source_mode=self.mode,
-                connected=False,
-                missing_symbols=(),
-            )
-
+    def _freshness_from_snapshot(
+        self,
+        *,
+        snapshot: MarketDataSnapshot,
+        max_age_ms: int,
+    ) -> MarketDataFreshness:
         observed_age_ms: int | None = None
         if snapshot.fetched_at is not None:
             observed_age_ms = int((self.now_provider() - snapshot.fetched_at).total_seconds() * 1000)
@@ -175,6 +173,31 @@ class MarketDataService:
             source_mode=snapshot.source,
             connected=snapshot.connected,
             missing_symbols=snapshot.missing_symbols,
+        )
+
+    def get_market_data_freshness(self, *, max_age_ms: int) -> MarketDataFreshness:
+        # Backwards-compatible API. Deterministic callers should use
+        # get_best_bids_with_freshness() instead.
+        snapshot = self._last_snapshot
+        if snapshot is None:
+            return MarketDataFreshness(
+                is_stale=True,
+                observed_age_ms=None,
+                max_age_ms=max_age_ms,
+                source_mode=self.mode,
+                connected=False,
+                missing_symbols=(),
+            )
+        return self._freshness_from_snapshot(snapshot=snapshot, max_age_ms=max_age_ms)
+
+    def set_ws_connected(self, connected: bool) -> None:
+        self._ws_provider.set_connected(connected)
+
+    def ingest_ws_best_bid(self, symbol: str, bid: float, *, observed_at: datetime | None = None) -> None:
+        self._ws_provider.ingest_best_bid(
+            symbol,
+            bid,
+            observed_at=observed_at or self.now_provider(),
         )
 
     def _cache_expired(self, now: datetime) -> bool:

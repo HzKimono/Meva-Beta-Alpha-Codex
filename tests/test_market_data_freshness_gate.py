@@ -18,20 +18,18 @@ class _FakeExchange:
         return []
 
 
-def test_market_data_freshness_rest_age_computed_from_fetch_time() -> None:
+def test_market_data_deterministic_api_returns_bids_and_freshness_same_snapshot() -> None:
     now = datetime(2025, 1, 1, tzinfo=UTC)
 
     def _clock() -> datetime:
         return now
 
     service = MarketDataService(exchange=_FakeExchange(), mode="rest", now_provider=_clock)
-    service.get_best_bids(["BTC_TRY"])
+    bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY"], max_age_ms=500)
 
-    now = now + timedelta(milliseconds=250)
-    freshness = service.get_market_data_freshness(max_age_ms=500)
-
+    assert bids["BTC_TRY"] == 100.0
     assert freshness.is_stale is False
-    assert freshness.observed_age_ms == 250
+    assert freshness.observed_age_ms == 0
 
 
 def test_market_data_freshness_ws_disconnected_is_stale() -> None:
@@ -43,15 +41,14 @@ def test_market_data_freshness_ws_disconnected_is_stale() -> None:
     service = MarketDataService(exchange=_FakeExchange(), mode="ws", now_provider=_clock)
     service.ingest_ws_best_bid("BTC_TRY", 100.0)
     service.set_ws_connected(False)
-    service.get_best_bids(["BTC_TRY"])
 
-    freshness = service.get_market_data_freshness(max_age_ms=1_000)
+    _bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY"], max_age_ms=1_000)
 
     assert freshness.is_stale is True
     assert freshness.connected is False
 
 
-def test_market_data_freshness_ws_age_stale_when_too_old() -> None:
+def test_market_data_freshness_ws_age_stale_without_fallback() -> None:
     now = datetime(2025, 1, 1, tzinfo=UTC)
 
     def _clock() -> datetime:
@@ -60,10 +57,35 @@ def test_market_data_freshness_ws_age_stale_when_too_old() -> None:
     service = MarketDataService(exchange=_FakeExchange(), mode="ws", now_provider=_clock)
     service.set_ws_connected(True)
     service.ingest_ws_best_bid("BTC_TRY", 100.0)
-    service.get_best_bids(["BTC_TRY"])
-
     now = now + timedelta(milliseconds=2_000)
-    freshness = service.get_market_data_freshness(max_age_ms=500)
+
+    _bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY"], max_age_ms=500)
 
     assert freshness.is_stale is True
     assert freshness.observed_age_ms == 2000
+    assert freshness.source_mode == "ws"
+
+
+def test_market_data_ws_age_stale_falls_back_to_rest_when_enabled() -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+
+    def _clock() -> datetime:
+        return now
+
+    exchange = _FakeExchange()
+    service = MarketDataService(
+        exchange=exchange,
+        mode="ws",
+        ws_rest_fallback=True,
+        now_provider=_clock,
+    )
+    service.set_ws_connected(True)
+    service.ingest_ws_best_bid("BTC_TRY", 100.0)
+    now = now + timedelta(milliseconds=2_000)
+
+    bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY"], max_age_ms=500)
+
+    assert bids["BTC_TRY"] == 100.0
+    assert freshness.is_stale is False
+    assert freshness.source_mode == "rest_fallback"
+    assert exchange.orderbook_hits == 1

@@ -48,9 +48,14 @@ class Settings(BaseSettings):
         default=60,
         alias="BTCTURK_CLOCK_SYNC_INTERVAL_SECONDS",
     )
-    btcturk_marketdata_max_age_ms: int = Field(
+    market_data_mode: str = Field(default="rest", alias="MARKET_DATA_MODE")
+    max_market_data_age_ms: int = Field(
         default=15_000,
-        alias="BTCTURK_MARKETDATA_MAX_AGE_MS",
+        validation_alias=AliasChoices("MAX_MARKET_DATA_AGE_MS", "BTCTURK_MARKETDATA_MAX_AGE_MS"),
+    )
+    ws_market_data_rest_fallback: bool = Field(
+        default=False,
+        alias="WS_MARKET_DATA_REST_FALLBACK",
     )
     market_data_mode: str = Field(default="rest", alias="MARKET_DATA_MODE")
     max_market_data_age_ms: int = Field(default=15_000, alias="MAX_MARKET_DATA_AGE_MS")
@@ -668,6 +673,17 @@ class Settings(BaseSettings):
                 "STAGE7_LOSS_GUARDRAIL_MODE must be one of: reduce_risk_only,observe_only"
             )
         return normalized
+
+
+    @model_validator(mode="after")
+    def validate_market_data_settings(self) -> Settings:
+        if self.market_data_mode == "ws" and not self.btcturk_ws_enabled:
+            raise ValueError("MARKET_DATA_MODE=ws requires BTCTURK_WS_ENABLED=true")
+        if self.market_data_mode == "rest" and self.ws_market_data_rest_fallback:
+            raise ValueError(
+                "WS_MARKET_DATA_REST_FALLBACK=true is only valid when MARKET_DATA_MODE=ws"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_stage7_safety(self) -> Settings:
