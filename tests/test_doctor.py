@@ -118,7 +118,7 @@ def test_doctor_missing_dataset_fail_actions(capsys) -> None:
     json_out = capsys.readouterr().out.strip()
     payload = json.loads(json_out)
     assert json_code == 2
-    assert payload["status"] == "fail"
+    assert payload["status"] == "FAIL"
     assert any("replay-init" in action for action in payload["actions"])
 
 
@@ -458,3 +458,52 @@ def test_doctor_drawdown_pct_normalizes_ratio_style_value() -> None:
         drawdown_ratio=None,
     )
     assert metrics["max_drawdown_ratio"] == pytest.approx(0.12)
+
+
+def test_main_doctor_without_stage7_db_is_warn(monkeypatch, capsys) -> None:
+    from btcbot.services.effective_universe import EffectiveUniverse
+
+    monkeypatch.setattr(cli, "_resolve_stage7_db_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "btcbot.services.doctor.resolve_effective_universe",
+        lambda settings: EffectiveUniverse(
+            symbols=["BTCTRY"],
+            rejected_symbols=[],
+            metadata_available=True,
+            source="test",
+            suggestions={},
+            auto_corrected_symbols={},
+        ),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.doctor.build_exchange_stage4",
+        lambda settings, dry_run: _DoctorExchange(
+            [
+                {
+                    "name": "BTCTRY",
+                    "nameNormalized": "BTC_TRY",
+                    "numeratorScale": 8,
+                    "denominatorScale": 2,
+                    "filters": [
+                        {
+                            "filterType": "PRICE_FILTER",
+                            "tickSize": "1",
+                            "minExchangeValue": "100",
+                        }
+                    ],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["btcbot", "doctor", "--json"])
+
+    code = cli.main()
+
+    assert code == 1
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert payload["status"] == "WARN"
+    assert any(
+        check["category"] == "slo" and check["name"] == "coverage" and check["status"] == "warn"
+        for check in payload["checks"]
+    )

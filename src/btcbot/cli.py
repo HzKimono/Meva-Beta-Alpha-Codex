@@ -434,11 +434,13 @@ def main() -> int:
         return run_stage7_db_count(settings=settings, db_path=args.db)
 
     if args.command == "doctor":
+        # Doctor remains runnable without DB on first-time setup; SLO coverage then warns/skips.
         resolved_db_path = _resolve_stage7_db_path(
-            "doctor", db_path=args.db, settings_db_path=settings.state_db_path
+            "doctor",
+            db_path=args.db,
+            settings_db_path=settings.state_db_path,
+            silent=True,
         )
-        if resolved_db_path is None:
-            return 2
         return run_doctor(
             settings=settings,
             db_path=resolved_db_path,
@@ -1269,7 +1271,11 @@ def _csv_safe_value(value: object) -> object:
 
 
 def _resolve_stage7_db_path(
-    command: str, *, db_path: str | None, settings_db_path: str | None = None
+    command: str,
+    *,
+    db_path: str | None,
+    settings_db_path: str | None = None,
+    silent: bool = False,
 ) -> str | None:
     candidate = db_path.strip() if db_path and db_path.strip() else None
     if candidate is None:
@@ -1280,9 +1286,10 @@ def _resolve_stage7_db_path(
     if candidate is not None:
         return candidate
 
-    print(f"{command}: missing database path.")
-    print("Provide --db <path> or set STATE_DB_PATH.")
-    print(f"Example: btcbot {command} --db ./btcbot_state.db")
+    if not silent:
+        print(f"{command}: missing database path.")
+        print("Provide --db <path> or set STATE_DB_PATH.")
+        print(f"Example: btcbot {command} --db ./btcbot_state.db")
     return None
 
 
@@ -1771,7 +1778,7 @@ def run_replay_capture(
 
 
 def _doctor_report_json(report: DoctorReport) -> str:
-    status = doctor_status(report)
+    status = doctor_status(report).upper()
     payload = {
         "status": status,
         "ok": report.ok,
