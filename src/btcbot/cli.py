@@ -44,6 +44,7 @@ from btcbot.services.doctor import (
     DoctorReport,
     doctor_status,
     evaluate_slo_status_for_rows,
+    normalize_drawdown_ratio,
     run_health_checks,
 )
 from btcbot.services.effective_universe import resolve_effective_universe
@@ -1301,8 +1302,11 @@ def run_stage7_report(
     rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
     ledger_metrics = store.get_latest_stage7_ledger_metrics()
     drawdown_ratio = (
-        float(ledger_metrics["max_drawdown_ratio"])
-        if ledger_metrics and "max_drawdown_ratio" in ledger_metrics
+        normalize_drawdown_ratio(
+            ledger_metrics.get("max_drawdown_ratio") if ledger_metrics is not None else None,
+            ledger_metrics.get("max_drawdown_pct") if ledger_metrics is not None else None,
+        )
+        if ledger_metrics is not None
         else None
     )
     enriched_rows: list[dict[str, object]] = []
@@ -1310,7 +1314,10 @@ def run_stage7_report(
         cycle_status, _, _ = evaluate_slo_status_for_rows(
             settings,
             [row],
-            drawdown_ratio=float(row.get("max_drawdown_ratio") or row.get("max_drawdown_pct") or 0),
+            drawdown_ratio=normalize_drawdown_ratio(
+                row.get("max_drawdown_ratio"),
+                row.get("max_drawdown_pct"),
+            ),
         )
         enriched_rows.append({**row, "slo_status": cycle_status})
 

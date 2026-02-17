@@ -197,6 +197,21 @@ def run_health_checks(
     return report
 
 
+def normalize_drawdown_ratio(
+    max_drawdown_ratio: object | None,
+    max_drawdown_pct: object | None,
+) -> float:
+    raw_value: float
+    if max_drawdown_ratio is not None:
+        raw_value = float(max_drawdown_ratio)
+    elif max_drawdown_pct is not None:
+        pct_val = float(max_drawdown_pct)
+        raw_value = pct_val / 100.0 if pct_val > 1.0 else pct_val
+    else:
+        raw_value = 0.0
+    return max(0.0, raw_value)
+
+
 def evaluate_slo_status_for_rows(
     settings: Settings,
     rows: Sequence[dict[str, object]],
@@ -215,7 +230,10 @@ def evaluate_slo_status_for_rows(
     latency_p95_ms = _p95_latency(latencies)
     if drawdown_ratio is None:
         latest = rows[0]
-        drawdown_ratio = float(latest.get("max_drawdown_ratio") or latest.get("max_drawdown_pct") or 0)
+        drawdown_ratio = normalize_drawdown_ratio(
+            latest.get("max_drawdown_ratio"),
+            latest.get("max_drawdown_pct"),
+        )
 
     metrics = {
         "reject_rate": reject_rate,
@@ -311,8 +329,11 @@ def _run_slo_checks(
     rows = store.fetch_stage7_run_metrics(limit=settings.doctor_slo_lookback, order_desc=True)
     ledger_metrics = store.get_latest_stage7_ledger_metrics()
     drawdown_ratio = (
-        float(ledger_metrics["max_drawdown_ratio"])
-        if ledger_metrics and "max_drawdown_ratio" in ledger_metrics
+        normalize_drawdown_ratio(
+            ledger_metrics.get("max_drawdown_ratio") if ledger_metrics is not None else None,
+            ledger_metrics.get("max_drawdown_pct") if ledger_metrics is not None else None,
+        )
+        if ledger_metrics is not None
         else None
     )
     status, metrics, violations = evaluate_slo_status_for_rows(

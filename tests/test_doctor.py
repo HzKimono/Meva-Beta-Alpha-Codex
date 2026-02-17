@@ -301,42 +301,52 @@ def test_doctor_reports_effective_universe_and_source(monkeypatch) -> None:
     assert any("INVALIDTRY" in w for w in report.warnings)
 
 
-def _seed_stage7_row(store, *, cycle_id: str, ts: str, submitted: int, filled: int, rejected: int, latency_ms_total: int, drawdown: str = "0.01") -> None:
-    store.save_stage7_run_metrics(
-        cycle_id,
-        {
-            "ts": ts,
-            "run_id": "r1",
-            "mode_base": "NORMAL",
-            "mode_final": "NORMAL",
-            "universe_size": 1,
-            "intents_planned_count": 1,
-            "intents_skipped_count": 0,
-            "oms_submitted_count": submitted,
-            "oms_filled_count": filled,
-            "oms_rejected_count": rejected,
-            "oms_canceled_count": 0,
-            "events_appended": 1,
-            "events_ignored": 0,
-            "equity_try": "100",
-            "gross_pnl_try": "2",
-            "net_pnl_try": "1",
-            "fees_try": "0.2",
-            "slippage_try": "0.1",
-            "max_drawdown_pct": drawdown,
-            "max_drawdown_ratio": drawdown,
-            "turnover_try": "50",
-            "latency_ms_total": latency_ms_total,
-            "selection_ms": 0,
-            "planning_ms": 0,
-            "intents_ms": 0,
-            "oms_ms": 0,
-            "ledger_ms": 0,
-            "persist_ms": 0,
-            "quality_flags": {"throttled": False},
-            "alert_flags": {"drawdown_breach": False},
-        },
-    )
+def _seed_stage7_row(
+    store,
+    *,
+    cycle_id: str,
+    ts: str,
+    submitted: int,
+    filled: int,
+    rejected: int,
+    latency_ms_total: int,
+    drawdown_pct: str = "0.01",
+    drawdown_ratio: str | None = "0.01",
+) -> None:
+    metrics = {
+        "ts": ts,
+        "run_id": "r1",
+        "mode_base": "NORMAL",
+        "mode_final": "NORMAL",
+        "universe_size": 1,
+        "intents_planned_count": 1,
+        "intents_skipped_count": 0,
+        "oms_submitted_count": submitted,
+        "oms_filled_count": filled,
+        "oms_rejected_count": rejected,
+        "oms_canceled_count": 0,
+        "events_appended": 1,
+        "events_ignored": 0,
+        "equity_try": "100",
+        "gross_pnl_try": "2",
+        "net_pnl_try": "1",
+        "fees_try": "0.2",
+        "slippage_try": "0.1",
+        "max_drawdown_pct": drawdown_pct,
+        "turnover_try": "50",
+        "latency_ms_total": latency_ms_total,
+        "selection_ms": 0,
+        "planning_ms": 0,
+        "intents_ms": 0,
+        "oms_ms": 0,
+        "ledger_ms": 0,
+        "persist_ms": 0,
+        "quality_flags": {"throttled": False},
+        "alert_flags": {"drawdown_breach": False},
+    }
+    if drawdown_ratio is not None:
+        metrics["max_drawdown_ratio"] = drawdown_ratio
+    store.save_stage7_run_metrics(cycle_id, metrics)
 
 
 def test_doctor_exit_codes(capsys, tmp_path: Path, monkeypatch) -> None:
@@ -412,3 +422,39 @@ def test_doctor_slo_fail_on_reject_rate(tmp_path: Path) -> None:
     reject_checks = [c for c in report.checks if c.category == "slo" and c.name == "reject_rate"]
     assert reject_checks
     assert reject_checks[-1].status == "fail"
+
+
+def test_doctor_drawdown_pct_normalizes_percent_value() -> None:
+    row = {
+        "oms_submitted_count": 10,
+        "oms_filled_count": 10,
+        "oms_rejected_count": 0,
+        "latency_ms_total": 10,
+        "max_drawdown_pct": "12.0",
+    }
+    from btcbot.services.doctor import evaluate_slo_status_for_rows
+
+    _status, metrics, _violations = evaluate_slo_status_for_rows(
+        Settings(),
+        [row],
+        drawdown_ratio=None,
+    )
+    assert metrics["max_drawdown_ratio"] == pytest.approx(0.12)
+
+
+def test_doctor_drawdown_pct_normalizes_ratio_style_value() -> None:
+    row = {
+        "oms_submitted_count": 10,
+        "oms_filled_count": 10,
+        "oms_rejected_count": 0,
+        "latency_ms_total": 10,
+        "max_drawdown_pct": "0.12",
+    }
+    from btcbot.services.doctor import evaluate_slo_status_for_rows
+
+    _status, metrics, _violations = evaluate_slo_status_for_rows(
+        Settings(),
+        [row],
+        drawdown_ratio=None,
+    )
+    assert metrics["max_drawdown_ratio"] == pytest.approx(0.12)
