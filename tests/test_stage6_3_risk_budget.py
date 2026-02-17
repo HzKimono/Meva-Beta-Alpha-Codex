@@ -145,6 +145,13 @@ def test_compute_decision_invalid_stored_mode_is_safe() -> None:
                 "fees_day": "2026-01-01",
             }
 
+        def get_capital_policy_state(self):
+            return None
+
+        def upsert_capital_policy_state(self, **kwargs):
+            del kwargs
+            return None
+
     fixed_now = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
     service = RiskBudgetService(FakeStore(), now_provider=lambda: fixed_now)  # type: ignore[arg-type]
     pnl_report = PnlReport(

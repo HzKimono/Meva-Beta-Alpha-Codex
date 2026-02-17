@@ -39,8 +39,6 @@ class BudgetDecision:
         return self.budget_view.available_risk_capital_try
 
 
-
-
 @dataclass(frozen=True)
 class CapitalPolicyResult:
     trading_capital_try: Decimal
@@ -48,6 +46,10 @@ class CapitalPolicyResult:
     realized_pnl_delta_try: Decimal
     checkpoint_id: str
     applied: bool
+
+class CapitalPolicyError(RuntimeError):
+    pass
+
 
 class RiskBudgetService:
     def __init__(
@@ -66,22 +68,43 @@ class RiskBudgetService:
         *,
         cycle_id: str,
         realized_pnl_total_try: Decimal,
+        ledger_event_count: int,
         ledger_checkpoint_id: str,
         seed_trading_capital_try: Decimal,
     ) -> CapitalPolicyResult:
-        state = self.state_store.get_capital_policy_state()
-        if state is None:
-            trading_capital = seed_trading_capital_try
-            treasury = Decimal("0")
-            last_realized_total = Decimal("0")
-            last_checkpoint = None
-        else:
-            trading_capital = Decimal(str(state["trading_capital_try"]))
-            treasury = Decimal(str(state["treasury_try"]))
-            last_realized_total = Decimal(str(state["last_realized_pnl_total_try"]))
-            last_checkpoint = state.get("last_checkpoint_id")
+        state = self._load_or_init_capital_state(
+            cycle_id=cycle_id,
+            seed_trading_capital_try=seed_trading_capital_try,
+            seed_realized_total_try=Decimal("0"),
+        )
+        trading_capital = Decimal(str(state["trading_capital_try"]))
+        treasury = Decimal(str(state["treasury_try"]))
+        last_realized_total = Decimal(str(state["last_realized_pnl_total_try"]))
+        last_event_count = int(state.get("last_event_count", 0) or 0)
 
-        if last_checkpoint == ledger_checkpoint_id:
+        if ledger_event_count < last_event_count:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "capital_policy",
+                    "reason_code": "capital_error:non_monotonic_checkpoint",
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {
+                        "checkpoint_id": ledger_checkpoint_id,
+                        "last_event_count": last_event_count,
+                        "ledger_event_count": ledger_event_count,
+                    },
+                },
+            )
+            raise CapitalPolicyError(
+                "non_monotonic_ledger_checkpoint "
+                f"last_event_count={last_event_count} "
+                f"ledger_event_count={ledger_event_count}"
+            )
+
+        if ledger_event_count == last_event_count:
             emit_decision(
                 logger,
                 {
@@ -91,29 +114,8 @@ class RiskBudgetService:
                     "action": "SUPPRESS",
                     "payload": {
                         "checkpoint_id": ledger_checkpoint_id,
+                        "ledger_event_count": ledger_event_count,
                         "realized_pnl_total_try": str(realized_pnl_total_try),
-                    },
-                },
-            )
-            return CapitalPolicyResult(
-                trading_capital_try=trading_capital,
-                treasury_try=treasury,
-                realized_pnl_delta_try=Decimal("0"),
-                checkpoint_id=ledger_checkpoint_id,
-                applied=False,
-            )
-
-        if last_checkpoint is not None and ledger_checkpoint_id < last_checkpoint:
-            emit_decision(
-                logger,
-                {
-                    "cycle_id": cycle_id,
-                    "decision_layer": "capital_policy",
-                    "reason_code": "capital_error:non_monotonic_checkpoint",
-                    "action": "BLOCK",
-                    "payload": {
-                        "checkpoint_id": ledger_checkpoint_id,
-                        "last_checkpoint_id": last_checkpoint,
                     },
                 },
             )
@@ -131,13 +133,35 @@ class RiskBudgetService:
             treasury_try=treasury,
             realized_pnl_delta_try=realized_delta,
         )
-        next_trading = max(Decimal("0"), next_trading)
-        next_treasury = max(Decimal("0"), next_treasury)
+
+        if next_trading < 0 or next_treasury < 0:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "capital_policy",
+                    "reason_code": "capital_error:negative_capital",
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {
+                        "checkpoint_id": ledger_checkpoint_id,
+                        "ledger_event_count": ledger_event_count,
+                        "realized_pnl_delta_try": str(realized_delta),
+                        "trading_capital_try_next": str(next_trading),
+                        "treasury_try_next": str(next_treasury),
+                    },
+                },
+            )
+            raise CapitalPolicyError(
+                "negative_capital_state "
+                f"trading_capital_try_next={next_trading} treasury_try_next={next_treasury}"
+            )
 
         self.state_store.upsert_capital_policy_state(
             trading_capital_try=next_trading,
             treasury_try=next_treasury,
             last_realized_pnl_total_try=realized_pnl_total_try,
+            last_event_count=ledger_event_count,
             last_checkpoint_id=ledger_checkpoint_id,
             last_cycle_id=cycle_id,
         )
@@ -155,6 +179,7 @@ class RiskBudgetService:
                 "action": "SUBMIT",
                 "payload": {
                     "checkpoint_id": ledger_checkpoint_id,
+                    "ledger_event_count": ledger_event_count,
                     "realized_pnl_total_try": str(realized_pnl_total_try),
                     "realized_pnl_delta_try": str(realized_delta),
                     "trading_capital_try_prev": str(trading_capital),
@@ -230,12 +255,17 @@ class RiskBudgetService:
             signals=signals,
             decided_at=decided_at,
         )
+        capital_state = self._load_or_init_capital_state(
+            cycle_id=f"{today.isoformat()}:compute_decision",
+            seed_trading_capital_try=pnl_report.equity_estimate,
+            seed_realized_total_try=pnl_report.realized_pnl_total,
+        )
         accounting = PortfolioAccountingState(
             as_of=decided_at,
-            balances_try={"TRY": pnl_report.equity_estimate},
+            balances_try={"TRY": Decimal(str(capital_state["trading_capital_try"]))},
             locked_try={},
-            treasury_try=Decimal("0"),
-            trading_capital_try=pnl_report.equity_estimate,
+            treasury_try=Decimal(str(capital_state["treasury_try"])),
+            trading_capital_try=Decimal(str(capital_state["trading_capital_try"])),
             realized_pnl_try=Decimal("0"),
             unrealized_pnl_try=Decimal("0"),
             fees_try=Decimal("0"),
@@ -271,6 +301,36 @@ class RiskBudgetService:
             ),
         )
         return decision, prev_mode, peak_equity, fees_today, today
+
+    def _load_or_init_capital_state(
+        self,
+        *,
+        cycle_id: str,
+        seed_trading_capital_try: Decimal,
+        seed_realized_total_try: Decimal,
+    ) -> dict[str, str | int]:
+        state = self.state_store.get_capital_policy_state()
+        if state is not None:
+            return state
+        self.state_store.upsert_capital_policy_state(
+            trading_capital_try=seed_trading_capital_try,
+            treasury_try=Decimal("0"),
+            last_realized_pnl_total_try=seed_realized_total_try,
+            last_event_count=0,
+            last_checkpoint_id=None,
+            last_cycle_id=cycle_id,
+        )
+        persisted = self.state_store.get_capital_policy_state()
+        if persisted is not None:
+            return persisted
+        return {
+            "trading_capital_try": str(seed_trading_capital_try),
+            "treasury_try": "0",
+            "last_realized_pnl_total_try": str(seed_realized_total_try),
+            "last_event_count": 0,
+            "last_checkpoint_id": None,
+            "last_cycle_id": cycle_id,
+        }
 
     def persist_decision(
         self,

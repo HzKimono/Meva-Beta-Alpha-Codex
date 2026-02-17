@@ -316,6 +316,7 @@ class Stage4CycleRunner:
             risk_budget_service.apply_self_financing_checkpoint(
                 cycle_id=cycle_id,
                 realized_pnl_total_try=pnl_report.realized_pnl_total,
+                ledger_event_count=ledger_checkpoint.event_count,
                 ledger_checkpoint_id=ledger_checkpoint.checkpoint_id,
                 seed_trading_capital_try=try_cash,
             )

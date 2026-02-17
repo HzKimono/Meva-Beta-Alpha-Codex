@@ -1707,12 +1707,22 @@ class StateStore:
                 trading_capital_try TEXT NOT NULL,
                 treasury_try TEXT NOT NULL,
                 last_realized_pnl_total_try TEXT NOT NULL,
+                last_event_count INTEGER NOT NULL DEFAULT 0,
                 last_checkpoint_id TEXT,
                 last_cycle_id TEXT,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        capital_policy_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(capital_policy_state)")
+        }
+        if "last_event_count" not in capital_policy_columns:
+            conn.execute(
+                "ALTER TABLE capital_policy_state ADD COLUMN "
+                "last_event_count INTEGER NOT NULL DEFAULT 0"
+            )
 
         conn.execute(
             """
@@ -3037,7 +3047,7 @@ class StateStore:
             )
         return bool(cur.rowcount)
 
-    def get_capital_policy_state(self) -> dict[str, str] | None:
+    def get_capital_policy_state(self) -> dict[str, str | int] | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM capital_policy_state WHERE state_key = 'primary'"
@@ -3050,6 +3060,7 @@ class StateStore:
         trading_capital_try: Decimal,
         treasury_try: Decimal,
         last_realized_pnl_total_try: Decimal,
+        last_event_count: int,
         last_checkpoint_id: str | None,
         last_cycle_id: str,
     ) -> None:
@@ -3061,15 +3072,17 @@ class StateStore:
                     trading_capital_try,
                     treasury_try,
                     last_realized_pnl_total_try,
+                    last_event_count,
                     last_checkpoint_id,
                     last_cycle_id,
                     updated_at
                 )
-                VALUES ('primary', ?, ?, ?, ?, ?, ?)
+                VALUES ('primary', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(state_key) DO UPDATE SET
                     trading_capital_try=excluded.trading_capital_try,
                     treasury_try=excluded.treasury_try,
                     last_realized_pnl_total_try=excluded.last_realized_pnl_total_try,
+                    last_event_count=excluded.last_event_count,
                     last_checkpoint_id=excluded.last_checkpoint_id,
                     last_cycle_id=excluded.last_cycle_id,
                     updated_at=excluded.updated_at
@@ -3078,6 +3091,7 @@ class StateStore:
                     str(trading_capital_try),
                     str(treasury_try),
                     str(last_realized_pnl_total_try),
+                    int(last_event_count),
                     last_checkpoint_id,
                     last_cycle_id,
                     datetime.now(UTC).isoformat(),
