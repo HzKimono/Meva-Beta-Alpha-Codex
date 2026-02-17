@@ -342,6 +342,10 @@ def test_runner_reject_and_cursor_stall_anomalies_use_real_inputs(monkeypatch, t
             del kwargs
             return
 
+        def apply_self_financing_checkpoint(self, **kwargs):
+            del kwargs
+            return None
+
     monkeypatch.setattr(runner_module, "OrderLifecycleService", FakeLifecycle)
     monkeypatch.setattr(runner_module, "RiskPolicy", FakeRiskPolicy)
     monkeypatch.setattr(runner_module, "ExecutionService", FakeExecution)
