@@ -66,7 +66,10 @@ def _legacy_stage4_order_intents(
     decision = DecisionPipelineService(settings=settings).run_cycle(
         cycle_id=cycle_id,
         balances={"TRY": try_cash},
-        positions={symbol: runner._to_position_summary(pos) for symbol, pos in {p.symbol: p for p in positions}.items()},
+        positions={
+            symbol: runner._to_position_summary(pos)
+            for symbol, pos in {p.symbol: p for p in positions}.items()
+        },
         mark_prices=mark_prices,
         open_orders=open_orders,
         pair_info=pair_info,

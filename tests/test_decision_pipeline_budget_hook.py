@@ -65,7 +65,6 @@ def test_budget_multiplier_scales_allocator_caps() -> None:
     assert _SpyAllocationService.capture.max_cycle == Decimal("100.00")
 
 
-
 def test_aggressive_path_scales_deploy_budget_with_multiplier() -> None:
     service = DecisionPipelineService(
         settings=Settings(

@@ -95,8 +95,8 @@ def test_handler_exception_isolated() -> None:
     )
 
     async def _run() -> None:
-        await client.queue.put(client._parse_message('{"channel":423,"event":"x","data":1}') )  # type: ignore[arg-type]
-        await client.queue.put(client._parse_message('{"channel":424,"event":"y","data":2}') )  # type: ignore[arg-type]
+        await client.queue.put(client._parse_message('{"channel":423,"event":"x","data":1}'))  # type: ignore[arg-type]
+        await client.queue.put(client._parse_message('{"channel":424,"event":"y","data":2}'))  # type: ignore[arg-type]
         task = asyncio.create_task(client._dispatch_loop())
         await asyncio.sleep(0.05)
         await client.shutdown()
@@ -109,10 +109,12 @@ def test_handler_exception_isolated() -> None:
 
 def test_bounded_queue_drop_increments_metric() -> None:
     metrics = InMemoryMetricsSink()
-    socket = _FakeSocket(messages=[
-        '{"channel":423,"event":"trade","data":1}',
-        '{"channel":423,"event":"trade","data":2}',
-    ])
+    socket = _FakeSocket(
+        messages=[
+            '{"channel":423,"event":"trade","data":1}',
+            '{"channel":423,"event":"trade","data":2}',
+        ]
+    )
     client = _build_client(socket, metrics, queue_max=1)
 
     async def _run() -> None:

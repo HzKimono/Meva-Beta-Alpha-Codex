@@ -20,13 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 class AgentPolicy(Protocol):
-    def evaluate(self, context: AgentContext) -> AgentDecision:
-        ...
+    def evaluate(self, context: AgentContext) -> AgentDecision: ...
 
 
 class LlmClient(Protocol):
-    def complete(self, prompt: str, *, timeout_seconds: float) -> str:
-        ...
+    def complete(self, prompt: str, *, timeout_seconds: float) -> str: ...
 
 
 class LlmPolicyError(RuntimeError):
@@ -86,7 +84,8 @@ class PromptBuilder:
         ranked = sorted(
             context.market_snapshot.keys(),
             key=lambda symbol: (
-                context.portfolio.get(symbol, Decimal("0")) * context.market_snapshot.get(symbol, Decimal("0"))
+                context.portfolio.get(symbol, Decimal("0"))
+                * context.market_snapshot.get(symbol, Decimal("0"))
             ),
             reverse=True,
         )
@@ -168,7 +167,9 @@ class RuleBasedPolicy:
         kill_switch = bool(context.risk_state.get("kill_switch", False))
         safe_mode = bool(context.risk_state.get("safe_mode", False))
         stale_threshold = Decimal(str(context.risk_state.get("stale_data_seconds", "0") or "0"))
-        stale_data = stale_threshold > Decimal("0") and context.market_data_age_seconds >= stale_threshold
+        stale_data = (
+            stale_threshold > Decimal("0") and context.market_data_age_seconds >= stale_threshold
+        )
 
         if kill_switch:
             reasons.append("Kill switch active")
@@ -233,7 +234,10 @@ class LlmPolicy:
     def evaluate(self, context: AgentContext) -> AgentDecision:
         prompt_result = self.prompt_builder.build(context)
         try:
-            response = self.client.complete(prompt_result.prompt, timeout_seconds=self.timeout_seconds)
+            response = self.client.complete(
+                prompt_result.prompt,
+                timeout_seconds=self.timeout_seconds,
+            )
         except Exception as exc:  # noqa: BLE001
             raise LlmPolicyError(f"llm request failed: {type(exc).__name__}") from exc
 

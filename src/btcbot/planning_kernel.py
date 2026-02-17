@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol
 
 from btcbot.domain.models import normalize_symbol
 from btcbot.domain.order_intent import OrderIntent
@@ -81,7 +82,9 @@ class UniverseSelector(Protocol):
 
 
 class StrategyEngine(Protocol):
-    def generate_intents(self, context: PlanningContext, universe: Sequence[str]) -> Sequence[Intent]: ...
+    def generate_intents(
+        self, context: PlanningContext, universe: Sequence[str]
+    ) -> Sequence[Intent]: ...
 
 
 class Allocator(Protocol):
@@ -89,7 +92,9 @@ class Allocator(Protocol):
 
 
 class OrderIntentBuilder(Protocol):
-    def build(self, context: PlanningContext, intents: Sequence[Intent]) -> Sequence[OrderIntent]: ...
+    def build(
+        self, context: PlanningContext, intents: Sequence[Intent]
+    ) -> Sequence[OrderIntent]: ...
 
 
 class PlanningKernelProtocol(Protocol):

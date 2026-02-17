@@ -5,7 +5,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from btcbot.agent.audit import AgentAuditTrail, redact_secrets, store_compact_text
-from btcbot.agent.contracts import AgentContext, AgentDecision, DecisionAction, DecisionRationale, SafeDecision
+from btcbot.agent.contracts import (
+    AgentContext,
+    AgentDecision,
+    DecisionAction,
+    DecisionRationale,
+    SafeDecision,
+)
 from btcbot.agent.policy import RuleBasedPolicy
 from btcbot.services.state_store import StateStore
 
@@ -105,7 +111,8 @@ def test_agent_audit_prompt_response_bounded(tmp_path) -> None:
     )
     with store._connect() as conn:
         row = conn.execute(
-            "SELECT prompt_json, response_json FROM agent_decision_audit WHERE correlation_id='corr-2'"
+            "SELECT prompt_json, response_json FROM agent_decision_audit "
+            "WHERE correlation_id='corr-2'"
         ).fetchone()
     prompt_payload = json.loads(str(row["prompt_json"]))
     response_payload = json.loads(str(row["response_json"]))
