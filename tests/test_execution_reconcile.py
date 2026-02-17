@@ -35,11 +35,14 @@ class LifecycleExchange(ExchangeClient):
         self.cancel_error: Exception | None = None
         self.open_snapshots: list[OrderSnapshot] = []
         self.all_snapshots: list[OrderSnapshot] = []
+        self.get_all_orders_calls = 0
 
     def get_balances(self) -> list[Balance]:
         return []
 
-    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
+    def get_orderbook(
+        self, symbol: str, limit: int | None = None
+    ) -> tuple[float, float]:
         del symbol, limit
         return (0.0, 0.0)
 
@@ -72,9 +75,16 @@ class LifecycleExchange(ExchangeClient):
                 bids.append(item)
         return OpenOrders(bids=bids, asks=asks)
 
-    def get_all_orders(self, pair_symbol: str, start_ms: int, end_ms: int) -> list[OrderSnapshot]:
+    def get_all_orders(
+        self, pair_symbol: str, start_ms: int, end_ms: int
+    ) -> list[OrderSnapshot]:
         del start_ms, end_ms
-        return [snapshot for snapshot in self.all_snapshots if snapshot.pair_symbol == pair_symbol]
+        self.get_all_orders_calls += 1
+        return [
+            snapshot
+            for snapshot in self.all_snapshots
+            if snapshot.pair_symbol == pair_symbol
+        ]
 
     def get_order(self, order_id: str) -> OrderSnapshot:
         for snapshot in self.all_snapshots:
@@ -333,6 +343,81 @@ def test_lifecycle_open_to_canceled_after_confirmed_cancel(tmp_path) -> None:
 
     canceled = service.cancel_stale_orders("cycle-cancel")
     assert canceled == 1
+
+
+def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_submit(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "state.db"
+
+    exchange = LifecycleExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=StateStore(str(db_path)),
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        unknown_reprobe_initial_seconds=60,
+        unknown_reprobe_max_seconds=60,
+        unknown_reprobe_escalation_attempts=5,
+    )
+    intent = _intent("cycle-crash")
+    assert service.execute_intents([intent]) == 1
+
+    service.state_store.update_order_status(
+        order_id="101", status=OrderStatus.UNKNOWN, reconciled=True
+    )
+
+    restarted = ExecutionService(
+        exchange=exchange,
+        state_store=StateStore(str(db_path)),
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        unknown_reprobe_initial_seconds=60,
+        unknown_reprobe_max_seconds=60,
+        unknown_reprobe_escalation_attempts=5,
+    )
+
+    assert restarted.execute_intents([intent]) == 0
+    assert exchange.place_calls == 1
+
+    restarted.refresh_order_lifecycle(["BTC_TRY"])
+    assert exchange.get_all_orders_calls == 1
+
+    restarted.refresh_order_lifecycle(["BTC_TRY"])
+    assert exchange.get_all_orders_calls == 1
+
+    with restarted.state_store._connect() as conn:
+        conn.execute(
+            "UPDATE orders SET unknown_next_probe_at = 0 WHERE order_id = ?", ("101",)
+        )
+
+    exchange.all_snapshots = [
+        OrderSnapshot(
+            order_id="101",
+            client_order_id=None,
+            pair_symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=100,
+            quantity=0.1,
+            status=ExchangeOrderStatus.FILLED,
+            timestamp=1700000000000,
+            update_time=1700000000100,
+            status_raw="Filled",
+        )
+    ]
+
+    restarted.refresh_order_lifecycle(["BTC_TRY"])
+    with restarted.state_store._connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM orders WHERE order_id = ?", ("101",)
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "filled"
 
 
 def test_unknown_state_preserved_and_not_reacted(tmp_path) -> None:

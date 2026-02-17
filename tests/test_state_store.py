@@ -35,14 +35,51 @@ def test_risk_state_current_table_is_created_on_fresh_db(tmp_path) -> None:
     }
 
 
+def test_orders_unknown_retry_columns_are_added_for_legacy_db(tmp_path) -> None:
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE orders (
+                order_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price TEXT NOT NULL,
+                qty TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    StateStore(str(db_path))
+
+    with sqlite3.connect(str(db_path)) as conn:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()
+        }
+
+    assert "unknown_first_seen_at" in columns
+    assert "unknown_last_probe_at" in columns
+    assert "unknown_next_probe_at" in columns
+    assert "unknown_probe_attempts" in columns
+    assert "unknown_escalated_at" in columns
+
+
 def test_record_action_returns_action_id_and_dedupes(tmp_path) -> None:
     db_path = str(tmp_path / "state.db")
     first = StateStore(db_path=db_path)
-    action_id = first.record_action("c1", "sweep_plan", "hash-1", dedupe_window_seconds=3600)
+    action_id = first.record_action(
+        "c1", "sweep_plan", "hash-1", dedupe_window_seconds=3600
+    )
     assert action_id is not None
 
     second = StateStore(db_path=db_path)
-    assert second.record_action("c2", "sweep_plan", "hash-1", dedupe_window_seconds=3600) is None
+    assert (
+        second.record_action("c2", "sweep_plan", "hash-1", dedupe_window_seconds=3600)
+        is None
+    )
     assert second.action_count("sweep_plan", "hash-1") == 1
 
 
@@ -50,7 +87,9 @@ def test_attach_action_metadata_updates_exact_row(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
 
     first_id = store.record_action("c1", "place_order", "same")
-    second_id = store.record_action("c2", "place_order", "same-2", dedupe_window_seconds=0)
+    second_id = store.record_action(
+        "c2", "place_order", "same-2", dedupe_window_seconds=0
+    )
     assert first_id is not None
     assert second_id is not None
 
@@ -227,7 +266,9 @@ def test_connect_context_manager_commits_and_closes(monkeypatch) -> None:
             self.closed = True
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
+    monkeypatch.setattr(
+        state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn
+    )
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -261,7 +302,9 @@ def test_connect_context_manager_rolls_back_and_closes_on_error(monkeypatch) -> 
             self.closed = True
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
+    monkeypatch.setattr(
+        state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn
+    )
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -287,15 +330,21 @@ def test_record_action_dedupes_in_same_bucket(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(state_store_module, "datetime", FixedDateTime)
 
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.record_action("c1", "place_order", "hash-1", dedupe_window_seconds=300)
-    second = store.record_action("c2", "place_order", "hash-1", dedupe_window_seconds=300)
+    first = store.record_action(
+        "c1", "place_order", "hash-1", dedupe_window_seconds=300
+    )
+    second = store.record_action(
+        "c2", "place_order", "hash-1", dedupe_window_seconds=300
+    )
 
     assert first is not None
     assert second is None
     assert store.action_count("place_order", "hash-1") == 1
 
 
-def test_record_action_allows_same_payload_in_different_bucket(monkeypatch, tmp_path) -> None:
+def test_record_action_allows_same_payload_in_different_bucket(
+    monkeypatch, tmp_path
+) -> None:
     class StepDateTime:
         now_epoch = 1_000
 
@@ -309,8 +358,12 @@ def test_record_action_allows_same_payload_in_different_bucket(monkeypatch, tmp_
     monkeypatch.setattr(state_store_module, "datetime", StepDateTime)
 
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.record_action("c1", "place_order", "hash-2", dedupe_window_seconds=300)
-    second = store.record_action("c2", "place_order", "hash-2", dedupe_window_seconds=300)
+    first = store.record_action(
+        "c1", "place_order", "hash-2", dedupe_window_seconds=300
+    )
+    second = store.record_action(
+        "c2", "place_order", "hash-2", dedupe_window_seconds=300
+    )
 
     assert first is not None
     assert second is not None
@@ -337,7 +390,9 @@ def test_connect_close_failure_does_not_mask_primary_error(monkeypatch) -> None:
             raise RuntimeError("close boom")
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
+    monkeypatch.setattr(
+        state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn
+    )
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -444,13 +499,17 @@ def test_stage7_risk_reasons_json_is_stable_sorted(tmp_path) -> None:
     store.save_stage7_risk_decision(cycle_id="c2", decision=decision)
 
     with sqlite3.connect(str(db_path)) as conn:
-        row = conn.execute("SELECT reasons_json FROM stage7_risk_decisions LIMIT 1").fetchone()
+        row = conn.execute(
+            "SELECT reasons_json FROM stage7_risk_decisions LIMIT 1"
+        ).fetchone()
 
     assert row is not None
     assert json.loads(row[0]) == {"a": 1, "z": 2}
 
 
-def test_stage7_upsert_orders_conflict_on_client_order_id_keeps_original_order_id(tmp_path) -> None:
+def test_stage7_upsert_orders_conflict_on_client_order_id_keeps_original_order_id(
+    tmp_path,
+) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     now = datetime(2024, 1, 1, tzinfo=UTC)
 
