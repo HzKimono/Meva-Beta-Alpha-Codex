@@ -39,6 +39,7 @@ class ScriptedExchange(ExchangeClient):
         self.cancel_calls = 0
         self.orders_by_id: dict[str, OrderSnapshot] = {}
         self.order_seq = 100
+        self.visibility_enabled = True
 
     def get_balances(self) -> list[Balance]:
         return []
@@ -51,6 +52,8 @@ class ScriptedExchange(ExchangeClient):
         return []
 
     def get_open_orders(self, pair_symbol: str) -> OpenOrders:
+        if not self.visibility_enabled:
+            return OpenOrders(bids=[], asks=[])
         bids: list[OpenOrderItem] = []
         asks: list[OpenOrderItem] = []
         for snapshot in self.orders_by_id.values():
@@ -80,6 +83,8 @@ class ScriptedExchange(ExchangeClient):
 
     def get_all_orders(self, pair_symbol: str, start_ms: int, end_ms: int) -> list[OrderSnapshot]:
         del start_ms, end_ms
+        if not self.visibility_enabled:
+            return []
         return [
             snapshot
             for snapshot in self.orders_by_id.values()
@@ -345,7 +350,55 @@ def test_unknown_bounded_exceeded_enters_safe_mode_and_emits_decision(tmp_path, 
     payload = decision_logs[-1].extra
     assert payload["decision_layer"] == "execution"
     assert payload["reason_code"] == "execution_reconcile:unknown_bounded_exceeded"
-    assert payload["action"] == "SAFE_MODE"
+    assert payload["action"] == "SUPPRESS"
+    assert payload["entered_safe_mode"] is True
+    assert payload["cycle_id"].startswith("reconcile:")
+
+
+def test_eventual_visibility_migrates_unknown_order_id(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    exchange = ScriptedExchange()
+    exchange.visibility_enabled = False
+    exchange.place_plan.append(httpx.TimeoutException("create_then_raise"))
+    service = _service(tmp_path, exchange)
+
+    assert service.execute_intents([_intent("cycle-migrate")]) == 0
+
+    with service.state_store._connect() as conn:
+        placeholder = conn.execute(
+            "SELECT order_id, client_order_id FROM orders WHERE order_id LIKE 'unknown:%'"
+        ).fetchone()
+    assert placeholder is not None
+
+    exchange.visibility_enabled = True
+    service.refresh_order_lifecycle(["BTC_TRY"])
+
+    with service.state_store._connect() as conn:
+        migrated = conn.execute(
+            "SELECT order_id, client_order_id, status FROM orders WHERE client_order_id = ?",
+            (placeholder["client_order_id"],),
+        ).fetchone()
+        placeholder_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM orders WHERE order_id = ?",
+            (placeholder["order_id"],),
+        ).fetchone()
+
+    assert migrated is not None
+    assert migrated["order_id"].isdigit()
+    assert migrated["status"] == "open"
+    assert placeholder_count["c"] == 0
+
+    decision_logs = [
+        record.extra
+        for record in caplog.records
+        if record.msg == "decision_event"
+        and record.extra.get("reason_code") == "execution_reconcile:confirmed"
+    ]
+    assert decision_logs
+    decision = decision_logs[-1]
+    assert decision["decision_layer"] == "execution"
+    assert decision["action"] == "SUBMIT"
+    assert decision["cycle_id"] == "cycle-migrate"
 
 
 def test_cancel_stale_skips_order_submitted_same_cycle(tmp_path) -> None:

@@ -148,6 +148,7 @@ class ExecutionService:
 
             for snapshot in open_snapshots:
                 mapped = self._map_exchange_status(snapshot.status)
+                self._save_reconciled_snapshot(snapshot)
                 self.state_store.update_order_status(
                     order_id=snapshot.order_id,
                     status=mapped,
@@ -158,6 +159,18 @@ class ExecutionService:
 
             for local in orders_by_symbol.get(symbol, []):
                 if local.order_id in open_ids:
+                    continue
+                open_match = (
+                    match_order_by_client_id(open_snapshots, local.client_order_id)
+                    if local.client_order_id is not None
+                    else None
+                )
+                if open_match is not None:
+                    if (
+                        local.order_id.startswith("unknown:")
+                        and local.order_id != open_match.order_id
+                    ):
+                        self._emit_reconcile_confirmed(local, open_match.order_id)
                     continue
                 if (
                     local.status == OrderStatus.UNKNOWN
@@ -194,13 +207,35 @@ class ExecutionService:
                     continue
 
                 mapped = self._map_exchange_status(matched.status)
+                self._save_reconciled_snapshot(matched)
                 self.state_store.update_order_status(
-                    order_id=local.order_id,
+                    order_id=matched.order_id,
                     status=mapped,
                     exchange_status_raw=matched.status_raw,
                     reconciled=True,
                     last_seen_at=matched.update_time or matched.timestamp,
                 )
+                if (
+                    local.order_id.startswith("unknown:")
+                    and local.client_order_id
+                    and local.order_id != matched.order_id
+                ):
+                    self._emit_reconcile_confirmed(local, matched.order_id)
+
+    def _emit_reconcile_confirmed(self, local_order, real_order_id: str) -> None:
+        emit_decision(
+            logger,
+            {
+                "cycle_id": self._resolve_reconcile_cycle_id(local_order),
+                "decision_layer": "execution",
+                "reason_code": str(ReasonCode.EXECUTION_RECONCILE_CONFIRMED),
+                "action": "SUBMIT",
+                "scope": "per_intent",
+                "client_order_id": local_order.client_order_id,
+                "order_id": real_order_id,
+                "previous_order_id": local_order.order_id,
+            },
+        )
 
     def _compute_all_orders_start_ms(
         self, *, now_ms: int, due_unknown_orders: list
@@ -277,16 +312,54 @@ class ExecutionService:
         emit_decision(
             logger,
             {
-                "cycle_id": "reconcile",
+                "cycle_id": self._resolve_reconcile_cycle_id(local_order),
                 "decision_layer": "execution",
                 "reason_code": str(
                     ReasonCode.EXECUTION_RECONCILE_UNKNOWN_BOUNDED_EXCEEDED
                 ),
-                "action": "SAFE_MODE",
+                "action": "SUPPRESS",
                 "scope": "global",
                 "symbol": local_order.symbol,
                 "order_id": local_order.order_id,
+                "entered_safe_mode": True,
             },
+        )
+
+    def _resolve_reconcile_cycle_id(self, local_order) -> str:
+        with self.state_store._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT cycle_id
+                FROM actions
+                WHERE (order_id = ? OR client_order_id = ?)
+                  AND cycle_id IS NOT NULL
+                  AND cycle_id != ''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (local_order.order_id, local_order.client_order_id),
+            ).fetchone()
+        if row is not None:
+            return str(row["cycle_id"])
+        return f"reconcile:{datetime.now(UTC).strftime('%Y%m%d')}"
+
+    def _save_reconciled_snapshot(self, snapshot: OrderSnapshot) -> None:
+        side = snapshot.side if snapshot.side is not None else OrderSide.BUY
+        order = Order(
+            order_id=snapshot.order_id,
+            client_order_id=snapshot.client_order_id,
+            symbol=snapshot.pair_symbol,
+            side=side,
+            price=float(snapshot.price),
+            quantity=float(snapshot.quantity),
+            status=self._map_exchange_status(snapshot.status),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        self.state_store.save_order(
+            order,
+            reconciled=True,
+            exchange_status_raw=snapshot.status_raw,
         )
 
     def cancel_stale_orders(self, cycle_id: str) -> int:
