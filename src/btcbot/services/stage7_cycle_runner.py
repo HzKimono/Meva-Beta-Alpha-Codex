@@ -4,8 +4,10 @@ import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
+from typing import cast
 from uuid import uuid4
 
+from btcbot.adapters.exchange import ExchangeClient
 from btcbot.adapters.replay_exchange import ReplayExchangeClient
 from btcbot.config import Settings
 from btcbot.domain.accounting import Position, TradeFill
@@ -13,6 +15,8 @@ from btcbot.domain.anomalies import combine_modes
 from btcbot.domain.ledger import LedgerEvent, LedgerEventType, LedgerState, apply_events
 from btcbot.domain.models import Balance, normalize_symbol
 from btcbot.domain.models import OrderSide as DomainOrderSide
+from btcbot.domain.order_intent import OrderIntent
+from btcbot.domain.portfolio_policy_models import PortfolioPlan
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.logging_context import with_cycle_context
@@ -65,7 +69,7 @@ def _resolve_planning_disabled_reason(
     selected_universe: list[str],
     mark_prices: dict[str, Decimal],
     notional_cap_try_per_cycle: Decimal,
-    order_intents: list[object],
+    order_intents: list[OrderIntent],
 ) -> str | None:
     if planning_enabled:
         return None
@@ -84,6 +88,23 @@ def _resolve_planning_disabled_reason(
     ):
         return "MIN_NOTIONAL_ALL_REJECTED"
     return "UNKNOWN"
+
+
+def _coerce_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            try:
+                return int(text)
+            except ValueError:
+                return default
+    return default
 
 
 class Stage7CycleRunner:
@@ -195,9 +216,10 @@ class Stage7CycleRunner:
                 )
 
         base_client = getattr(exchange, "client", exchange)
+        exchange_client = cast(ExchangeClient, base_client)
         is_backtest_simulation = isinstance(base_client, ReplayExchangeClient)
         rules_service = ExchangeRulesService(
-            base_client,
+            exchange_client,
             cache_ttl_sec=settings.rules_cache_ttl_sec,
             settings=settings,
         )
@@ -389,11 +411,14 @@ class Stage7CycleRunner:
                 else:
                     rules_symbols_error.add(symbol)
 
-            rules_stats = {
+            rules_invalid_metadata_count = len(rules_symbols_invalid_metadata)
+            rules_missing_count = len(rules_symbols_missing)
+            rules_error_count = len(rules_symbols_error)
+            rules_stats: dict[str, object] = {
                 "rules_fallback_used_count": len(rules_symbols_fallback),
-                "rules_invalid_metadata_count": len(rules_symbols_invalid_metadata),
-                "rules_missing_count": len(rules_symbols_missing),
-                "rules_error_count": len(rules_symbols_error),
+                "rules_invalid_metadata_count": rules_invalid_metadata_count,
+                "rules_missing_count": rules_missing_count,
+                "rules_error_count": rules_error_count,
                 "rules_symbols_fallback": sorted(rules_symbols_fallback),
                 "rules_symbols_invalid_metadata": sorted(rules_symbols_invalid_metadata),
                 "rules_symbols_missing": sorted(rules_symbols_missing),
@@ -409,13 +434,11 @@ class Stage7CycleRunner:
             final_mode = combine_modes(final_mode, stage7_mode)
             invalid_policy = settings.stage7_rules_invalid_metadata_policy
             if invalid_policy == "observe_only_cycle" and (
-                rules_stats["rules_invalid_metadata_count"] > 0
-                or rules_stats["rules_missing_count"] > 0
-                or rules_stats["rules_error_count"] > 0
+                rules_invalid_metadata_count > 0 or rules_missing_count > 0 or rules_error_count > 0
             ):
                 final_mode = Mode.OBSERVE_ONLY
 
-            mode_payload = {
+            mode_payload: dict[str, object] = {
                 "base_mode": base_mode.value,
                 "override_mode": None,
                 "final_mode": final_mode.value,
@@ -535,8 +558,10 @@ class Stage7CycleRunner:
                 )
                 self.consume_shared_plan(kernel_plan, execution_port)
                 execution_report = execution_port.reconcile()
-                oms_orders = list(execution_report.get("orders", []))
-                oms_events = list(execution_report.get("events", []))
+                oms_orders_raw = execution_report.get("orders", [])
+                oms_events_raw = execution_report.get("events", [])
+                oms_orders = list(oms_orders_raw) if isinstance(oms_orders_raw, list) else []
+                oms_events = list(oms_events_raw) if isinstance(oms_events_raw, list) else []
                 collector.stop_timer("oms")
                 actions = (
                     [
@@ -671,7 +696,10 @@ class Stage7CycleRunner:
                 notional = sum((lot.qty * lot.unit_cost for lot in symbol_state.lots), Decimal("0"))
                 avg_cost = (notional / qty) if qty > 0 else Decimal("0")
                 mark = mark_prices.get(symbol, avg_cost)
-                unrealized = sum((mark - lot.unit_cost) * lot.qty for lot in symbol_state.lots)
+                unrealized = sum(
+                    ((mark - lot.unit_cost) * lot.qty for lot in symbol_state.lots),
+                    Decimal("0"),
+                )
                 fees_paid = ledger_state.fees_by_currency.get("TRY", Decimal("0"))
                 state_store.save_position(
                     Position(
@@ -910,16 +938,16 @@ class Stage7CycleRunner:
                 collector.stop_timer("persist")
             collector.stop_timer("cycle_total")
             finalized = collector.finalize()
-            run_metrics = {
+            run_metrics: dict[str, object] = {
                 **run_metrics_base,
-                "latency_ms_total": int(finalized.get("latency_ms_total", 0)),
-                "selection_ms": int(finalized.get("selection_ms", 0)),
-                "planning_ms": int(finalized.get("planning_ms", 0)),
-                "intents_ms": int(finalized.get("intents_ms", 0)),
-                "oms_ms": int(finalized.get("oms_ms", 0)),
-                "ledger_ms": int(finalized.get("ledger_ms", 0)),
-                "persist_ms": int(finalized.get("persist_ms", 0)),
-                "cycle_total_ms": int(finalized.get("cycle_total_ms", 0)),
+                "latency_ms_total": _coerce_int(finalized.get("latency_ms_total", 0)),
+                "selection_ms": _coerce_int(finalized.get("selection_ms", 0)),
+                "planning_ms": _coerce_int(finalized.get("planning_ms", 0)),
+                "intents_ms": _coerce_int(finalized.get("intents_ms", 0)),
+                "oms_ms": _coerce_int(finalized.get("oms_ms", 0)),
+                "ledger_ms": _coerce_int(finalized.get("ledger_ms", 0)),
+                "persist_ms": _coerce_int(finalized.get("persist_ms", 0)),
+                "cycle_total_ms": _coerce_int(finalized.get("cycle_total_ms", 0)),
             }
             state_store.save_stage7_run_metrics(cycle_id, run_metrics)
             if enable_adaptation:
@@ -1014,7 +1042,7 @@ class Stage7CycleRunner:
         selected_universe: list[str],
         policy_service: PortfolioPolicyService,
         order_builder: OrderBuilderService,
-    ) -> tuple[object, list[object], str]:
+    ) -> tuple[PortfolioPlan, list[OrderIntent], str]:
         if not getattr(runtime, "stage7_use_planning_kernel", True):
             portfolio_plan, order_intents = self._build_stage7_order_intents_legacy(
                 cycle_id=cycle_id,
@@ -1085,7 +1113,7 @@ class Stage7CycleRunner:
         rules_unavailable: dict[str, str],
         policy_service: PortfolioPolicyService,
         order_builder: OrderBuilderService,
-    ) -> tuple[object, list[object]]:
+    ) -> tuple[PortfolioPlan, list[OrderIntent]]:
         portfolio_plan = policy_service.build_plan(
             universe=selected_universe,
             mark_prices_try=mark_prices,

@@ -9,7 +9,7 @@ import random
 import sqlite3
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -21,7 +21,7 @@ from btcbot.adapters.btcturk_http import (
     ConfigurationError,
 )
 from btcbot.config import Settings
-from btcbot.domain.models import normalize_symbol
+from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.logging_context import with_logging_context
 from btcbot.logging_utils import setup_logging
 from btcbot.observability import (
@@ -458,7 +458,10 @@ def _load_settings(env_file: str | None) -> Settings:
         keys=("BTCTURK_API_KEY", "BTCTURK_API_SECRET", "LIVE_TRADING_ACK"),
     )
 
-    settings = Settings() if resolved_env_file is None else Settings(_env_file=resolved_env_file)
+    settings_kwargs: dict[str, object] = {}
+    if resolved_env_file is not None:
+        settings_kwargs["_env_file"] = resolved_env_file
+    settings = Settings(**settings_kwargs)
     validation = validate_secret_controls(
         scopes=list(getattr(settings, "btcturk_api_scopes", ["read", "trade"])),
         rotated_at=getattr(settings, "btcturk_secret_rotated_at", None),
@@ -1060,6 +1063,35 @@ def _normalize_flag_bool(value: object) -> bool:
     return False
 
 
+def _as_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            try:
+                return int(text)
+            except ValueError:
+                return default
+    return default
+
+
+def _as_mapping(value: object) -> Mapping[str, object]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _as_list_of_mappings(value: object) -> list[Mapping[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
 def _csv_safe_value(value: object) -> object:
     if isinstance(value, (dict, list)):
         return json.dumps(value, sort_keys=True, default=str)
@@ -1104,22 +1136,22 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
             f"{row['cycle_id']} {row['ts']} {row['mode_final']} "
             f"{row['net_pnl_try']} {row['max_drawdown_pct']} {row['turnover_try']} "
             f"{row['intents_planned_count']} {row['oms_rejected_count']} "
-            f"{int(row.get('oms_throttled_count', 0))} {no_trades_reason}"
+            f"{_as_int(row.get('oms_throttled_count', 0))} {no_trades_reason}"
         )
         print(f"  no_metrics_reason={no_metrics_reason}")
 
         cycle_trace = store.get_stage7_cycle_trace(str(row["cycle_id"]))
         if cycle_trace is not None:
-            summary = cycle_trace.get("intents_summary", {})
-            portfolio_plan = cycle_trace.get("portfolio_plan", {})
+            summary = _as_mapping(cycle_trace.get("intents_summary", {}))
+            portfolio_plan = _as_mapping(cycle_trace.get("portfolio_plan", {}))
             print(
                 "  stage7_plan_summary="
                 f"planned={summary.get('order_intents_planned', 0)} "
                 f"skipped={summary.get('order_intents_skipped', 0)} "
                 f"actions={summary.get('order_decisions_total', 0)}"
             )
-            planning_diag = summary.get("planning_diagnostics")
-            if isinstance(planning_diag, dict) and planning_diag:
+            planning_diag = _as_mapping(summary.get("planning_diagnostics"))
+            if planning_diag:
                 print(
                     "  planning_diagnostics="
                     f"enabled={planning_diag.get('planning_enabled')} "
@@ -1129,17 +1161,17 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
                     f"planned={planning_diag.get('planned_intents_count', 0)} "
                     f"skipped={planning_diag.get('skipped_intents_count', 0)}"
                 )
-                skip_reasons = planning_diag.get("skip_reasons") or {}
-                if isinstance(skip_reasons, dict) and skip_reasons:
+                skip_reasons = _as_mapping(planning_diag.get("skip_reasons"))
+                if skip_reasons:
                     reason_items = ", ".join(
                         f"{key}:{value}" for key, value in sorted(skip_reasons.items())
                     )
                     print(f"  planning_skip_reasons={reason_items}")
-            if isinstance(portfolio_plan, dict) and portfolio_plan:
+            if portfolio_plan:
                 print(
                     "  portfolio_plan="
                     f"cash_target_try={portfolio_plan.get('cash_target_try', '-')} "
-                    f"actions={len(portfolio_plan.get('actions', []) or [])}"
+                    f"actions={len(_as_list_of_mappings(portfolio_plan.get('actions', [])))}"
                 )
 
         allocation_plan = store.get_allocation_plan(str(row["cycle_id"]))
@@ -1148,8 +1180,8 @@ def run_stage7_report(settings: Settings, db_path: str | None, last: int) -> int
             allocation_plan = store.get_latest_allocation_plan()
             plan_source = "latest"
         if allocation_plan is not None:
-            plan_items = allocation_plan.get("plan") or []
-            deferred_items = allocation_plan.get("deferred") or []
+            plan_items = _as_list_of_mappings(allocation_plan.get("plan") or [])
+            deferred_items = _as_list_of_mappings(allocation_plan.get("deferred") or [])
             investable_total = allocation_plan.get("investable_total_try") or allocation_plan.get(
                 "investable_try"
             )
@@ -1226,7 +1258,7 @@ def run_stage7_alerts(settings: Settings, db_path: str | None, last: int) -> int
     rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
     print("cycle_id ts alerts")
     for row in rows:
-        alerts = row.get("alert_flags", {})
+        alerts = _as_mapping(row.get("alert_flags", {}))
         normalized_alerts = {name: _normalize_flag_bool(value) for name, value in alerts.items()}
         if any(normalized_alerts.values()):
             active = ",".join(sorted(name for name, value in normalized_alerts.items() if value))
@@ -1417,7 +1449,7 @@ def _argument_was_provided(flag: str) -> bool:
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv[1:])
 
 
-def _load_pair_info_snapshot(path: str | None) -> list[dict[str, object]] | None:
+def _load_pair_info_snapshot(path: str | None) -> list[PairInfo | dict[str, object]] | None:
     if not path:
         return None
     try:
@@ -1429,7 +1461,15 @@ def _load_pair_info_snapshot(path: str | None) -> list[dict[str, object]] | None
 
     if not isinstance(payload, list):
         raise ValueError("--pair-info-json must be a JSON array")
-    return [dict(item) for item in payload if isinstance(item, dict)]
+    snapshot: list[PairInfo | dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            snapshot.append(PairInfo.model_validate(item))
+        except Exception:
+            snapshot.append(dict(item))
+    return snapshot
 
 
 def _parse_optional_quantize(raw: str | None) -> Decimal | None:
