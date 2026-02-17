@@ -64,16 +64,14 @@ from btcbot.services.startup_recovery import StartupRecoveryService
 from btcbot.services.state_store import StateStore
 from btcbot.services.strategy_service import StrategyService
 from btcbot.services.sweep_service import SweepService
-from btcbot.services.trading_policy import (
-    PolicyBlockReason,
-    policy_block_message,
-    validate_live_side_effects_policy,
-)
+from btcbot.services.trading_policy import validate_live_side_effects_policy
 from btcbot.strategies.profit_v1 import ProfitAwareStrategyV1
 
 logger = logging.getLogger(__name__)
 
-LIVE_TRADING_NOT_ARMED_MESSAGE = policy_block_message(PolicyBlockReason.LIVE_NOT_ARMED)
+LIVE_TRADING_NOT_ARMED_MESSAGE = (
+    "Live trading is not armed; set LIVE_TRADING=true and LIVE_TRADING_ACK=I_UNDERSTAND"
+)
 
 
 def main() -> int:
@@ -333,6 +331,13 @@ def main() -> int:
     )
     settings = _apply_effective_universe(settings)
 
+    if args.command in {"run", "stage4-run"}:
+        _print_effective_side_effects_state(
+            settings,
+            force_dry_run=bool(getattr(args, "dry_run", False)),
+            include_safe_mode=True,
+        )
+
     if args.command == "run":
         return run_with_optional_loop(
             command="run",
@@ -458,7 +463,13 @@ def _load_settings(env_file: str | None) -> Settings:
         keys=("BTCTURK_API_KEY", "BTCTURK_API_SECRET", "LIVE_TRADING_ACK"),
     )
 
-    settings = Settings()
+    if resolved_env_file is None:
+        settings = Settings()
+    else:
+        try:
+            settings = Settings(_env_file=resolved_env_file)
+        except TypeError:
+            settings = Settings()
     validation = validate_secret_controls(
         scopes=list(getattr(settings, "btcturk_api_scopes", ["read", "trade"])),
         rotated_at=getattr(settings, "btcturk_secret_rotated_at", None),
@@ -631,30 +642,70 @@ def _log_arm_check(settings: Settings, *, dry_run: bool) -> None:
     logger.info("arm_check", extra={"extra": summary})
 
 
+def _compute_live_policy(
+    settings: Settings, *, force_dry_run: bool, include_safe_mode: bool
+) -> tuple[dict[str, bool], object]:
+    safe_mode_fn = getattr(settings, "is_safe_mode_enabled", None)
+    safe_mode = bool(safe_mode_fn()) if callable(safe_mode_fn) else bool(getattr(settings, "safe_mode", False))
+    effective_safe_mode = safe_mode if include_safe_mode else False
+    dry_run = bool(force_dry_run or getattr(settings, "dry_run", False) or effective_safe_mode)
+    live_ack = getattr(settings, "live_trading_ack", None) == "I_UNDERSTAND"
+    inputs = {
+        "dry_run": dry_run,
+        "kill_switch": bool(getattr(settings, "kill_switch", False) or effective_safe_mode),
+        "live_trading_enabled": bool(getattr(settings, "live_trading", False)),
+        "live_trading_ack": live_ack,
+    }
+    policy = validate_live_side_effects_policy(**inputs)
+    return inputs, policy
+
+
+def _format_effective_side_effects_banner(inputs: Mapping[str, bool], policy: object) -> str:
+    mode = "ARMED" if getattr(policy, "allowed", False) else "BLOCKED"
+    reasons = getattr(policy, "reasons", [])
+    reason_text = ",".join(reasons) if reasons else "NONE"
+    warning = " | WARNING: Side effects are BLOCKED" if mode == "BLOCKED" else ""
+    return (
+        f"Effective Side-Effects State: {mode} | "
+        f"dry_run={inputs['dry_run']} "
+        f"kill_switch={inputs['kill_switch']} "
+        f"live_trading_enabled={inputs['live_trading_enabled']} "
+        f"ack={inputs['live_trading_ack']} | "
+        f"reasons={reason_text}{warning}"
+    )
+
+
+def _print_effective_side_effects_state(
+    settings: Settings, *, force_dry_run: bool, include_safe_mode: bool
+) -> None:
+    inputs, policy = _compute_live_policy(
+        settings, force_dry_run=force_dry_run, include_safe_mode=include_safe_mode
+    )
+    banner = _format_effective_side_effects_banner(inputs, policy)
+    logger.warning(banner) if not policy.allowed else logger.info(banner)
+    print(banner)
+
+
 def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
     run_id = uuid4().hex
-    dry_run = force_dry_run or settings.dry_run
+    inputs, live_policy = _compute_live_policy(
+        settings, force_dry_run=force_dry_run, include_safe_mode=True
+    )
+    dry_run = inputs["dry_run"]
     effective_safe_mode = settings.is_safe_mode_enabled()
     if effective_safe_mode:
         logger.warning(
             "SAFE_MODE_ENABLED_OBSERVE_ONLY",
             extra={"extra": {"safe_mode": True, "banner": "*** SAFE MODE ACTIVE ***"}},
         )
-        dry_run = True
 
     _log_arm_check(settings, dry_run=dry_run)
-    live_block_reason = validate_live_side_effects_policy(
-        dry_run=dry_run,
-        kill_switch=(settings.kill_switch or effective_safe_mode),
-        live_trading_enabled=settings.is_live_trading_enabled(),
-    )
-    if not dry_run and live_block_reason is not None:
-        block_message = policy_block_message(live_block_reason)
+    if not dry_run and not live_policy.allowed:
         logger.error(
-            block_message,
-            extra={"extra": {"reason": live_block_reason.value}},
+            live_policy.message,
+            extra={"extra": {"reasons": live_policy.reasons}},
         )
-        print(block_message)
+        print(live_policy.message)
         return 2
 
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
@@ -882,19 +933,16 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
 def run_cycle_stage4(
     settings: Settings, force_dry_run: bool = False, db_path: str | None = None
 ) -> int:
-    dry_run = force_dry_run or settings.dry_run
+    inputs, live_policy = _compute_live_policy(
+        settings, force_dry_run=force_dry_run, include_safe_mode=True
+    )
+    dry_run = inputs["dry_run"]
     if settings.is_safe_mode_enabled():
         logger.warning(
             "SAFE_MODE_ENABLED_OBSERVE_ONLY",
             extra={"extra": {"safe_mode": True, "banner": "*** SAFE MODE ACTIVE ***"}},
         )
-        dry_run = True
     _log_arm_check(settings, dry_run=dry_run)
-    live_block_reason = validate_live_side_effects_policy(
-        dry_run=dry_run,
-        kill_switch=settings.kill_switch,
-        live_trading_enabled=settings.is_live_trading_enabled(),
-    )
     resolved_db_path = _resolve_stage7_db_path(
         "stage4-run", db_path=db_path, settings_db_path=settings.state_db_path
     )
@@ -905,14 +953,13 @@ def run_cycle_stage4(
         update={"dry_run": dry_run, "state_db_path": resolved_db_path}
     )
     cycle_id = uuid4().hex
-    if not dry_run and live_block_reason is not None:
-        block_message = policy_block_message(live_block_reason)
-        logger.error(block_message, extra={"extra": {"reason": live_block_reason.value}})
-        print(block_message)
+    if not dry_run and not live_policy.allowed:
+        logger.error(live_policy.message, extra={"extra": {"reasons": live_policy.reasons}})
+        print(live_policy.message)
         StateStore(db_path=resolved_db_path).record_cycle_audit(
             cycle_id=cycle_id,
             counts={"blocked_by_policy": 1},
-            decisions=[f"policy_block:{live_block_reason.value}"],
+            decisions=[f"policy_block:{reason.lower()}" for reason in live_policy.reasons],
             envelope={
                 "cycle_id": cycle_id,
                 "command": "stage4-run",

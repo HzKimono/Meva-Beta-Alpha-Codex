@@ -30,10 +30,7 @@ from btcbot.domain.models import (
 from btcbot.observability import get_instrumentation
 from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
-from btcbot.services.trading_policy import (
-    policy_block_message,
-    validate_live_side_effects_policy,
-)
+from btcbot.services.trading_policy import validate_live_side_effects_policy
 
 logger = logging.getLogger(__name__)
 
@@ -1192,13 +1189,13 @@ class ExecutionService:
         return "json" in str(exc).lower()
 
     def _ensure_live_side_effects_allowed(self) -> None:
-        reason = validate_live_side_effects_policy(
+        policy = validate_live_side_effects_policy(
             dry_run=self.dry_run,
             kill_switch=self.kill_switch,
             live_trading_enabled=self.live_trading_enabled,
         )
-        if reason is not None:
-            raise LiveTradingNotArmedError(policy_block_message(reason))
+        if not policy.allowed:
+            raise LiveTradingNotArmedError(policy.message)
 
     def _place_hash(self, intent: OrderIntent) -> str:
         raw = (
