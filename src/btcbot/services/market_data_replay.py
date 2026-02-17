@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import TypeVar
 
 from btcbot.domain.market_data_models import Candle, OrderBookTop, TickerStat
 from btcbot.domain.symbols import canonical_symbol
@@ -13,7 +14,6 @@ from btcbot.domain.symbols import canonical_symbol
 
 class MarketDataSchemaError(ValueError):
     """Raised when replay input files do not match expected schema."""
-
 
 class MarketDataReplay:
     def __init__(
@@ -138,18 +138,21 @@ def _ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _normalize_series(series_by_symbol: dict[str, list[object]]) -> dict[str, list[object]]:
-    out: dict[str, list[object]] = {}
+_T = TypeVar("_T")
+
+
+def _normalize_series(series_by_symbol: dict[str, list[_T]]) -> dict[str, list[_T]]:
+    out: dict[str, list[_T]] = {}
     for symbol, rows in series_by_symbol.items():
         normalized = canonical_symbol(symbol)
-        out[normalized] = sorted(rows, key=lambda item: item.ts)
+        out[normalized] = sorted(rows, key=lambda item: getattr(item, "ts"))
     return out
 
 
-def _nearest_prior(series: list[object], now_ts: datetime) -> object | None:
+def _nearest_prior(series: list[_T], now_ts: datetime) -> _T | None:
     last = None
     for item in series:
-        if item.ts <= now_ts:
+        if getattr(item, "ts") <= now_ts:
             last = item
         else:
             break

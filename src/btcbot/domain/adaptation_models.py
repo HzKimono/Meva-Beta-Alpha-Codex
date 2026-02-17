@@ -43,17 +43,17 @@ class Stage7Params:
         else:
             score_weights_map = {}
         return cls(
-            universe_size=int(payload["universe_size"]),
+            universe_size=int(str(payload["universe_size"])),
             score_weights={
                 str(key): Decimal(str(value)) for key, value in score_weights_map.items()
             },
-            order_offset_bps=int(payload["order_offset_bps"]),
+            order_offset_bps=int(str(payload["order_offset_bps"])),
             turnover_cap_try=Decimal(str(payload["turnover_cap_try"])),
-            max_orders_per_cycle=int(payload["max_orders_per_cycle"]),
-            max_spread_bps=int(payload["max_spread_bps"]),
+            max_orders_per_cycle=int(str(payload["max_orders_per_cycle"])),
+            max_spread_bps=int(str(payload["max_spread_bps"])),
             cash_target_try=Decimal(str(payload["cash_target_try"])),
             min_quote_volume_try=Decimal(str(payload.get("min_quote_volume_try", "0"))),
-            version=int(payload["version"]),
+            version=int(str(payload["version"])),
             updated_at=datetime.fromisoformat(str(payload["updated_at"])),
         )
 
@@ -109,8 +109,8 @@ class ParamChange:
         return cls(
             change_id=str(payload["change_id"]),
             ts=datetime.fromisoformat(str(payload["ts"])),
-            from_version=int(payload["from_version"]),
-            to_version=int(payload["to_version"]),
+            from_version=int(str(payload["from_version"])),
+            to_version=int(str(payload["to_version"])),
             changes={
                 str(field): {str(k): str(v) for k, v in values.items()}
                 for field, values in changes_map.items()

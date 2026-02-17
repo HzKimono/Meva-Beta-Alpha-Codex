@@ -458,10 +458,7 @@ def _load_settings(env_file: str | None) -> Settings:
         keys=("BTCTURK_API_KEY", "BTCTURK_API_SECRET", "LIVE_TRADING_ACK"),
     )
 
-    settings_kwargs: dict[str, object] = {}
-    if resolved_env_file is not None:
-        settings_kwargs["_env_file"] = resolved_env_file
-    settings = Settings(**settings_kwargs)
+    settings = Settings()
     validation = validate_secret_controls(
         scopes=list(getattr(settings, "btcturk_api_scopes", ["read", "trade"])),
         rotated_at=getattr(settings, "btcturk_secret_rotated_at", None),
