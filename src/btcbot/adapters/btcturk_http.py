@@ -42,6 +42,7 @@ from btcbot.domain.models import (
 )
 from btcbot.domain.stage4 import Order as Stage4Order
 from btcbot.observability import get_instrumentation
+from btcbot.security.redaction import sanitize_mapping, sanitize_text
 from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
 
 logger = logging.getLogger(__name__)
@@ -112,34 +113,23 @@ def _parse_best_price(levels: object, side: str, symbol: str) -> float:
 
 def _response_snippet(response: httpx.Response) -> str:
     text = response.text.strip().replace("\n", " ")
-    return text[:_PRIVATE_ERROR_SNIPPET_LIMIT]
+    return sanitize_text(text[:_PRIVATE_ERROR_SNIPPET_LIMIT])
 
 
 def _sanitize_request_params(params: dict[str, str | int] | None) -> dict[str, object] | None:
     if params is None:
         return None
-    return {key: value for key, value in params.items() if key.lower() not in {"api_key", "secret"}}
+    return sanitize_mapping(params)
 
 
 def _sanitize_request_json(payload: dict[str, object] | None) -> dict[str, object] | None:
     if payload is None:
         return None
-    blocked = {
-        "api_key",
-        "secret",
-        "apikey",
-        "apisecret",
-        "signature",
-        "x-pck",
-        "x-signature",
-        "x-stamp",
-    }
-    return {key: value for key, value in payload.items() if key.lower() not in blocked}
+    return sanitize_mapping(payload)
 
 
 def _sanitize_request_headers(headers: dict[str, str]) -> dict[str, str]:
-    blocked = {"x-pck", "x-signature", "x-stamp", "authorization", "api-key"}
-    return {key: value for key, value in headers.items() if key.lower() not in blocked}
+    return {key: str(value) for key, value in sanitize_mapping(headers).items()}
 
 
 def _fmt_decimal(value: Decimal) -> str:
@@ -266,15 +256,16 @@ class BtcturkHttpClient(ExchangeClient):
             except Exception:  # noqa: BLE001
                 payload = None
 
+            safe_payload_message = sanitize_text(str(payload_message)) if payload_message is not None else None
             raise ExchangeError(
                 "BTCTurk private endpoint error "
                 f"status={response.status_code} method={method} path={path} "
-                f"code={payload_code} message={payload_message} response={snippet} "
+                f"code={payload_code} message={safe_payload_message} response={snippet} "
                 f"request_has_params={params is not None} request_has_json={json is not None} "
                 f"request_id={request_id}",
                 status_code=response.status_code,
                 error_code=payload_code,
-                error_message=str(payload_message) if payload_message is not None else None,
+                error_message=safe_payload_message,
                 request_path=path,
                 request_method=method,
                 request_params=_sanitize_request_params(params),
@@ -287,11 +278,12 @@ class BtcturkHttpClient(ExchangeClient):
             raise ExchangeError("BTCTurk response payload must be a JSON object")
         if payload.get("success") is False:
             message = payload.get("message") or payload.get("code") or "unknown BTCTurk error"
+            safe_message = sanitize_text(str(message))
             raise ExchangeError(
-                f"BTCTurk API returned unsuccessful payload: {message}; request_id={request_id}",
+                f"BTCTurk API returned unsuccessful payload: {safe_message}; request_id={request_id}",
                 status_code=200,
                 error_code=payload.get("code"),
-                error_message=str(message),
+                error_message=safe_message,
                 request_path=path,
                 request_method=method,
                 request_params=_sanitize_request_params(params),
