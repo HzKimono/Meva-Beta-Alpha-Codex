@@ -244,7 +244,6 @@ class StateStore:
             self._ensure_stage7_schema(conn)
             self._ensure_agent_audit_schema(conn)
 
-
     def _ensure_agent_audit_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """
@@ -3535,5 +3534,3 @@ class StateStore:
                     response_json,
                 ),
             )
-
-

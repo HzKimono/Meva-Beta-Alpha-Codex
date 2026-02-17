@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Mapping
 
 from btcbot.config import Settings
 from btcbot.domain.models import Balance, normalize_symbol

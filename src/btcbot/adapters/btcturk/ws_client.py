@@ -239,4 +239,3 @@ class BtcturkWsClient:
 
         self.metrics.inc("ws_invalid_messages")
         return None
-
