@@ -339,9 +339,9 @@ def main() -> int:
         )
 
     if args.command == "run":
-        return run_with_optional_loop(
-            command="run",
-            cycle_fn=lambda: run_cycle(settings, force_dry_run=args.dry_run),
+        return run_stage3_runtime(
+            settings,
+            force_dry_run=args.dry_run,
             loop_enabled=args.loop and not args.once,
             cycle_seconds=args.cycle_seconds,
             max_cycles=args.max_cycles,
@@ -584,6 +584,31 @@ def run_with_optional_loop(
         )
         print(f"{command}: interrupted, shutting down cleanly")
         return last_rc
+
+
+def run_stage3_runtime(
+    settings: Settings,
+    *,
+    force_dry_run: bool,
+    loop_enabled: bool,
+    cycle_seconds: int,
+    max_cycles: int | None,
+    jitter_seconds: int,
+) -> int:
+    try:
+        with single_instance_lock(db_path=settings.state_db_path, account_key="stage3"):
+            return run_with_optional_loop(
+                command="run",
+                cycle_fn=lambda: run_cycle(settings, force_dry_run=force_dry_run),
+                loop_enabled=loop_enabled,
+                cycle_seconds=cycle_seconds,
+                max_cycles=max_cycles,
+                jitter_seconds=jitter_seconds,
+            )
+    except RuntimeError as exc:
+        logger.error("stage3_runtime_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
+        print(str(exc))
+        return 2
 
 
 def _apply_effective_universe(settings: Settings) -> Settings:
