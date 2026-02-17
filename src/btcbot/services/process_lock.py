@@ -18,7 +18,8 @@ class ProcessLock:
 
 def _lock_file_path(key: str) -> Path:
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"btcbot-{digest}.lock"
+    lock_dir = os.getenv("BTCBOT_LOCK_DIR", tempfile.gettempdir())
+    return Path(lock_dir) / f"btcbot-{digest}.lock"
 
 
 def _pid_file_path(lock_path: Path) -> Path:

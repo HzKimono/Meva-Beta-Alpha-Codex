@@ -10,6 +10,11 @@ import pytest
 from btcbot.services.process_lock import single_instance_lock
 
 
+@pytest.fixture(autouse=True)
+def lock_dir_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BTCBOT_LOCK_DIR", str(tmp_path))
+
+
 def test_single_instance_lock_blocks_second_acquire(tmp_path: Path) -> None:
     db_path = str(tmp_path / "state.db")
     with single_instance_lock(db_path=db_path, account_key="acct"):
@@ -87,6 +92,7 @@ def test_single_instance_lock_blocks_across_processes(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = f"src{os.pathsep}" + env.get("PYTHONPATH", "")
+    env["BTCBOT_LOCK_DIR"] = str(tmp_path)
 
     proc_a = subprocess.Popen(
         [sys.executable, "-c", script, db_path, account_key, "2"],

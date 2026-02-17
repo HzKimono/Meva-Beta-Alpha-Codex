@@ -83,16 +83,39 @@ def test_doctor_fails_when_dataset_is_file(tmp_path: Path) -> None:
     assert any("dataset path is not a directory" in error for error in report.errors)
 
 
-def test_doctor_dataset_optional_ok(capsys) -> None:
+def test_doctor_dataset_optional_ok(capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "btcbot.services.doctor.resolve_effective_universe",
+        lambda settings: type(
+            "EffectiveUniverse",
+            (),
+            {
+                "symbols": settings.symbols,
+                "source": "settings",
+                "metadata_available": True,
+                "rejected_symbols": [],
+                "suggestions": [],
+                "auto_corrected_symbols": [],
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.doctor._check_exchange_rules",
+        lambda settings, symbols, checks, errors, warnings, actions: checks.append(
+            DoctorCheck("exchange_rules", "compatibility", "pass", "ok")
+        ),
+    )
+
+    db_path = tmp_path / "doctor_state.db"
     code = cli.run_doctor(
         Settings(DOCTOR_SLO_ENABLED=False),
-        db_path="btcbot_state.db",
+        db_path=str(db_path),
         dataset_path=None,
         json_output=False,
     )
 
     out = capsys.readouterr().out
-    assert code == 1
+    assert code == 0
     assert "dataset is optional; required only for replay/backtest" in out
 
 

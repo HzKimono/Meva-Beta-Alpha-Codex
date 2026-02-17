@@ -40,3 +40,19 @@ def isolate_settings_from_host_env(monkeypatch: pytest.MonkeyPatch):
     yield
 
     Settings.model_config["env_file"] = original_env_file
+
+
+@pytest.fixture
+def make_live_execution_kwargs():
+    def _make(**overrides):
+        base = {
+            "dry_run": False,
+            "kill_switch": False,
+            "safe_mode": False,
+            "live_trading_enabled": True,
+            "live_trading_ack": True,
+        }
+        base.update(overrides)
+        return base
+
+    return _make
