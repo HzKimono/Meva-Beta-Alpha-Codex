@@ -29,6 +29,7 @@ from btcbot.observability import (
     flush_instrumentation,
     get_instrumentation,
 )
+from btcbot.observability_decisions import emit_decision
 from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_replay_dataset
 from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
@@ -769,7 +770,14 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 "planning_cycle", attrs={"run_id": run_id, "cycle_id": cycle_id}
             ):
                 portfolio_service = PortfolioService(exchange)
-                market_data_service = MarketDataService(exchange)
+                try:
+                    market_data_service = MarketDataService(
+                        exchange,
+                        mode=settings.market_data_mode,
+                        ws_rest_fallback=settings.ws_market_data_rest_fallback,
+                    )
+                except TypeError:
+                    market_data_service = MarketDataService(exchange)
                 sweep_service = SweepService(
                     state_store=state_store,
                     target_try=settings.target_try,
@@ -812,7 +820,62 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 )
 
                 balances = portfolio_service.get_balances()
-                bids = market_data_service.get_best_bids(settings.symbols)
+                freshness = None
+                get_bids_with_freshness = getattr(
+                    market_data_service,
+                    "get_best_bids_with_freshness",
+                    None,
+                )
+                if callable(get_bids_with_freshness):
+                    bids, freshness = get_bids_with_freshness(
+                        settings.symbols,
+                        max_age_ms=settings.max_market_data_age_ms,
+                    )
+                else:
+                    bids = market_data_service.get_best_bids(settings.symbols)
+                    get_market_data_freshness = getattr(
+                        market_data_service,
+                        "get_market_data_freshness",
+                        None,
+                    )
+                    if callable(get_market_data_freshness):
+                        freshness = get_market_data_freshness(
+                            max_age_ms=settings.max_market_data_age_ms,
+                        )
+                if freshness is not None and bool(getattr(freshness, "is_stale", False)):
+                    observed_age_ms = getattr(freshness, "observed_age_ms", None)
+                    max_age_ms = int(getattr(freshness, "max_age_ms", settings.max_market_data_age_ms))
+                    source_mode = str(getattr(freshness, "source_mode", settings.market_data_mode))
+                    connected = bool(getattr(freshness, "connected", False))
+                    missing_symbols = list(getattr(freshness, "missing_symbols", ()))
+                    envelope = {
+                        "cycle_id": cycle_id,
+                        "run_id": run_id,
+                        "decision_layer": "market_data",
+                        "reason_code": "market_data:stale",
+                        "action": "BLOCK",
+                        "scope": "global",
+                        "observed_age_ms": observed_age_ms,
+                        "max_age_ms": max_age_ms,
+                        "symbols": [normalize_symbol(symbol) for symbol in settings.symbols],
+                        "market_data_mode": source_mode,
+                        "ws_connected": connected,
+                        "missing_symbols": missing_symbols,
+                    }
+                    emit_decision(logger, envelope)
+                    state_store.record_cycle_audit(
+                        cycle_id=cycle_id,
+                        counts={"blocked_by_market_data": 1},
+                        decisions=["market_data:stale"],
+                        envelope=envelope,
+                    )
+                    logger.warning(
+                        "market_data_stale_fail_closed",
+                        extra={"extra": envelope},
+                    )
+                    state_store.set_last_cycle_id(cycle_id)
+                    return 0
+
                 startup_mark_prices = {
                     normalize_symbol(symbol): Decimal(str(price))
                     for symbol, price in bids.items()
@@ -854,6 +917,13 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 }
                 stale_count = len([symbol for symbol, price in bids.items() if price <= 0])
                 if settings.symbols:
+                    instrumentation.counter(
+                        "invalid_best_bid_count",
+                        stale_count,
+                        attrs={"cycle_id": cycle_id},
+                    )
+                    # Deprecated compatibility metric; retains prior behavior
+                    # (count of non-positive best bids) under the old name.
                     instrumentation.counter(
                         "stale_market_data_rate",
                         stale_count,

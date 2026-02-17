@@ -198,3 +198,21 @@ def test_stage7_enabled_requires_dry_run_and_no_live() -> None:
 def test_stage4_planning_kernel_flag_defaults_safe() -> None:
     settings = Settings(_env_file=None)
     assert settings.stage4_use_planning_kernel is False
+
+
+def test_market_data_mode_ws_requires_ws_enabled() -> None:
+    with pytest.raises(ValueError, match="MARKET_DATA_MODE=ws requires BTCTURK_WS_ENABLED=true"):
+        Settings(MARKET_DATA_MODE="ws", BTCTURK_WS_ENABLED=False)
+
+
+def test_ws_market_data_rest_fallback_invalid_in_rest_mode() -> None:
+    with pytest.raises(
+        ValueError,
+        match="WS_MARKET_DATA_REST_FALLBACK=true is only valid when MARKET_DATA_MODE=ws",
+    ):
+        Settings(MARKET_DATA_MODE="rest", WS_MARKET_DATA_REST_FALLBACK=True)
+
+
+def test_max_market_data_age_ms_accepts_legacy_alias() -> None:
+    settings = Settings(BTCTURK_MARKETDATA_MAX_AGE_MS=1234)
+    assert settings.max_market_data_age_ms == 1234

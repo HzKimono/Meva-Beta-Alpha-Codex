@@ -48,9 +48,14 @@ class Settings(BaseSettings):
         default=60,
         alias="BTCTURK_CLOCK_SYNC_INTERVAL_SECONDS",
     )
-    btcturk_marketdata_max_age_ms: int = Field(
+    market_data_mode: str = Field(default="rest", alias="MARKET_DATA_MODE")
+    max_market_data_age_ms: int = Field(
         default=15_000,
-        alias="BTCTURK_MARKETDATA_MAX_AGE_MS",
+        validation_alias=AliasChoices("MAX_MARKET_DATA_AGE_MS", "BTCTURK_MARKETDATA_MAX_AGE_MS"),
+    )
+    ws_market_data_rest_fallback: bool = Field(
+        default=False,
+        alias="WS_MARKET_DATA_REST_FALLBACK",
     )
 
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
@@ -501,6 +506,19 @@ class Settings(BaseSettings):
             raise ValueError("PNL_DIVERGENCE_TRY_ERROR must be >= PNL_DIVERGENCE_TRY_WARN")
         return value
 
+
+    @field_validator("market_data_mode")
+    def validate_market_data_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"rest", "ws"}:
+            raise ValueError("MARKET_DATA_MODE must be one of: rest,ws")
+        return normalized
+
+    @field_validator("max_market_data_age_ms")
+    def validate_max_market_data_age_ms(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("MAX_MARKET_DATA_AGE_MS must be >= 1")
+        return value
     @field_validator("stage7_score_weights", mode="before")
     def validate_stage7_score_weights(
         cls, value: str | dict[str, object] | None
@@ -649,6 +667,17 @@ class Settings(BaseSettings):
                 "STAGE7_LOSS_GUARDRAIL_MODE must be one of: reduce_risk_only,observe_only"
             )
         return normalized
+
+
+    @model_validator(mode="after")
+    def validate_market_data_settings(self) -> Settings:
+        if self.market_data_mode == "ws" and not self.btcturk_ws_enabled:
+            raise ValueError("MARKET_DATA_MODE=ws requires BTCTURK_WS_ENABLED=true")
+        if self.market_data_mode == "rest" and self.ws_market_data_rest_fallback:
+            raise ValueError(
+                "WS_MARKET_DATA_REST_FALLBACK=true is only valid when MARKET_DATA_MODE=ws"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_stage7_safety(self) -> Settings:
