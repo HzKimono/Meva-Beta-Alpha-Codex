@@ -2,15 +2,40 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from btcbot.accounting.models import PortfolioAccountingState
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.stage4 import Position
+from btcbot.risk.budget import RiskBudgetPolicy, RiskBudgetView
 from btcbot.services.ledger_service import PnlReport
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BudgetDecision:
+    risk_decision: RiskDecision
+    budget_view: RiskBudgetView
+
+    @property
+    def mode(self) -> Mode:
+        return self.risk_decision.mode
+
+    @property
+    def position_sizing_multiplier(self) -> Decimal:
+        return self.budget_view.position_sizing_multiplier
+
+    @property
+    def max_order_notional_try(self) -> Decimal:
+        return self.budget_view.max_order_notional_try
+
+    @property
+    def available_risk_capital_try(self) -> Decimal:
+        return self.budget_view.available_risk_capital_try
 
 
 class RiskBudgetService:
@@ -19,9 +44,11 @@ class RiskBudgetService:
         state_store: StateStore,
         *,
         now_provider: Callable[[], datetime] | None = None,
+        budget_policy: RiskBudgetPolicy | None = None,
     ) -> None:
         self.state_store = state_store
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
+        self.budget_policy = budget_policy or RiskBudgetPolicy()
 
     def compute_decision(
         self,
@@ -32,7 +59,7 @@ class RiskBudgetService:
         mark_prices: dict[str, Decimal],
         realized_today_try: Decimal,
         kill_switch_active: bool,
-    ) -> tuple[RiskDecision, Mode | None, Decimal, Decimal, date]:
+    ) -> tuple[BudgetDecision, Mode | None, Decimal, Decimal, date]:
         current = self.state_store.get_risk_state_current()
         prev_mode_raw = current.get("current_mode")
         prev_mode = None
@@ -69,12 +96,52 @@ class RiskBudgetService:
             mode = Mode.OBSERVE_ONLY
             reasons = ["KILL_SWITCH"]
 
-        decision = RiskDecision(
+        risk_decision = RiskDecision(
             mode=mode,
             reasons=reasons,
             limits=limits,
             signals=signals,
             decided_at=decided_at,
+        )
+        accounting = PortfolioAccountingState(
+            as_of=decided_at,
+            balances_try={"TRY": pnl_report.equity_estimate},
+            locked_try={},
+            treasury_try=Decimal("0"),
+            trading_capital_try=pnl_report.equity_estimate,
+            realized_pnl_try=Decimal("0"),
+            unrealized_pnl_try=Decimal("0"),
+            fees_try=Decimal("0"),
+            funding_cost_try=Decimal("0"),
+            slippage_try=Decimal("0"),
+            symbols={},
+        )
+        budget_view = self.budget_policy.evaluate(
+            accounting=accounting,
+            peak_equity_try=peak_equity,
+            realized_pnl_today_try=realized_today_try,
+            consecutive_loss_streak=0,
+            volatility_regime="normal",
+        )
+        budget_multiplier = budget_view.position_sizing_multiplier
+        if mode == Mode.OBSERVE_ONLY:
+            budget_multiplier = Decimal("0")
+        elif mode == Mode.REDUCE_RISK_ONLY:
+            budget_multiplier = min(budget_multiplier, Decimal("0.5"))
+
+        decision = BudgetDecision(
+            risk_decision=risk_decision,
+            budget_view=RiskBudgetView(
+                trading_capital_try=budget_view.trading_capital_try,
+                treasury_try=budget_view.treasury_try,
+                available_risk_capital_try=budget_view.available_risk_capital_try,
+                daily_loss_limit_try=budget_view.daily_loss_limit_try,
+                drawdown_halt_limit_try=budget_view.drawdown_halt_limit_try,
+                max_gross_exposure_try=budget_view.max_gross_exposure_try,
+                max_order_notional_try=budget_view.max_order_notional_try,
+                position_sizing_multiplier=budget_multiplier,
+                mode=mode,
+            ),
         )
         return decision, prev_mode, peak_equity, fees_today, today
 
@@ -82,7 +149,7 @@ class RiskBudgetService:
         self,
         *,
         cycle_id: str,
-        decision: RiskDecision,
+        decision: BudgetDecision | RiskDecision,
         prev_mode: Mode | None,
         peak_equity: Decimal,
         peak_day: date,
@@ -91,7 +158,7 @@ class RiskBudgetService:
     ) -> None:
         self.state_store.persist_risk(
             cycle_id=cycle_id,
-            decision=decision,
+            decision=(decision.risk_decision if isinstance(decision, BudgetDecision) else decision),
             prev_mode=(prev_mode.value if prev_mode else None),
             mode=decision.mode,
             peak_equity_try=peak_equity,

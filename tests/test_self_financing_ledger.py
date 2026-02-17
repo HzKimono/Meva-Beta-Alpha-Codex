@@ -173,3 +173,42 @@ def test_stress_partial_fills_fee_funding_and_rounding() -> None:
     assert state.funding_cost_try == Decimal("0.10000000")
     assert state.slippage_try == Decimal("0.05000001")
     assert state.symbols["XRPTRY"].qty == Decimal("2.22222222")
+
+
+def test_conflicting_duplicate_event_ids_are_deterministic_canonical_ts_min_wins() -> None:
+    ledger = AccountingLedger()
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    buy = _event(
+        "dup-conflict",
+        ts,
+        type=AccountingEventType.FILL_RECORDED,
+        symbol="ETHTRY",
+        side="BUY",
+        qty="1",
+        price_try="100",
+    )
+    sell = _event(
+        "dup-conflict",
+        datetime(2024, 1, 2, tzinfo=UTC),
+        type=AccountingEventType.FILL_RECORDED,
+        symbol="ETHTRY",
+        side="SELL",
+        qty="1",
+        price_try="120",
+    )
+
+    first_order = ledger.recompute(
+        events=[buy, sell],
+        as_of=datetime(2024, 1, 3, tzinfo=UTC),
+        mark_prices_try={"ETHTRY": Decimal("120")},
+        initial_trading_capital_try=Decimal("500"),
+    )
+    reversed_order = ledger.recompute(
+        events=[sell, buy],
+        as_of=datetime(2024, 1, 3, tzinfo=UTC),
+        mark_prices_try={"ETHTRY": Decimal("120")},
+        initial_trading_capital_try=Decimal("500"),
+    )
+
+    assert first_order == reversed_order
+    assert first_order.symbols["ETHTRY"].qty == Decimal("1.00000000")
