@@ -1,106 +1,261 @@
-# Repository Inventory Report
+# End-to-End Execution Flow Narrative (Evidence-Based)
 
-## A) Repo tree map (top-level + important subfolders)
+Scope: this report documents the runtime behavior from repository evidence only, focused on the default `run` command flow and related runtime components.
 
-Top-level directories and files (selected):
-- `.github/workflows/ci.yml` (CI pipeline)
-- `src/btcbot/` (application package)
-- `tests/` (unit/integration/chaos/soak tests)
-- `docs/` (architecture/runbook/stage docs)
-- `data/replay/` (replay dataset area)
-- `scripts/` (guard and debugging utilities)
-- `Dockerfile`, `docker-compose.yml`, `Makefile`, `pyproject.toml`, `constraints.txt`, `.env.example`, `.env.pilot.example`.
+## 1) Happy-path runtime flow
 
-Important `src/btcbot` package boundaries:
-- `adapters/` and `adapters/btcturk/`: exchange HTTP/WS and integration utilities
-- `services/`: orchestration and lifecycle services (market/accounting/strategy/risk/execution/state)
-- `domain/`: typed models/contracts for orders, risk, universe, accounting, etc.
-- `strategies/`: strategy implementations
-- `accounting/`: accounting service and ledger models
-- `risk/`: risk policy and exchange rules provider
-- `replay/`: replay dataset tooling and validation
-- `security/`: secrets and redaction utilities
-- top-level `cli.py`, `config.py`, `__main__.py`.
+### Step 1 — Startup and command dispatch
+- **Files/functions**
+  - `src/btcbot/__main__.py` → module entrypoint to CLI.
+  - `src/btcbot/cli.py::main()` parses subcommands, bootstraps settings/logging/instrumentation, then dispatches `run` / `stage4-run` / `stage7-run` etc.
+- **Inputs**
+  - CLI args (`run`, `--loop`, `--dry-run`, `--env-file`, etc.).
+  - Environment variables and optional dotenv path.
+- **Outputs**
+  - Exit code and command routing to cycle functions.
+- **Side effects**
+  - Logging/instrumentation setup.
+  - Optional loop scheduler starts (`run_with_optional_loop`).
 
-## B) Runtime components (processes/services) and how they start
+### Step 2 — Configuration load and safety validation
+- **Files/functions**
+  - `src/btcbot/cli.py::_load_settings()`.
+  - `src/btcbot/config.py::Settings` (Pydantic settings schema with env aliases and defaults).
+  - `src/btcbot/security/secrets.py` helpers invoked by `_load_settings` (`build_default_provider`, `inject_runtime_secrets`, `validate_secret_controls`, `log_secret_validation`).
+- **Inputs**
+  - `.env.live` (default in `Settings`) or `--env-file` override.
+  - process env vars (`BTCTURK_*`, `DRY_RUN`, `KILL_SWITCH`, `LIVE_TRADING*`, etc.).
+- **Outputs**
+  - `Settings` instance used across runtime.
+- **Side effects**
+  - Secret-injection into runtime env for selected keys.
+  - Secret-control validation logs; failure raises `ValueError`.
 
-Primary process model:
-- Single Python CLI process (`btcbot`) exposed via `project.scripts` and `python -m btcbot.cli` / `python -m btcbot`.
-- No web server entrypoint is defined; runtime is command/subcommand-driven.
+### Step 3 — Client and service initialization
+- **Files/functions**
+  - `src/btcbot/cli.py::run_cycle()`.
+  - `src/btcbot/services/exchange_factory.py::build_exchange_stage3()`.
+  - `src/btcbot/services/state_store.py::StateStore.__init__()`.
+- **Inputs**
+  - Effective safety policy (`DRY_RUN`, `KILL_SWITCH`, live arming flags, `SAFE_MODE`).
+  - DB path (`STATE_DB_PATH`).
+- **Outputs**
+  - Exchange client (dry-run wrapper or live `BtcturkHttpClient`).
+  - SQLite-backed `StateStore`.
+  - Service graph: `PortfolioService`, `MarketDataService`, `ExecutionService`, `AccountingService`, `StrategyService`, `RiskService`, `SweepService`.
+- **Side effects**
+  - `StateStore` opens SQLite and creates/ensures schema/tables.
+  - In dry-run exchange build, startup fetches public exchange info/orderbooks best-effort.
 
-Entrypoints and startup:
-- Console script: `btcbot = btcbot.cli:main`.
-- Module entrypoint: `src/btcbot/__main__.py` calls `btcbot.cli.main()`.
-- Docker runtime entrypoint: `ENTRYPOINT ["btcbot"]`, default `CMD ["run", "--once"]`.
-- Compose service starts loop mode: `command: ["run", "--loop", "--cycle-seconds", "10"]`.
+### Step 4 — Startup recovery before trading actions
+- **Files/functions**
+  - `src/btcbot/cli.py::run_cycle()` calls `StartupRecoveryService().run(...)`.
+  - `src/btcbot/services/startup_recovery.py::StartupRecoveryService.run()`.
+- **Inputs**
+  - Symbols, mark prices, services (`execution_service`, `accounting_service`, `portfolio_service`).
+- **Outputs**
+  - `StartupRecoveryResult` with `observe_only_required`, reason, invariants, fills inserted.
+- **Side effects**
+  - Refresh order lifecycle (`execution_service.refresh_order_lifecycle`).
+  - Refresh/apply fills through accounting if mark prices available.
+  - Balance/position invariants checked; logs can force observe-only mode for cycle.
 
-CLI runtime commands (selected, from parser):
-- Stage3-like: `run`, `health`, `doctor`
-- Stage4: `stage4-run`
-- Stage7: `stage7-run`, `stage7-backtest`, `stage7-parity`, `stage7-report`, `stage7-export`, `stage7-alerts`
+### Step 5 — Market data ingest and portfolio snapshot
+- **Files/functions**
+  - `src/btcbot/services/portfolio_service.py::get_balances()`.
+  - `src/btcbot/services/market_data_service.py::get_best_bids()` and `get_best_bid_ask()`.
+  - `src/btcbot/adapters/btcturk_http.py::get_balances()`, `get_orderbook()`, `get_exchange_info()`.
+- **Inputs**
+  - Symbol list from settings.
+- **Outputs**
+  - Free/locked balances.
+  - Best bid/ask per symbol.
+- **Side effects**
+  - Network calls to BTCTurk endpoints (public and private depending on method).
+  - Metrics (`stale_market_data_rate`, reconcile latency histograms) emitted in run cycle.
 
-Scheduling model:
-- Internal loop scheduling is in CLI command options (`--loop`, `--cycle-seconds`, `--max-cycles`, optional jitter).
-- No external scheduler/systemd unit file is present in the repository.
+### Step 6 — Signal/strategy generation
+- **Files/functions**
+  - `src/btcbot/services/strategy_service.py::generate()`.
+  - Strategy implementation wired in `run_cycle`: `btcbot.strategies.profit_v1.ProfitAwareStrategyV1`.
+- **Inputs**
+  - Cycle ID, symbols, balances.
+  - Orderbooks from market data, positions from accounting, open/unknown order counts from state store.
+- **Outputs**
+  - Raw intent list (`Intent`).
+- **Side effects**
+  - No network side effects in strategy service itself; reads state store/accounting/market snapshots.
 
-## C) Key modules and responsibilities
+### Step 7 — Risk checks/filtering
+- **Files/functions**
+  - `src/btcbot/services/risk_service.py::filter()`.
+  - `src/btcbot/risk/policy.py::RiskPolicy.evaluate()`.
+- **Inputs**
+  - Raw intents, cycle context, open orders, prior intent timestamps, TRY cash/investable budget.
+- **Outputs**
+  - Approved intents.
+- **Side effects**
+  - Risk block events logged with rule reason.
+  - Approved intents recorded in state store (`record_intent`).
 
-Core runtime wiring:
-- `btcbot.cli`: argparse command surface and orchestration for stage runs, health/doctor, replay/backtest/parity commands.
-- `btcbot.config.Settings`: centralized environment-backed config schema (`BaseSettings`) with validation/parsing.
+### Step 8 — Order placement and tracking
+- **Files/functions**
+  - `src/btcbot/services/execution_service.py::execute_intents()`.
+  - `src/btcbot/services/execution_service.py::refresh_order_lifecycle()`, `cancel_stale_orders()`.
+  - Exchange adapter methods: `place_limit_order`, `cancel_order`, `get_open_orders`, `get_all_orders`, `get_order`.
+- **Inputs**
+  - Approved intents + cycle_id.
+  - Current open orders and idempotency state from SQLite.
+- **Outputs**
+  - Count of placed/simulated orders.
+  - Updated order statuses/idempotency records.
+- **Side effects**
+  - DB writes: action records, idempotency reservations/finalization, order metadata/status updates.
+  - Live mode network writes: BTCTurk private POST/DELETE order endpoints.
+  - Dry-run path records simulated actions and skips exchange write calls.
 
-Exchange connectors:
-- `btcbot.adapters.btcturk_http.BtcturkHttpClient`: synchronous BTCTurk REST client (public/private endpoints, retries, auth integration).
-- `btcbot.adapters.btcturk.ws_client.BtcturkWsClient`: async websocket client abstraction with reconnect/backoff, queueing, handler dispatch.
-- `btcbot.services.exchange_factory`: builds stage3/stage4 exchange clients and dry-run/live variants.
+### Step 9 — PnL/accounting refresh
+- **Files/functions**
+  - `src/btcbot/accounting/accounting_service.py::refresh()` and `_apply_fill()`.
+- **Inputs**
+  - Symbols + mark prices.
+  - Recent fills from exchange client (`get_recent_fills` if available).
+- **Outputs**
+  - Number of newly inserted fills.
+  - Updated positions (qty, avg_cost, realized/unrealized PnL, fees).
+- **Side effects**
+  - DB writes to fills/positions via `StateStore` methods.
 
-Data/storage and replay:
-- `btcbot.services.state_store.StateStore`: SQLite persistence layer; initializes schema and provides transactional operations.
-- `btcbot.replay.validate`: replay dataset contract checks.
-- `btcbot.services.market_data_replay` + `btcbot.adapters.replay_exchange`: replay-mode market/exchange plumbing.
+### Step 10 — Cycle completion and shutdown/restart behavior
+- **Files/functions**
+  - `src/btcbot/cli.py::run_cycle()` finally block.
+  - `src/btcbot/cli.py::run_with_optional_loop()` for repeated scheduling.
+  - `src/btcbot/observability.py` flush/shutdown helpers.
+- **Inputs**
+  - Loop options (`--loop`, cycle seconds, jitter, max cycles).
+- **Outputs**
+  - Return code per cycle/command.
+- **Side effects**
+  - Flush instrumentation and log handlers each cycle exit path.
+  - Close exchange client best effort.
+  - Optional sleep/retry loop for next cycle.
 
-Strategy/risk/execution layering:
-- `btcbot.services.strategy_service` and `btcbot.strategies.*`: strategy signal/intent production.
-- `btcbot.services.risk_service` + `btcbot.risk.policy`: risk filtering and constraints.
-- `btcbot.services.execution_service` (+ `execution_service_stage4`): order lifecycle handling and execution path.
-- `btcbot.services.decision_pipeline_service`: orchestration of universe -> strategy -> allocation -> order mapping.
-- `btcbot.services.stage4_cycle_runner` and `stage7_cycle_runner`: high-level per-cycle orchestrators for stage modes.
+---
 
-Accounting/ledger:
-- `btcbot.accounting.accounting_service`: applies fills and computes accounting state.
-- `btcbot.accounting.ledger` and `btcbot.services.ledger_service`: ledger-domain processing and integration.
+## 2) Per-step I/O and side-effects matrix
 
-## D) External dependencies list with purpose (present in repo)
+| Step | File(s) / Function(s) | Inputs | Outputs | Side effects |
+|---|---|---|---|---|
+| 1. Startup dispatch | `cli.main` | CLI args | Selected command function + exit code | Logging + instrumentation setup |
+| 2. Config load | `cli._load_settings`, `config.Settings` | Env, `.env.live` / `--env-file` | `Settings` object | Secret injection/validation logs |
+| 3. Init clients/services | `build_exchange_stage3`, `StateStore.__init__`, `run_cycle` service constructors | Settings, DB path | Exchange + state + services | SQLite schema init; dry-run public data fetch |
+| 4. Startup recovery | `StartupRecoveryService.run` | cycle_id, symbols, mark_prices, services | Recovery result | Lifecycle refresh; accounting refresh; invariant logs |
+| 5. Market/portfolio ingest | `PortfolioService.get_balances`, `MarketDataService.get_best_bids`, `BtcturkHttpClient.get_*` | Symbols | balances + bid/ask snapshot | REST network calls |
+| 6. Strategy | `StrategyService.generate` | balances + orderbooks + positions + open orders | raw intents | Reads from state/accounting services |
+| 7. Risk | `RiskService.filter`, `RiskPolicy.evaluate` | raw intents + risk context | approved intents | Record approved intents to DB |
+| 8. Execution | `ExecutionService.execute_intents` (+ refresh/cancel) | approved intents, cycle id | placed/simulated count | DB action/idempotency/order writes; optional live submit/cancel network calls |
+| 9. Accounting | `AccountingService.refresh` | symbols, mark prices, fills | inserted count + position updates | DB fill/position updates |
+| 10. End cycle | `run_cycle` finally + `run_with_optional_loop` | command/loop params | rc + next iteration decision | flush metrics/logs, close clients, sleep/retry |
 
-From `pyproject.toml` and pinned in `constraints.txt`:
-- `httpx`: HTTP client for exchange/API communication.
-- `pydantic`, `pydantic-settings`: settings and typed model validation.
-- `tenacity`: retry utilities.
-- `python-dotenv`: dotenv loading support.
-- `rich`: CLI output formatting.
-- `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp`, `opentelemetry-exporter-prometheus`, `prometheus-client`: observability/metrics instrumentation.
-- Dev/test: `pytest`, `ruff`, `mypy`.
+---
 
-Notes:
-- `requirements*.txt` files are not present; dependency declarations are in `pyproject.toml` + `constraints.txt`.
-- `src/btcbot.egg-info/requires.txt` exists but contains metadata ranges that differ from pinned constraints.
+## 3) Concurrency model
 
-## E) Configuration sources, infrastructure files, and explicit unknowns
+### Observed runtime model (default `run` path)
+- Single process, synchronous command execution in `cli.main` + `run_cycle`.
+- Optional repeated scheduling implemented as an in-process loop (`run_with_optional_loop`) with sleep/jitter and retry-on-exception.
+- Single-instance protection for stage4/stage7 commands via file lock context manager (`single_instance_lock`).
 
-Configuration sources (evidence-based):
-- Environment and dotenv through `Settings` (`env_file=".env.live"`, many `alias=ENV_VAR`).
-- Example env profiles: `.env.example`, `.env.pilot.example`.
-- CLI accepts `--env-file` for dotenv bootstrap.
-- `pyproject.toml` and `constraints.txt` for packaging/dependency configuration.
-- JSON is accepted by specific CLI/config fields (e.g., `--pair-info-json`, symbol list parsing); no runtime YAML config file discovered.
+### Async / queue components present in repo
+- `src/btcbot/adapters/btcturk/ws_client.py` defines an **asyncio** WebSocket client with:
+  - `asyncio.Queue` for envelopes,
+  - background tasks (`_read_loop`, `_dispatch_loop`, optional `_heartbeat_loop`),
+  - reconnect/backoff flow.
+- This async WS client is present but direct invocation from `cli.run` happy path is not evidenced in inspected files.
 
-Infra/runtime files:
-- Dockerfile (multi-stage build, non-root runtime user, default CLI command).
-- docker-compose service using `.env.live` and persistent `/data` volume.
-- GitHub Actions CI (`.github/workflows/ci.yml`) with static analysis, tests, integration fixtures, soak schedule, and docker build.
-- No systemd unit files found.
+### Shared state and protection
+- Persistent shared state: SQLite (`StateStore`) with WAL mode, busy timeout, and explicit transaction context (`BEGIN IMMEDIATE`).
+- In-process observability singleton protected by `threading.Lock` in `configure_instrumentation`.
+- Cross-process mutual exclusion (selected commands) via OS file lock (`single_instance_lock`).
 
-Explicit unknowns / missing info:
-- No documented production process manager beyond Docker/Compose; systemd/K8s manifests are not present.
-- No dedicated secrets manager integration config is shown (only env/dotenv + runtime secret validation helpers).
-- WebSocket transport implementation dependency is abstracted in code via injected `connect_fn`; concrete library choice is not declared in dependency pins shown.
+### Unknowns (explicit)
+- Whether websocket client is used by any production entrypoint outside inspected CLI paths is **unknown** from inspected files.
+- No explicit thread pool / multiprocessing orchestration was found in inspected runtime entrypoints.
+
+---
+
+## A) Sequence diagram (text, numbered)
+
+1. Operator invokes `btcbot run ...` (or `python -m btcbot.cli run ...`).
+2. `__main__` forwards to `cli.main`.
+3. `cli.main` parses CLI arguments/subcommand.
+4. `cli._load_settings` builds provider, injects runtime secrets, loads `Settings`, validates secret controls.
+5. Logging and instrumentation are configured.
+6. Effective universe is resolved and side-effects arm state is printed.
+7. For `run`, optional scheduler enters `run_with_optional_loop` (or single cycle).
+8. `run_cycle` computes live policy, enforces arming gates, builds exchange and `StateStore`.
+9. `run_cycle` constructs services (portfolio, market, execution, accounting, strategy, risk, sweep).
+10. Balances + best bids fetched; startup mark prices formed.
+11. `StartupRecoveryService.run` executes lifecycle refresh + accounting refresh + invariants.
+12. If recovery requires observe-only, execution service gate flags are tightened.
+13. Runtime lifecycle refresh and stale-cancel checks run (`ExecutionService`).
+14. Fresh market bids and mark prices are computed.
+15. `AccountingService.refresh` ingests recent fills and updates positions/unrealized PnL.
+16. `StrategyService.generate` emits raw intents.
+17. `RiskService.filter` + `RiskPolicy.evaluate` produce approved intents.
+18. `ExecutionService.execute_intents` runs idempotency flow and either simulates or performs submit calls.
+19. Cycle summary is logged; last cycle id persisted.
+20. `finally`: flush instrumentation/log handlers and close exchange.
+21. If loop mode enabled, sleep/jitter and continue next cycle; otherwise return exit code.
+
+---
+
+## B) Critical call graph (top 15 functions/classes)
+
+1. `btcbot.cli.main`
+2. `btcbot.cli._load_settings`
+3. `btcbot.cli.run_with_optional_loop`
+4. `btcbot.cli.run_cycle`
+5. `btcbot.services.exchange_factory.build_exchange_stage3`
+6. `btcbot.services.state_store.StateStore`
+7. `btcbot.services.startup_recovery.StartupRecoveryService.run`
+8. `btcbot.services.market_data_service.MarketDataService.get_best_bids`
+9. `btcbot.services.portfolio_service.PortfolioService.get_balances`
+10. `btcbot.accounting.accounting_service.AccountingService.refresh`
+11. `btcbot.services.strategy_service.StrategyService.generate`
+12. `btcbot.services.risk_service.RiskService.filter`
+13. `btcbot.risk.policy.RiskPolicy.evaluate`
+14. `btcbot.services.execution_service.ExecutionService.execute_intents`
+15. `btcbot.adapters.btcturk_http.BtcturkHttpClient` (notably `get_orderbook`, `get_balances`, `submit_limit_order`, `cancel_order_by_client_order_id`, `_private_request`)
+
+---
+
+## C) State model (in-memory vs persisted)
+
+### In-memory state
+- CLI/runtime ephemeral values: args, run_id, cycle_id, policy decisions.
+- Service object graph and temporary snapshots (balances, bids, mark prices, intents, approved intents).
+- MarketDataService symbol-rules cache (`_rules_cache` and timestamp).
+- ExecutionService runtime flags (dry_run, kill_switch, safe_mode) and unknown-order probe configuration.
+- Observability singleton and metric instrument handles.
+- (WS component) async queue/tasks/stop event in `BtcturkWsClient` when used.
+
+### Persisted state (SQLite via `StateStore`)
+- Core tables initialized in `_init_db`: `actions`, `orders`, `fills`, `positions`, `intents`, `meta`, plus idempotency and stage-specific tables.
+- Idempotency lifecycle for submit/cancel actions.
+- Order lifecycle/status reconciliation metadata.
+- Accounting persistence: fills and position snapshots.
+- Stage7 persistence families (run metrics, cycle trace, params, risk decisions, etc.).
+
+### State protection / consistency controls
+- SQLite WAL + busy timeout on connections.
+- Transaction context manager with `BEGIN IMMEDIATE` for atomic units.
+- Cross-process single-instance lock for stage4/stage7 command paths.
+
+---
+
+## Explicit unknowns / missing evidence
+
+1. Concrete websocket transport library used at runtime is not identifiable from inspected dependency declarations and CLI happy-path wiring.
+2. A default `run`-path consumer that starts `BtcturkWsClient` is not evidenced in inspected files.
+3. External orchestrators beyond Docker Compose/CLI (e.g., systemd/K8s manifests) are not present in inspected repository files.
