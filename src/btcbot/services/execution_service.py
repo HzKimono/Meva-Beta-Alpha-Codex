@@ -29,7 +29,7 @@ from btcbot.domain.models import (
 )
 from btcbot.observability import get_instrumentation
 from btcbot.services.market_data_service import MarketDataService
-from btcbot.services.state_store import StateStore
+from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.services.trading_policy import (
     policy_block_message,
     validate_live_side_effects_policy,
@@ -62,6 +62,8 @@ class ExecutionService:
         unknown_reprobe_force_observe_only: bool = False,
         unknown_reprobe_force_kill_switch: bool = False,
         unknown_reprobe_max_lookback_seconds: int = 24 * 60 * 60,
+        pending_recovery_max_attempts: int = 3,
+        pending_recovery_backoff_seconds: int = 30,
     ) -> None:
         self.exchange = exchange
         self.state_store = state_store
@@ -84,6 +86,8 @@ class ExecutionService:
         self.unknown_reprobe_max_lookback_seconds = max(
             60 * 60, unknown_reprobe_max_lookback_seconds
         )
+        self.pending_recovery_max_attempts = max(1, pending_recovery_max_attempts)
+        self.pending_recovery_backoff_seconds = max(1, pending_recovery_backoff_seconds)
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -538,6 +542,17 @@ class ExecutionService:
                 allow_promote_simulated=not self.dry_run,
             )
             if not reservation.reserved:
+                reservation_age = max(
+                    0,
+                    int(datetime.now(UTC).timestamp()) - reservation.created_at_epoch,
+                )
+                if (
+                    reservation.status.upper() == "PENDING"
+                    and reservation_age > PENDING_GRACE_SECONDS
+                    and reservation.client_order_id
+                ):
+                    if self._recover_stale_pending_place_order(intent, reservation):
+                        continue
                 logger.info(
                     "duplicate idempotency key for place_order",
                     extra={
@@ -549,6 +564,15 @@ class ExecutionService:
                     },
                 )
                 continue
+            client_order_id = make_client_order_id(intent)
+            self.state_store.finalize_idempotency_key(
+                "place_order",
+                idempotency_key,
+                action_id=None,
+                client_order_id=client_order_id,
+                order_id=None,
+                status="PENDING",
+            )
             action_type = "would_place_order" if self.dry_run else "place_order"
             action_id = self.state_store.record_action(
                 intent.cycle_id,
@@ -579,12 +603,10 @@ class ExecutionService:
                 "place_order",
                 idempotency_key,
                 action_id=action_id,
-                client_order_id=None,
+                client_order_id=client_order_id,
                 order_id=None,
                 status="PENDING",
             )
-
-            client_order_id = make_client_order_id(intent)
             if self.dry_run:
                 self.state_store.attach_action_metadata(
                     action_id=action_id,
@@ -783,6 +805,116 @@ class ExecutionService:
             )
             placed += 1
         return placed
+
+    def _recover_stale_pending_place_order(
+        self,
+        intent: OrderIntent,
+        reservation,
+    ) -> bool:
+        now_epoch = int(datetime.now(UTC).timestamp())
+        if (
+            reservation.next_recovery_at_epoch is not None
+            and now_epoch < reservation.next_recovery_at_epoch
+        ):
+            return True
+
+        symbol_normalized = normalize_symbol(intent.symbol)
+        try:
+            open_orders = self.exchange.get_open_orders(symbol_normalized)
+            snapshots = self._open_items_to_snapshots([*open_orders.bids, *open_orders.asks])
+            matched = match_order_by_client_id(snapshots, reservation.client_order_id)
+            if matched is None:
+                now_ms = int(datetime.now(UTC).timestamp() * 1000)
+                all_orders = self.exchange.get_all_orders(
+                    pair_symbol=symbol_normalized,
+                    start_ms=now_ms - 5 * 60 * 1000,
+                    end_ms=now_ms,
+                )
+                matched = match_order_by_client_id(all_orders, reservation.client_order_id)
+        except Exception:  # noqa: BLE001
+            attempts = reservation.recovery_attempts + 1
+            max_backoff = self.pending_recovery_backoff_seconds * (
+                2 ** (self.pending_recovery_max_attempts - 1)
+            )
+            backoff_seconds = min(
+                self.pending_recovery_backoff_seconds * (2 ** (attempts - 1)),
+                max_backoff,
+            )
+            terminal = attempts >= self.pending_recovery_max_attempts
+            self.state_store.update_idempotency_recovery(
+                "place_order",
+                reservation.key,
+                recovery_attempts=attempts,
+                next_recovery_at_epoch=(None if terminal else now_epoch + backoff_seconds),
+                status=("FAILED" if terminal else "PENDING"),
+            )
+            get_instrumentation().counter(
+                "pending_recovery_lookup_failures_total",
+                attrs={"action_type": "place_order"},
+            )
+            logger.exception(
+                "stale pending recovery lookup failed",
+                extra={
+                    "extra": {
+                        "idempotency_key": reservation.key,
+                        "recovery_attempts": attempts,
+                        "max_attempts": self.pending_recovery_max_attempts,
+                    }
+                },
+            )
+            return True
+
+        if matched is not None:
+            self.state_store.finalize_idempotency_key(
+                "place_order",
+                reservation.key,
+                action_id=reservation.action_id,
+                client_order_id=reservation.client_order_id,
+                order_id=matched.order_id,
+                status="COMMITTED",
+            )
+            self.state_store.update_idempotency_recovery(
+                "place_order",
+                reservation.key,
+                recovery_attempts=0,
+                next_recovery_at_epoch=None,
+            )
+            logger.info(
+                "stale pending recovered as committed",
+                extra={
+                    "extra": {
+                        "idempotency_key": reservation.key,
+                        "client_order_id": reservation.client_order_id,
+                        "order_id": matched.order_id,
+                    }
+                },
+            )
+            return True
+
+        self.state_store.finalize_idempotency_key(
+            "place_order",
+            reservation.key,
+            action_id=reservation.action_id,
+            client_order_id=reservation.client_order_id,
+            order_id=None,
+            status="FAILED",
+        )
+        self.state_store.update_idempotency_recovery(
+            "place_order",
+            reservation.key,
+            recovery_attempts=0,
+            next_recovery_at_epoch=None,
+        )
+        logger.info(
+            "stale pending marked failed for retry",
+            extra={
+                "extra": {
+                    "idempotency_key": reservation.key,
+                    "client_order_id": reservation.client_order_id,
+                }
+            },
+        )
+        return True
 
     def _place_idempotency_key(
         self,

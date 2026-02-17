@@ -96,6 +96,16 @@ def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
         )
 
 
+def test_reserve_idempotency_defaults_recovery_tracking_fields(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    reservation = store.reserve_idempotency_key(
+        "cancel_order", "cancel:r1", "hash-1", ttl_seconds=60
+    )
+
+    assert reservation.recovery_attempts == 0
+    assert reservation.next_recovery_at_epoch is None
+
+
 def test_reserve_idempotency_existing_key_returns_not_reserved(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     first = store.reserve_idempotency_key(
@@ -107,6 +117,37 @@ def test_reserve_idempotency_existing_key_returns_not_reserved(tmp_path) -> None
 
     assert first.reserved is True
     assert second.reserved is False
+    assert second.status == "PENDING"
+
+
+def test_reserve_idempotency_stale_pending_without_metadata_is_recovered(
+    monkeypatch, tmp_path
+) -> None:
+    class _T0:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    class _T1:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 2, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(state_store_module, "datetime", _T0)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.reserve_idempotency_key(
+        "cancel_order", "cancel:stale", "hash-1", ttl_seconds=60
+    )
+    assert first.reserved is True
+
+    monkeypatch.setattr(state_store_module, "datetime", _T1)
+    second = store.reserve_idempotency_key(
+        "cancel_order", "cancel:stale", "hash-1", ttl_seconds=60
+    )
+
+    assert second.reserved is True
     assert second.status == "PENDING"
 
 
