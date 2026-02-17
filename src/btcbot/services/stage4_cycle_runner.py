@@ -26,6 +26,7 @@ from btcbot.domain.stage4 import (
     Quantizer,
 )
 from btcbot.domain.strategy_core import PositionSummary
+from btcbot.observability_decisions import emit_decision
 from btcbot.planning_kernel import ExecutionPort, Plan
 from btcbot.services import metrics_service
 from btcbot.services.account_snapshot_service import AccountSnapshotService
@@ -41,7 +42,7 @@ from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
 from btcbot.services.reconcile_service import ReconcileService
-from btcbot.services.risk_budget_service import RiskBudgetService
+from btcbot.services.risk_budget_service import CapitalPolicyError, RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.stage4_planning_kernel_integration import build_stage4_kernel_plan
 from btcbot.services.state_store import StateStore
@@ -312,6 +313,32 @@ class Stage4CycleRunner:
                 )
 
             pnl_report = ledger_service.report(mark_prices=mark_prices, cash_try=try_cash)
+            ledger_checkpoint = ledger_service.checkpoint()
+            try:
+                risk_budget_service.apply_self_financing_checkpoint(
+                    cycle_id=cycle_id,
+                    realized_pnl_total_try=pnl_report.realized_pnl_total,
+                    ledger_event_count=ledger_checkpoint.event_count,
+                    ledger_checkpoint_id=ledger_checkpoint.checkpoint_id,
+                    seed_trading_capital_try=try_cash,
+                )
+            except CapitalPolicyError as exc:
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": cycle_id,
+                        "decision_layer": "capital_policy",
+                        "reason_code": "capital_error:self_financing_failed",
+                        "action": "BLOCK",
+                        "scope": "global",
+                        "payload": {
+                            "checkpoint_id": ledger_checkpoint.checkpoint_id,
+                            "ledger_event_count": ledger_checkpoint.event_count,
+                            "error": str(exc),
+                        },
+                    },
+                )
+                raise Stage4InvariantError(str(exc)) from exc
             current_open_orders = state_store.list_stage4_open_orders()
             positions = state_store.list_stage4_positions()
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}

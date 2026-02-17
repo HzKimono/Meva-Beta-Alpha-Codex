@@ -67,6 +67,19 @@ class FinancialBreakdown:
     turnover_try: Decimal
 
 
+@dataclass(frozen=True)
+class LedgerCheckpoint:
+    event_count: int
+    last_ts: datetime | None
+    last_event_id: str | None
+
+    @property
+    def checkpoint_id(self) -> str:
+        last_ts = self.last_ts.isoformat() if self.last_ts is not None else "none"
+        last_event = self.last_event_id if self.last_event_id is not None else "none"
+        return f"{self.event_count}:{last_ts}:{last_event}"
+
+
 class LedgerService:
     def __init__(self, state_store: StateStore, logger: logging.Logger) -> None:
         self.state_store = state_store
@@ -339,4 +352,15 @@ class LedgerService:
             fees_total_by_currency=dict(state.fees_by_currency),
             per_symbol=per_symbol,
             equity_estimate=breakdown.equity_try,
+        )
+
+    def checkpoint(self) -> LedgerCheckpoint:
+        events = self.state_store.load_ledger_events()
+        if not events:
+            return LedgerCheckpoint(event_count=0, last_ts=None, last_event_id=None)
+        last = events[-1]
+        return LedgerCheckpoint(
+            event_count=len(events),
+            last_ts=last.ts,
+            last_event_id=last.event_id,
         )
