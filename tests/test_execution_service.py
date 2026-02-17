@@ -667,6 +667,130 @@ def test_restart_safety_stale_pending_with_client_order_id_reconciles_without_re
     assert row["order_id"] == "oid-existing"
 
 
+def test_stale_pending_lookup_failure_backoff_and_eventual_failed(
+    monkeypatch, tmp_path
+) -> None:
+    class FailingRecoveryExchange(RecordingExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lookup_calls = 0
+
+        def get_open_orders(self, pair_symbol: str) -> OpenOrders:
+            del pair_symbol
+            return OpenOrders(bids=[], asks=[])
+
+        def get_all_orders(
+            self, pair_symbol: str, start_ms: int, end_ms: int
+        ) -> list[OrderSnapshot]:
+            del pair_symbol, start_ms, end_ms
+            self.lookup_calls += 1
+            raise RuntimeError("network-timeout")
+
+    class _Clock:
+        current = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz):
+            del tz
+            return cls.current
+
+    monkeypatch.setattr(state_store_module, "datetime", _Clock)
+    monkeypatch.setattr(execution_service_module, "datetime", _Clock)
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = FailingRecoveryExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        pending_recovery_max_attempts=3,
+        pending_recovery_backoff_seconds=30,
+    )
+    intent = _stage3_intent()
+    payload_hash = service._place_hash(to_order_intent(intent, cycle_id="cycle-a"))
+    store.reserve_idempotency_key(
+        "place_order",
+        intent.idempotency_key,
+        payload_hash,
+        ttl_seconds=7 * 24 * 60 * 60,
+    )
+    store.finalize_idempotency_key(
+        "place_order",
+        intent.idempotency_key,
+        action_id=None,
+        client_order_id="cid-stale",
+        order_id=None,
+        status="PENDING",
+    )
+
+    # Attempt 1: stale, lookup fails, backoff is set.
+    _Clock.current = datetime(2024, 1, 1, 0, 2, 0, tzinfo=UTC)
+    assert service.execute_intents([intent], cycle_id="cycle-a") == 0
+    assert exchange.lookup_calls == 1
+    with store._connect() as conn:
+        row1 = conn.execute(
+            """
+            SELECT status, recovery_attempts, next_recovery_at_epoch
+            FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert row1 is not None
+    assert row1["status"] == "PENDING"
+    assert row1["recovery_attempts"] == 1
+    assert row1["next_recovery_at_epoch"] == int(_Clock.current.timestamp()) + 30
+
+    # Before next_recovery_at_epoch: should skip lookup.
+    _Clock.current = datetime(2024, 1, 1, 0, 2, 10, tzinfo=UTC)
+    assert service.execute_intents([intent], cycle_id="cycle-a") == 0
+    assert exchange.lookup_calls == 1
+
+    # Attempt 2 after backoff.
+    _Clock.current = datetime(2024, 1, 1, 0, 2, 40, tzinfo=UTC)
+    assert service.execute_intents([intent], cycle_id="cycle-a") == 0
+    assert exchange.lookup_calls == 2
+    with store._connect() as conn:
+        row2 = conn.execute(
+            """
+            SELECT status, recovery_attempts, next_recovery_at_epoch
+            FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert row2 is not None
+    assert row2["status"] == "PENDING"
+    assert row2["recovery_attempts"] == 2
+    assert row2["next_recovery_at_epoch"] == int(_Clock.current.timestamp()) + 60
+
+    # Attempt 3 reaches max attempts and transitions to FAILED.
+    _Clock.current = datetime(2024, 1, 1, 0, 3, 50, tzinfo=UTC)
+    assert service.execute_intents([intent], cycle_id="cycle-a") == 0
+    assert exchange.lookup_calls == 3
+    with store._connect() as conn:
+        row3 = conn.execute(
+            """
+            SELECT status, recovery_attempts, next_recovery_at_epoch
+            FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert row3 is not None
+    assert row3["status"] == "FAILED"
+    assert row3["recovery_attempts"] == 3
+    assert row3["next_recovery_at_epoch"] is None
+
+    # Next cycle can re-reserve and submit once.
+    _Clock.current = datetime(2024, 1, 1, 0, 4, 0, tzinfo=UTC)
+    assert service.execute_intents([intent], cycle_id="cycle-a") == 1
+    assert len(exchange.placed) == 1
+
+
 def test_execute_intents_legacy_order_intent_uses_place_hash(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     exchange = RecordingExchange()

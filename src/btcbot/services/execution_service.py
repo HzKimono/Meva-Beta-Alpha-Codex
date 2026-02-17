@@ -62,6 +62,8 @@ class ExecutionService:
         unknown_reprobe_force_observe_only: bool = False,
         unknown_reprobe_force_kill_switch: bool = False,
         unknown_reprobe_max_lookback_seconds: int = 24 * 60 * 60,
+        pending_recovery_max_attempts: int = 3,
+        pending_recovery_backoff_seconds: int = 30,
     ) -> None:
         self.exchange = exchange
         self.state_store = state_store
@@ -84,6 +86,8 @@ class ExecutionService:
         self.unknown_reprobe_max_lookback_seconds = max(
             60 * 60, unknown_reprobe_max_lookback_seconds
         )
+        self.pending_recovery_max_attempts = max(1, pending_recovery_max_attempts)
+        self.pending_recovery_backoff_seconds = max(1, pending_recovery_backoff_seconds)
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -807,6 +811,13 @@ class ExecutionService:
         intent: OrderIntent,
         reservation,
     ) -> bool:
+        now_epoch = int(datetime.now(UTC).timestamp())
+        if (
+            reservation.next_recovery_at_epoch is not None
+            and now_epoch < reservation.next_recovery_at_epoch
+        ):
+            return True
+
         symbol_normalized = normalize_symbol(intent.symbol)
         try:
             open_orders = self.exchange.get_open_orders(symbol_normalized)
@@ -821,9 +832,35 @@ class ExecutionService:
                 )
                 matched = match_order_by_client_id(all_orders, reservation.client_order_id)
         except Exception:  # noqa: BLE001
+            attempts = reservation.recovery_attempts + 1
+            max_backoff = self.pending_recovery_backoff_seconds * (
+                2 ** (self.pending_recovery_max_attempts - 1)
+            )
+            backoff_seconds = min(
+                self.pending_recovery_backoff_seconds * (2 ** (attempts - 1)),
+                max_backoff,
+            )
+            terminal = attempts >= self.pending_recovery_max_attempts
+            self.state_store.update_idempotency_recovery(
+                "place_order",
+                reservation.key,
+                recovery_attempts=attempts,
+                next_recovery_at_epoch=(None if terminal else now_epoch + backoff_seconds),
+                status=("FAILED" if terminal else "PENDING"),
+            )
+            get_instrumentation().counter(
+                "pending_recovery_lookup_failures_total",
+                attrs={"action_type": "place_order"},
+            )
             logger.exception(
                 "stale pending recovery lookup failed",
-                extra={"extra": {"idempotency_key": reservation.key}},
+                extra={
+                    "extra": {
+                        "idempotency_key": reservation.key,
+                        "recovery_attempts": attempts,
+                        "max_attempts": self.pending_recovery_max_attempts,
+                    }
+                },
             )
             return True
 
@@ -835,6 +872,12 @@ class ExecutionService:
                 client_order_id=reservation.client_order_id,
                 order_id=matched.order_id,
                 status="COMMITTED",
+            )
+            self.state_store.update_idempotency_recovery(
+                "place_order",
+                reservation.key,
+                recovery_attempts=0,
+                next_recovery_at_epoch=None,
             )
             logger.info(
                 "stale pending recovered as committed",
@@ -855,6 +898,12 @@ class ExecutionService:
             client_order_id=reservation.client_order_id,
             order_id=None,
             status="FAILED",
+        )
+        self.state_store.update_idempotency_recovery(
+            "place_order",
+            reservation.key,
+            recovery_attempts=0,
+            next_recovery_at_epoch=None,
         )
         logger.info(
             "stale pending marked failed for retry",

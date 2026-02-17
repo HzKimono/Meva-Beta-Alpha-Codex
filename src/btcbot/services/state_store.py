@@ -96,6 +96,8 @@ class ReservationResult:
     client_order_id: str | None
     order_id: str | None
     status: str
+    recovery_attempts: int
+    next_recovery_at_epoch: int | None
 
 
 class StateStore:
@@ -1820,6 +1822,8 @@ class StateStore:
                 client_order_id TEXT,
                 order_id TEXT,
                 status TEXT NOT NULL,
+                recovery_attempts INTEGER NOT NULL DEFAULT 0,
+                next_recovery_at_epoch INTEGER,
                 PRIMARY KEY (action_type, key)
             )
             """
@@ -1836,6 +1840,15 @@ class StateStore:
             ON idempotency_keys(status, expires_at_epoch)
             """
         )
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(idempotency_keys)")}
+        if "recovery_attempts" not in columns:
+            conn.execute(
+                "ALTER TABLE idempotency_keys ADD COLUMN recovery_attempts INTEGER NOT NULL DEFAULT 0"
+            )
+        if "next_recovery_at_epoch" not in columns:
+            conn.execute(
+                "ALTER TABLE idempotency_keys ADD COLUMN next_recovery_at_epoch INTEGER"
+            )
 
     def record_action(
         self,
@@ -2113,7 +2126,9 @@ class StateStore:
                             expires_at_epoch = ?,
                             action_id = NULL,
                             client_order_id = NULL,
-                            order_id = NULL
+                            order_id = NULL,
+                            recovery_attempts = 0,
+                            next_recovery_at_epoch = NULL
                         WHERE action_type = ? AND key = ?
                         """,
                         (now_epoch, expires_at, action_type, key),
@@ -2139,7 +2154,9 @@ class StateStore:
                             expires_at_epoch = ?,
                             action_id = NULL,
                             client_order_id = NULL,
-                            order_id = NULL
+                            order_id = NULL,
+                            recovery_attempts = 0,
+                            next_recovery_at_epoch = NULL
                         WHERE action_type = ? AND key = ?
                         """,
                         (now_epoch, expires_at, action_type, key),
@@ -2181,6 +2198,33 @@ class StateStore:
                 (action_id, client_order_id, order_id, status, action_type, key),
             )
 
+    def update_idempotency_recovery(
+        self,
+        action_type: str,
+        key: str,
+        *,
+        recovery_attempts: int,
+        next_recovery_at_epoch: int | None,
+        status: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE idempotency_keys
+                SET recovery_attempts = ?,
+                    next_recovery_at_epoch = ?,
+                    status = COALESCE(?, status)
+                WHERE action_type = ? AND key = ?
+                """,
+                (
+                    max(0, recovery_attempts),
+                    next_recovery_at_epoch,
+                    status,
+                    action_type,
+                    key,
+                ),
+            )
+
     def prune_expired_idempotency_keys(self, now_epoch: int | None = None) -> int:
         resolved_now = now_epoch or int(datetime.now(UTC).timestamp())
         with self._connect() as conn:
@@ -2208,6 +2252,12 @@ class StateStore:
             ),
             order_id=str(row["order_id"]) if row["order_id"] is not None else None,
             status=str(row["status"]),
+            recovery_attempts=int(row["recovery_attempts"] or 0),
+            next_recovery_at_epoch=(
+                int(row["next_recovery_at_epoch"])
+                if row["next_recovery_at_epoch"] is not None
+                else None
+            ),
         )
 
     def save_fill(self, fill: TradeFill) -> bool:

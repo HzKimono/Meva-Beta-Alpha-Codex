@@ -96,6 +96,16 @@ def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
         )
 
 
+def test_reserve_idempotency_defaults_recovery_tracking_fields(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    reservation = store.reserve_idempotency_key(
+        "cancel_order", "cancel:r1", "hash-1", ttl_seconds=60
+    )
+
+    assert reservation.recovery_attempts == 0
+    assert reservation.next_recovery_at_epoch is None
+
+
 def test_reserve_idempotency_existing_key_returns_not_reserved(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     first = store.reserve_idempotency_key(
