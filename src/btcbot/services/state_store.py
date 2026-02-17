@@ -71,6 +71,9 @@ class IdempotencyConflictError(ValueError):
     """Raised when an idempotency key is re-used with a conflicting payload."""
 
 
+PENDING_GRACE_SECONDS = 60
+
+
 @dataclass(frozen=True)
 class SubmitDedupeDecision:
     should_dedupe: bool
@@ -2074,9 +2077,33 @@ class StateStore:
                         f"idempotency key conflict for {action_type}:{key}: "
                         f"existing={row['payload_hash']} incoming={payload_hash}"
                     )
+                status = str(row["status"]).upper()
+                age_seconds = max(0, now_epoch - int(row["created_at_epoch"]))
+                if status == "PENDING" and age_seconds > PENDING_GRACE_SECONDS:
+                    if row["action_id"] is None and row["client_order_id"] is None:
+                        conn.execute(
+                            """
+                            UPDATE idempotency_keys
+                            SET status = 'FAILED'
+                            WHERE action_type = ? AND key = ?
+                            """,
+                            (action_type, key),
+                        )
+                        row = conn.execute(
+                            """
+                            SELECT * FROM idempotency_keys
+                            WHERE action_type = ? AND key = ?
+                            """,
+                            (action_type, key),
+                        ).fetchone()
+                        if row is None:
+                            raise RuntimeError(
+                                f"failed to mark stale idempotency key failed {action_type}:{key}"
+                            )
+                        status = str(row["status"]).upper()
                 if (
                     allow_promote_simulated
-                    and str(row["status"]).upper() == "SIMULATED"
+                    and status == "SIMULATED"
                 ):
                     conn.execute(
                         """
@@ -2103,7 +2130,7 @@ class StateStore:
                             f"failed to promote simulated idempotency key {action_type}:{key}"
                         )
                     return self._row_to_reservation_result(promoted, reserved=True)
-                if str(row["status"]).upper() == "FAILED":
+                if status == "FAILED":
                     conn.execute(
                         """
                         UPDATE idempotency_keys

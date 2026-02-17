@@ -18,6 +18,8 @@ from btcbot.domain.models import (
     PairInfo,
     SymbolRules,
 )
+from btcbot.services import execution_service as execution_service_module
+from btcbot.services import state_store as state_store_module
 from btcbot.services.execution_service import ExecutionService, LiveTradingNotArmedError
 from btcbot.services.state_store import StateStore
 
@@ -501,7 +503,16 @@ def test_place_order_idempotency_across_bucket_boundary(monkeypatch, tmp_path) -
     assert row["status"] == "COMMITTED"
 
 
-def test_restart_safety_pending_reservation_blocks_second_submit(tmp_path) -> None:
+def test_restart_safety_inflight_pending_blocks_second_submit(monkeypatch, tmp_path) -> None:
+    class _Now:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(state_store_module, "datetime", _Now)
+    monkeypatch.setattr(execution_service_module, "datetime", _Now)
+
     store = StateStore(db_path=str(tmp_path / "state.db"))
     exchange = RecordingExchange()
     service = ExecutionService(
@@ -525,6 +536,135 @@ def test_restart_safety_pending_reservation_blocks_second_submit(tmp_path) -> No
 
     assert placed == 0
     assert exchange.placed == []
+
+
+def test_restart_safety_stale_pending_without_client_order_id_recovers(monkeypatch, tmp_path) -> None:
+    class _T0:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    class _T1:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 2, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(state_store_module, "datetime", _T0)
+    monkeypatch.setattr(execution_service_module, "datetime", _T0)
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+    )
+    intent = _stage3_intent()
+    payload_hash = service._place_hash(to_order_intent(intent, cycle_id="cycle-a"))
+    store.reserve_idempotency_key(
+        "place_order",
+        intent.idempotency_key,
+        payload_hash,
+        ttl_seconds=7 * 24 * 60 * 60,
+    )
+
+    monkeypatch.setattr(state_store_module, "datetime", _T1)
+    monkeypatch.setattr(execution_service_module, "datetime", _T1)
+    placed = service.execute_intents([intent], cycle_id="cycle-a")
+
+    assert placed == 1
+    assert len(exchange.placed) == 1
+
+
+def test_restart_safety_stale_pending_with_client_order_id_reconciles_without_resubmit(
+    monkeypatch, tmp_path
+) -> None:
+    class RecoveryExchange(RecordingExchange):
+        def get_open_orders(self, pair_symbol: str) -> OpenOrders:
+            del pair_symbol
+            return OpenOrders(bids=[], asks=[])
+
+        def get_all_orders(
+            self, pair_symbol: str, start_ms: int, end_ms: int
+        ) -> list[OrderSnapshot]:
+            del pair_symbol, start_ms, end_ms
+            return [
+                OrderSnapshot(
+                    order_id="oid-existing",
+                    client_order_id="cid-stale",
+                    pair_symbol="BTCTRY",
+                    side=OrderSide.BUY,
+                    price=100.0,
+                    quantity=0.1,
+                    timestamp=1_704_067_200_000,
+                )
+            ]
+
+    class _T0:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    class _T1:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 2, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(state_store_module, "datetime", _T0)
+    monkeypatch.setattr(execution_service_module, "datetime", _T0)
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecoveryExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+    )
+    intent = _stage3_intent()
+    payload_hash = service._place_hash(to_order_intent(intent, cycle_id="cycle-a"))
+    store.reserve_idempotency_key(
+        "place_order",
+        intent.idempotency_key,
+        payload_hash,
+        ttl_seconds=7 * 24 * 60 * 60,
+    )
+    store.finalize_idempotency_key(
+        "place_order",
+        intent.idempotency_key,
+        action_id=None,
+        client_order_id="cid-stale",
+        order_id=None,
+        status="PENDING",
+    )
+
+    monkeypatch.setattr(state_store_module, "datetime", _T1)
+    monkeypatch.setattr(execution_service_module, "datetime", _T1)
+
+    placed = service.execute_intents([intent], cycle_id="cycle-a")
+
+    assert placed == 0
+    assert exchange.placed == []
+    with store._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT status, order_id FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "COMMITTED"
+    assert row["order_id"] == "oid-existing"
 
 
 def test_execute_intents_legacy_order_intent_uses_place_hash(tmp_path) -> None:
