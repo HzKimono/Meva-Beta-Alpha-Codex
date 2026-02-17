@@ -865,92 +865,102 @@ def run_canary(
         )
         return 2
 
-    resolved_db_path = db_path or settings.state_db_path
-    canary_settings = _build_canary_settings(
-        settings,
-        symbol=resolved_symbol,
-        notional_try=notional_try,
-        ttl_seconds=ttl_seconds,
-        db_path=resolved_db_path,
-        market_data_mode=market_data_mode,
-    )
-    _print_effective_side_effects_state(
-        canary_settings,
-        force_dry_run=False,
-        include_safe_mode=True,
-    )
-
-    _, arm_policy = _compute_live_policy(
-        canary_settings,
-        force_dry_run=False,
-        include_safe_mode=True,
-    )
-    if not getattr(arm_policy, "allowed", False):
-        print(getattr(arm_policy, "message", LIVE_TRADING_NOT_ARMED_MESSAGE))
+    resolved_db_path = (db_path or settings.state_db_path or "").strip()
+    if not resolved_db_path:
+        print("canary: missing DB path (set STATE_DB_PATH or pass --db-path)")
         return 2
 
-    min_notional_ok, min_notional_message = _check_canary_min_notional(
-        canary_settings,
-        resolved_symbol,
-        notional_try,
-    )
-    if not min_notional_ok:
-        print(min_notional_message)
-        return 2
+    try:
+        with single_instance_lock(db_path=resolved_db_path, account_key="canary"):
+            canary_settings = _build_canary_settings(
+                settings,
+                symbol=resolved_symbol,
+                notional_try=notional_try,
+                ttl_seconds=ttl_seconds,
+                db_path=resolved_db_path,
+                market_data_mode=market_data_mode,
+            )
+            _print_effective_side_effects_state(
+                canary_settings,
+                force_dry_run=False,
+                include_safe_mode=True,
+            )
 
-    final_doctor_status, doctor_rc = _run_canary_doctor_gate(
-        canary_settings,
-        db_path=resolved_db_path,
-        allow_warn=allow_warn,
-    )
-    if doctor_rc != 0:
-        return doctor_rc
+            _, arm_policy = _compute_live_policy(
+                canary_settings,
+                force_dry_run=False,
+                include_safe_mode=True,
+            )
+            if not getattr(arm_policy, "allowed", False):
+                print(getattr(arm_policy, "message", LIVE_TRADING_NOT_ARMED_MESSAGE))
+                return 2
 
-    started_at = datetime.now(UTC)
-    cycles_run = 0
-    rc = 0
-    doctor_recheck_every_cycles = 5
-    while True:
-        rc = run_cycle(canary_settings, force_dry_run=False)
-        cycles_run += 1
-        if rc != 0:
-            break
-        if mode == "once" or (max_cycles is not None and cycles_run >= max_cycles):
-            break
+            min_notional_ok, min_notional_message = _check_canary_min_notional(
+                canary_settings,
+                resolved_symbol,
+                notional_try,
+            )
+            if not min_notional_ok:
+                print(min_notional_message)
+                return 2
 
-        if cycles_run % doctor_recheck_every_cycles == 0:
             final_doctor_status, doctor_rc = _run_canary_doctor_gate(
                 canary_settings,
                 db_path=resolved_db_path,
                 allow_warn=allow_warn,
             )
             if doctor_rc != 0:
-                rc = doctor_rc
-                break
+                return doctor_rc
 
-        sleep_for = cycle_seconds if cycle_seconds > 0 else 1
-        time.sleep(sleep_for)
+            started_at = datetime.now(UTC)
+            cycles_run = 0
+            rc = 0
+            doctor_recheck_every_cycles = 5
+            while True:
+                rc = run_cycle(canary_settings, force_dry_run=False)
+                cycles_run += 1
+                if rc != 0:
+                    break
+                if mode == "once" or (max_cycles is not None and cycles_run >= max_cycles):
+                    break
 
-    started_at_iso = started_at.isoformat()
-    summary = _canary_summary_counts(resolved_db_path, started_at_iso)
-    print(
-        "canary summary: "
-        f"mode={mode} cycles={cycles_run} orders_submitted={summary['orders_submitted']} "
-        f"orders_filled={summary['orders_filled']} orders_rejected={summary['orders_rejected']} "
-        f"stale_blocks={summary['stale_blocks']} final_doctor_status={final_doctor_status.upper()}"
-    )
+                if cycles_run % doctor_recheck_every_cycles == 0:
+                    final_doctor_status, doctor_rc = _run_canary_doctor_gate(
+                        canary_settings,
+                        db_path=resolved_db_path,
+                        allow_warn=allow_warn,
+                    )
+                    if doctor_rc != 0:
+                        rc = doctor_rc
+                        break
 
-    if export_out:
-        run_stage7_export(
-            canary_settings,
-            db_path=resolved_db_path,
-            last=50,
-            export_format="jsonl",
-            out_path=export_out,
-        )
-        print(f"canary: exported stage7 rows to {export_out}")
-    _print_canary_evidence_commands(export_out)
-    return rc
+                sleep_for = cycle_seconds if cycle_seconds > 0 else 1
+                time.sleep(sleep_for)
+
+            started_at_iso = started_at.isoformat()
+            summary = _canary_summary_counts(resolved_db_path, started_at_iso)
+            print(
+                "canary summary: "
+                f"mode={mode} cycles={cycles_run} orders_submitted={summary['orders_submitted']} "
+                f"orders_filled={summary['orders_filled']} orders_rejected={summary['orders_rejected']} "
+                f"stale_blocks={summary['stale_blocks']} final_doctor_status={final_doctor_status.upper()}"
+            )
+
+            if export_out:
+                run_stage7_export(
+                    canary_settings,
+                    db_path=resolved_db_path,
+                    last=50,
+                    export_format="jsonl",
+                    out_path=export_out,
+                )
+                print(f"canary: exported stage7 rows to {export_out}")
+            _print_canary_evidence_commands(export_out)
+            return rc
+    except RuntimeError as exc:
+        logger.error("canary_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
+        print(str(exc))
+        return 2
 
 
 def _apply_effective_universe(settings: Settings) -> Settings:
