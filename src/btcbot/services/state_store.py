@@ -1700,6 +1700,19 @@ class StateStore:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS capital_policy_state (
+                state_key TEXT PRIMARY KEY,
+                trading_capital_try TEXT NOT NULL,
+                treasury_try TEXT NOT NULL,
+                last_realized_pnl_total_try TEXT NOT NULL,
+                last_checkpoint_id TEXT,
+                last_cycle_id TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
         conn.execute(
             """
@@ -3023,6 +3036,53 @@ class StateStore:
                 (fill_id,),
             )
         return bool(cur.rowcount)
+
+    def get_capital_policy_state(self) -> dict[str, str] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM capital_policy_state WHERE state_key = 'primary'"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def upsert_capital_policy_state(
+        self,
+        *,
+        trading_capital_try: Decimal,
+        treasury_try: Decimal,
+        last_realized_pnl_total_try: Decimal,
+        last_checkpoint_id: str | None,
+        last_cycle_id: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO capital_policy_state(
+                    state_key,
+                    trading_capital_try,
+                    treasury_try,
+                    last_realized_pnl_total_try,
+                    last_checkpoint_id,
+                    last_cycle_id,
+                    updated_at
+                )
+                VALUES ('primary', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    trading_capital_try=excluded.trading_capital_try,
+                    treasury_try=excluded.treasury_try,
+                    last_realized_pnl_total_try=excluded.last_realized_pnl_total_try,
+                    last_checkpoint_id=excluded.last_checkpoint_id,
+                    last_cycle_id=excluded.last_cycle_id,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    str(trading_capital_try),
+                    str(treasury_try),
+                    str(last_realized_pnl_total_try),
+                    last_checkpoint_id,
+                    last_cycle_id,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
 
     def save_stage4_position(self, position: Stage4Position) -> None:
         with self._connect() as conn:

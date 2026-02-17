@@ -298,6 +298,10 @@ def test_runner_mode_gating(monkeypatch, tmp_path) -> None:
                 datetime(2026, 1, 1, tzinfo=UTC).date(),
             )
 
+        def apply_self_financing_checkpoint(self, **kwargs):
+            del kwargs
+            return None
+
         def persist_decision(self, **kwargs) -> None:
             del kwargs
             return
