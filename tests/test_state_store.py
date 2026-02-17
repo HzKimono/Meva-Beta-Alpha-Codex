@@ -83,6 +83,85 @@ def test_record_action_returns_action_id_and_dedupes(tmp_path) -> None:
     assert second.action_count("sweep_plan", "hash-1") == 1
 
 
+def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.reserve_idempotency_key(
+        "place_order", "k-1", "payload-a", ttl_seconds=60
+    )
+    assert first.reserved is True
+
+    with pytest.raises(IdempotencyConflictError):
+        store.reserve_idempotency_key(
+            "place_order", "k-1", "payload-b", ttl_seconds=60
+        )
+
+
+def test_reserve_idempotency_existing_key_returns_not_reserved(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.reserve_idempotency_key(
+        "cancel_order", "cancel:o1", "hash-1", ttl_seconds=60
+    )
+    second = store.reserve_idempotency_key(
+        "cancel_order", "cancel:o1", "hash-1", ttl_seconds=60
+    )
+
+    assert first.reserved is True
+    assert second.reserved is False
+    assert second.status == "PENDING"
+
+
+def test_reserve_idempotency_can_promote_simulated(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.reserve_idempotency_key(
+        "place_order", "k-sim", "payload-a", ttl_seconds=60
+    )
+    store.finalize_idempotency_key(
+        "place_order",
+        "k-sim",
+        action_id=first.action_id,
+        client_order_id=None,
+        order_id=None,
+        status="SIMULATED",
+    )
+
+    blocked = store.reserve_idempotency_key(
+        "place_order", "k-sim", "payload-a", ttl_seconds=60
+    )
+    promoted = store.reserve_idempotency_key(
+        "place_order",
+        "k-sim",
+        "payload-a",
+        ttl_seconds=60,
+        allow_promote_simulated=True,
+    )
+
+    assert blocked.reserved is False
+    assert blocked.status == "SIMULATED"
+    assert promoted.reserved is True
+    assert promoted.status == "PENDING"
+
+
+def test_reserve_idempotency_failed_row_can_be_retried(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.reserve_idempotency_key(
+        "cancel_order", "cancel:o-fail", "payload-a", ttl_seconds=60
+    )
+    store.finalize_idempotency_key(
+        "cancel_order",
+        "cancel:o-fail",
+        action_id=first.action_id,
+        client_order_id="cid",
+        order_id="oid",
+        status="FAILED",
+    )
+
+    retry = store.reserve_idempotency_key(
+        "cancel_order", "cancel:o-fail", "payload-a", ttl_seconds=60
+    )
+    assert retry.reserved is True
+    assert retry.status == "PENDING"
+
+
 def test_attach_action_metadata_updates_exact_row(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
 
