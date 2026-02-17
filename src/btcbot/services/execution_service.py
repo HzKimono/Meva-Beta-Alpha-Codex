@@ -30,10 +30,7 @@ from btcbot.domain.models import (
 from btcbot.observability import get_instrumentation
 from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
-from btcbot.services.trading_policy import (
-    policy_block_message,
-    validate_live_side_effects_policy,
-)
+from btcbot.services.trading_policy import validate_live_side_effects_policy
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +40,10 @@ CANCEL_ORDER_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
 class LiveTradingNotArmedError(RuntimeError):
     """Raised when a live side-effect is attempted without explicit arming."""
+
+    def __init__(self, message: str, reasons: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.reasons = tuple(reasons or ())
 
 
 class ExecutionService:
@@ -55,6 +56,7 @@ class ExecutionService:
         ttl_seconds: int = 120,
         kill_switch: bool = True,
         live_trading_enabled: bool = False,
+        live_trading_ack: bool = False,
         safe_mode: bool = False,
         unknown_reprobe_initial_seconds: int = 30,
         unknown_reprobe_max_seconds: int = 900,
@@ -72,6 +74,7 @@ class ExecutionService:
         self.ttl_seconds = ttl_seconds
         self.kill_switch = kill_switch
         self.live_trading_enabled = live_trading_enabled
+        self.live_trading_ack = live_trading_ack
         self.safe_mode = safe_mode
         self.unknown_reprobe_initial_seconds = max(1, unknown_reprobe_initial_seconds)
         self.unknown_reprobe_max_seconds = max(
@@ -1192,13 +1195,14 @@ class ExecutionService:
         return "json" in str(exc).lower()
 
     def _ensure_live_side_effects_allowed(self) -> None:
-        reason = validate_live_side_effects_policy(
+        policy = validate_live_side_effects_policy(
             dry_run=self.dry_run,
             kill_switch=self.kill_switch,
             live_trading_enabled=self.live_trading_enabled,
+            live_trading_ack=self.live_trading_ack,
         )
-        if reason is not None:
-            raise LiveTradingNotArmedError(policy_block_message(reason))
+        if not policy.allowed:
+            raise LiveTradingNotArmedError(policy.message, reasons=policy.reasons)
 
     def _place_hash(self, intent: OrderIntent) -> str:
         raw = (

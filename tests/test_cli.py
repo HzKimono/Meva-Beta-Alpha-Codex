@@ -1230,3 +1230,35 @@ def test_run_cycle_kill_switch_reports_blocked_not_failed(monkeypatch) -> None:
     assert captured_extra["orders_blocked_by_gate"] == 2
     assert captured_extra["orders_suppressed_dry_run"] == 2
     assert captured_extra["orders_failed_exchange"] == 0
+
+
+def test_format_effective_side_effects_banner_blocked_includes_inputs_and_reasons() -> None:
+    inputs = {
+        "dry_run": False,
+        "kill_switch": True,
+        "live_trading_enabled": False,
+        "live_trading_ack": False,
+    }
+    policy = cli.validate_live_side_effects_policy(**inputs)
+
+    banner = cli._format_effective_side_effects_banner(inputs, policy)
+
+    assert "Effective Side-Effects State: BLOCKED" in banner
+    assert "reasons=KILL_SWITCH,NOT_ARMED,ACK_MISSING" in banner
+    assert "kill_switch=True" in banner
+    assert "ack=False" in banner
+
+
+def test_main_emits_effective_state_banner_once_for_loop_run(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["btcbot", "run", "--loop", "--max-cycles", "2"])
+    monkeypatch.setattr(cli, "_load_settings", lambda env_file=None: Settings(DRY_RUN=True))
+    monkeypatch.setattr(cli, "setup_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **_kwargs: None)
+    monkeypatch.setattr(cli, "_apply_effective_universe", lambda settings: settings)
+    monkeypatch.setattr(cli, "run_with_optional_loop", lambda **_kwargs: 0)
+
+    rc = cli.main()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.count("Effective Side-Effects State:") == 1
