@@ -20,6 +20,10 @@ _PLAIN_SECRET_PATTERNS = (
     re.compile(r"(?i)(btcturk_api_key\s*[=:]\s*)([^\s,;]+)"),
     re.compile(r"(?i)(btcturk_api_secret\s*[=:]\s*)([^\s,;]+)"),
     re.compile(r"(?i)(x-signature\s*[=:]\s*)([^\s,;]+)"),
+    re.compile(r"(?i)(authorization\s*[=:]\s*)(bearer\s+)?([^\s,;]+)"),
+    re.compile(r"(?i)(x-api-key\s*[=:]\s*)([^\s,;]+)"),
+    re.compile(r"(?i)(x-pck\s*[=:]\s*)([^\s,;]+)"),
+    re.compile(r"(?i)(x-stamp\s*[=:]\s*)([^\s,;]+)"),
 )
 
 
@@ -46,8 +50,18 @@ def redact_value(value: Any) -> Any:
     return value
 
 
+def _redact_match(match: re.Match[str]) -> str:
+    prefix = match.group(1)
+    optional_scheme = ""
+    if match.lastindex and match.lastindex >= 3:
+        optional_scheme = match.group(2) or ""
+    return f"{prefix}{optional_scheme}{REDACTED}"
+
+
 def redact_text(value: str) -> str:
     redacted = value
+
     for pattern in _PLAIN_SECRET_PATTERNS:
-        redacted = pattern.sub(lambda m: f"{m.group(1)}{REDACTED}", redacted)
+        redacted = pattern.sub(_redact_match, redacted)
+
     return redacted
