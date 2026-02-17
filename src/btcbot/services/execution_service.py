@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -31,6 +33,7 @@ from btcbot.domain.models import (
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.market_data_service import MarketDataService
+from btcbot.services.retry import retry_with_backoff
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.services.trading_policy import policy_reason_to_code, validate_live_side_effects_policy
 
@@ -74,6 +77,11 @@ class ExecutionService:
         unknown_reprobe_max_lookback_seconds: int = 24 * 60 * 60,
         pending_recovery_max_attempts: int = 3,
         pending_recovery_backoff_seconds: int = 30,
+        submit_retry_max_attempts: int = 2,
+        cancel_retry_max_attempts: int = 2,
+        retry_base_delay_ms: int = 250,
+        retry_max_delay_ms: int = 4000,
+        sleep_fn=None,
     ) -> None:
         self.exchange = exchange
         self.state_store = state_store
@@ -99,6 +107,11 @@ class ExecutionService:
         )
         self.pending_recovery_max_attempts = max(1, pending_recovery_max_attempts)
         self.pending_recovery_backoff_seconds = max(1, pending_recovery_backoff_seconds)
+        self.submit_retry_max_attempts = max(1, submit_retry_max_attempts)
+        self.cancel_retry_max_attempts = max(1, cancel_retry_max_attempts)
+        self.retry_base_delay_ms = max(0, retry_base_delay_ms)
+        self.retry_max_delay_ms = max(self.retry_base_delay_ms, retry_max_delay_ms)
+        self.sleep_fn = sleep_fn or time.sleep
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -261,6 +274,20 @@ class ExecutionService:
         if self.unknown_reprobe_force_kill_switch:
             self.kill_switch = True
             logger.error("Escalation forcing kill switch")
+        emit_decision(
+            logger,
+            {
+                "cycle_id": "reconcile",
+                "decision_layer": "execution",
+                "reason_code": str(
+                    ReasonCode.EXECUTION_RECONCILE_UNKNOWN_BOUNDED_EXCEEDED
+                ),
+                "action": "SAFE_MODE",
+                "scope": "global",
+                "symbol": local_order.symbol,
+                "order_id": local_order.order_id,
+            },
+        )
 
     def cancel_stale_orders(self, cycle_id: str) -> int:
         try:
@@ -326,6 +353,12 @@ class ExecutionService:
 
             age_seconds = (now - created_at).total_seconds()
             if age_seconds <= self.ttl_seconds:
+                continue
+            if self._was_submitted_in_cycle(cycle_id=cycle_id, order=order):
+                logger.info(
+                    "Skipping stale cancel for order submitted in same cycle",
+                    extra={"extra": {"cycle_id": cycle_id, "order_id": order.order_id}},
+                )
                 continue
 
             if not self.dry_run:
@@ -407,7 +440,11 @@ class ExecutionService:
 
             try:
                 started = datetime.now(UTC)
-                was_canceled = self.exchange.cancel_order(order.order_id)
+                was_canceled = self._retry_exchange_call(
+                    lambda: self.exchange.cancel_order(order.order_id),
+                    max_attempts=self.cancel_retry_max_attempts,
+                    operation="cancel",
+                )
                 get_instrumentation().histogram(
                     "cancel_latency_ms",
                     (datetime.now(UTC) - started).total_seconds() * 1000,
@@ -728,12 +765,16 @@ class ExecutionService:
                 continue
 
             try:
-                order = self.exchange.place_limit_order(
-                    symbol=symbol_normalized,
-                    side=intent.side,
-                    price=float(price),
-                    quantity=float(quantity),
-                    client_order_id=client_order_id,
+                order = self._retry_exchange_call(
+                    lambda: self.exchange.place_limit_order(
+                        symbol=symbol_normalized,
+                        side=intent.side,
+                        price=float(price),
+                        quantity=float(quantity),
+                        client_order_id=client_order_id,
+                    ),
+                    max_attempts=self.submit_retry_max_attempts,
+                    operation="submit",
                 )
             except Exception as exc:  # noqa: BLE001
                 if not self._is_uncertain_error(exc):
@@ -811,6 +852,22 @@ class ExecutionService:
                         client_order_id=client_order_id,
                         order_id=None,
                         status="UNKNOWN",
+                    )
+                    self.state_store.save_order(
+                        Order(
+                            order_id=f"unknown:{client_order_id}",
+                            client_order_id=client_order_id,
+                            symbol=symbol_normalized,
+                            side=intent.side,
+                            price=float(price),
+                            quantity=float(quantity),
+                            status=OrderStatus.UNKNOWN,
+                            created_at=datetime.now(UTC),
+                            updated_at=datetime.now(UTC),
+                        ),
+                        reconciled=True,
+                        idempotency_key=idempotency_key,
+                        intent_id=(raw_intent.intent_id if raw_intent else None),
                     )
                     continue
 
@@ -1263,18 +1320,73 @@ class ExecutionService:
         if isinstance(exc, httpx.TimeoutException):
             return True
         if isinstance(exc, ExchangeError):
+            status = self._extract_status_code(exc)
             message = str(exc)
-            if "status=429" in message:
+            if status == 429 or "status=429" in message:
                 return True
-            if "status=" in message:
-                try:
-                    status = int(message.split("status=")[1].split()[0])
-                    if status >= 500:
-                        return True
-                except ValueError:
-                    pass
+            if status is not None and status >= 500:
+                return True
             return "json" in message.lower()
         return "json" in str(exc).lower()
+
+    def _retry_exchange_call(self, fn, *, max_attempts: int, operation: str):
+        if max_attempts <= 1:
+            return fn()
+        seed = int(hashlib.sha256(operation.encode("utf-8")).hexdigest()[:8], 16)
+        return retry_with_backoff(
+            fn,
+            max_attempts=max_attempts,
+            base_delay_ms=self.retry_base_delay_ms,
+            max_delay_ms=self.retry_max_delay_ms,
+            jitter_seed=seed,
+            retry_on_exceptions=(ExchangeError,),
+            retry_after_getter=self._retry_after_from_exception,
+            sleep_fn=self.sleep_fn,
+            on_retry=lambda attempt: logger.warning(
+                "exchange_retry",
+                extra={
+                    "extra": {
+                        "operation": operation,
+                        "attempt": attempt.attempt,
+                        "delay_ms": attempt.delay_ms,
+                        "error_type": attempt.error_type,
+                    }
+                },
+            ),
+        )
+
+    def _retry_after_from_exception(self, exc: Exception) -> str | None:
+        if not isinstance(exc, ExchangeError):
+            return None
+        for candidate in (exc.response_body, str(exc)):
+            if not candidate:
+                continue
+            match = re.search(r"retry-?after[=: ]+(\d+)", candidate, flags=re.IGNORECASE)
+            if match is not None:
+                return match.group(1)
+        return None
+
+    def _extract_status_code(self, exc: ExchangeError) -> int | None:
+        if exc.status_code is not None:
+            return int(exc.status_code)
+        match = re.search(r"status=(\d{3})", str(exc))
+        if match is None:
+            return None
+        return int(match.group(1))
+
+    def _was_submitted_in_cycle(self, *, cycle_id: str, order: Order) -> bool:
+        with self.state_store._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM actions
+                WHERE cycle_id = ?
+                  AND action_type = 'place_order'
+                  AND (order_id = ? OR client_order_id = ?)
+                LIMIT 1
+                """,
+                (cycle_id, order.order_id, order.client_order_id),
+            ).fetchone()
+        return row is not None
 
     def _ensure_live_side_effects_allowed(
         self,
