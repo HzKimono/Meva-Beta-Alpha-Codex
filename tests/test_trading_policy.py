@@ -1,43 +1,82 @@
 from __future__ import annotations
 
-from btcbot.services.trading_policy import PolicyBlockReason, validate_live_side_effects_policy
+import pytest
+
+from btcbot.services.trading_policy import validate_live_side_effects_policy
 
 
-def test_validate_live_side_effects_policy_blocks_when_not_armed() -> None:
-    reason = validate_live_side_effects_policy(
-        dry_run=False,
-        kill_switch=False,
-        live_trading_enabled=False,
+def _expected_reasons(
+    *, dry_run: bool, kill_switch: bool, live_trading_enabled: bool, live_trading_ack: bool
+) -> list[str]:
+    reasons: list[str] = []
+    if kill_switch:
+        reasons.append("KILL_SWITCH")
+    if dry_run:
+        reasons.append("DRY_RUN")
+    if not live_trading_enabled:
+        reasons.append("NOT_ARMED")
+    if not live_trading_ack:
+        reasons.append("ACK_MISSING")
+    return reasons
+
+
+def _case_id(dry_run: bool, kill_switch: bool, live_trading_enabled: bool, live_trading_ack: bool) -> str:
+    return (
+        f"dry_run={int(dry_run)}|kill_switch={int(kill_switch)}|"
+        f"live={int(live_trading_enabled)}|ack={int(live_trading_ack)}"
     )
 
-    assert reason is PolicyBlockReason.LIVE_NOT_ARMED
+
+_TRUTH_TABLE_CASES = [
+    pytest.param(dry_run, kill_switch, live_trading_enabled, live_trading_ack,
+                 id=_case_id(dry_run, kill_switch, live_trading_enabled, live_trading_ack))
+    for dry_run in (False, True)
+    for kill_switch in (False, True)
+    for live_trading_enabled in (False, True)
+    for live_trading_ack in (False, True)
+]
 
 
-def test_validate_live_side_effects_policy_allows_only_fully_armed() -> None:
-    reason = validate_live_side_effects_policy(
-        dry_run=False,
-        kill_switch=False,
-        live_trading_enabled=True,
+@pytest.mark.parametrize(
+    ("dry_run", "kill_switch", "live_trading_enabled", "live_trading_ack"),
+    _TRUTH_TABLE_CASES,
+)
+def test_validate_live_side_effects_policy_truth_table(
+    dry_run: bool,
+    kill_switch: bool,
+    live_trading_enabled: bool,
+    live_trading_ack: bool,
+) -> None:
+    result = validate_live_side_effects_policy(
+        dry_run=dry_run,
+        kill_switch=kill_switch,
+        live_trading_enabled=live_trading_enabled,
+        live_trading_ack=live_trading_ack,
     )
 
-    assert reason is None
+    assert result.allowed is (
+        (not dry_run)
+        and (not kill_switch)
+        and live_trading_enabled
+        and live_trading_ack
+    )
+    assert result.reasons == _expected_reasons(
+        dry_run=dry_run,
+        kill_switch=kill_switch,
+        live_trading_enabled=live_trading_enabled,
+        live_trading_ack=live_trading_ack,
+    )
 
 
-def test_validate_live_side_effects_policy_blocks_when_dry_run_even_if_live_armed() -> None:
-    reason = validate_live_side_effects_policy(
+def test_kill_switch_reason_is_preserved_alongside_other_failures() -> None:
+    result = validate_live_side_effects_policy(
         dry_run=True,
-        kill_switch=False,
-        live_trading_enabled=True,
-    )
-
-    assert reason is PolicyBlockReason.DRY_RUN
-
-
-def test_validate_live_side_effects_policy_blocks_when_kill_switch_even_if_live_armed() -> None:
-    reason = validate_live_side_effects_policy(
-        dry_run=False,
         kill_switch=True,
-        live_trading_enabled=True,
+        live_trading_enabled=False,
+        live_trading_ack=False,
     )
 
-    assert reason is PolicyBlockReason.KILL_SWITCH
+    assert result.allowed is False
+    assert "KILL_SWITCH" in result.reasons
+    assert result.reasons == ["KILL_SWITCH", "DRY_RUN", "NOT_ARMED", "ACK_MISSING"]
+    assert "KILL_SWITCH=true blocks side effects" in result.message

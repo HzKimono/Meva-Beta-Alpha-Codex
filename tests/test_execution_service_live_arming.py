@@ -131,6 +131,7 @@ def test_execute_intents_quantizes_before_submit(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
 
     placed = service.execute_intents([_intent()])
@@ -149,6 +150,7 @@ def test_execute_intents_enforces_min_total(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
 
     placed = service.execute_intents([_intent(price=10, quantity=0.1)])
@@ -264,3 +266,40 @@ def test_cancel_stale_dry_run_records_would_cancel_action(tmp_path) -> None:
     assert exchange.canceled == []
     assert store.action_count("would_cancel_order", payload_hash) == 1
     assert store.action_count("cancel_order", payload_hash) == 0
+
+
+def test_execute_intents_blocks_when_ack_missing_even_if_live_enabled(tmp_path) -> None:
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=StateStore(db_path=str(tmp_path / "state.db")),
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=False,
+    )
+
+    with pytest.raises(LiveTradingNotArmedError) as exc_info:
+        service.execute_intents([_intent()])
+
+    assert "ACK_MISSING" in exc_info.value.reasons
+    assert exchange.placed == []
+
+
+def test_execute_intents_allows_when_live_enabled_and_ack_present(tmp_path) -> None:
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=StateStore(db_path=str(tmp_path / "state.db")),
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents([_intent()])
+
+    assert placed == 1
+    assert len(exchange.placed) == 1
