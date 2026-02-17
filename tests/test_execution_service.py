@@ -186,6 +186,7 @@ def test_live_mode_saves_order_state(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
 
     placed = service.execute_intents([_intent(cycle_id="cycle-live")])
@@ -215,6 +216,7 @@ def test_live_mode_marks_canceled_order(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
 
     canceled = service.cancel_stale_orders(cycle_id="cycle-cancel")
@@ -233,6 +235,7 @@ def test_execute_intents_idempotent_for_same_payload(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
 
     intent = _intent(cycle_id="cycle-idempotent")
@@ -265,6 +268,7 @@ def test_cancel_stale_orders_idempotent_for_same_order(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
 
     first = service.cancel_stale_orders(cycle_id="cycle-cancel-dedupe")
@@ -366,6 +370,7 @@ def test_dry_run_then_live_promotes_simulated_idempotency(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
     assert live_service.execute_intents([intent], cycle_id="cycle-a") == 1
     assert len(live_exchange.placed) == 1
@@ -402,6 +407,7 @@ def test_cancel_non_uncertain_failure_finalizes_failed_and_retries(tmp_path) -> 
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
 
     assert service.cancel_stale_orders(cycle_id="cycle-fail-cancel") == 0
@@ -429,6 +435,7 @@ def test_record_action_conflict_finalizes_idempotency_not_pending(tmp_path) -> N
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
     intent = _stage3_intent()
     order_intent = to_order_intent(intent, cycle_id="cycle-a")
@@ -479,6 +486,7 @@ def test_place_order_idempotency_across_bucket_boundary(monkeypatch, tmp_path) -
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
     intent = _stage3_intent()
 
@@ -522,6 +530,7 @@ def test_restart_safety_inflight_pending_blocks_second_submit(monkeypatch, tmp_p
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
     intent = _stage3_intent()
     payload_hash = service._place_hash(to_order_intent(intent, cycle_id="cycle-a"))
@@ -563,6 +572,7 @@ def test_restart_safety_stale_pending_without_client_order_id_recovers(monkeypat
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
     intent = _stage3_intent()
     payload_hash = service._place_hash(to_order_intent(intent, cycle_id="cycle-a"))
@@ -629,6 +639,7 @@ def test_restart_safety_stale_pending_with_client_order_id_reconciles_without_re
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
     )
     intent = _stage3_intent()
     payload_hash = service._place_hash(to_order_intent(intent, cycle_id="cycle-a"))
@@ -706,6 +717,7 @@ def test_stale_pending_lookup_failure_backoff_and_eventual_failed(
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
         pending_recovery_max_attempts=3,
         pending_recovery_backoff_seconds=30,
     )

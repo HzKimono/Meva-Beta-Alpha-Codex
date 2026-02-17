@@ -21,6 +21,25 @@ from btcbot.services.stage4_cycle_runner import Stage4CycleRunner, Stage4Invaria
 from btcbot.logging_utils import JsonFormatter
 
 
+class _Freshness:
+    def __init__(
+        self,
+        *,
+        is_stale: bool = False,
+        observed_age_ms: int = 0,
+        max_age_ms: int = 15_000,
+        source_mode: str = "rest",
+        connected: bool = True,
+        missing_symbols: list[str] | None = None,
+    ) -> None:
+        self.is_stale = is_stale
+        self.observed_age_ms = observed_age_ms
+        self.max_age_ms = max_age_ms
+        self.source_mode = source_mode
+        self.connected = connected
+        self.missing_symbols = list(missing_symbols or [])
+
+
 class HealthyClient:
     def __init__(self, *args, **kwargs) -> None:
         del args, kwargs
@@ -145,10 +164,10 @@ def test_run_cycle_wires_services_and_persists_last_cycle_id(monkeypatch) -> Non
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
             events.append("market.get_best_bids")
-            return {}
+            return {}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeSweepService:
         def __init__(self, **kwargs) -> None:
@@ -217,9 +236,9 @@ def test_run_cycle_dry_run_emits_decision_event_with_envelope_keys(monkeypatch, 
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
-            return {}
+            return {}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeSweepService:
         def __init__(self, **kwargs) -> None:
@@ -349,9 +368,9 @@ def test_run_cycle_uses_unique_cycle_ids(monkeypatch) -> None:
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
-            return {}
+            return {}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeSweepService:
         def __init__(self, **kwargs) -> None:
@@ -418,9 +437,9 @@ def test_run_cycle_normalizes_mark_price_keys(monkeypatch) -> None:
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
-            return {"btc_try": 100.0}
+            return {"btc_try": 100.0}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeAccountingService:
         def __init__(self, exchange, state_store) -> None:
@@ -515,9 +534,9 @@ def test_run_cycle_passes_cycle_id_to_execution(monkeypatch) -> None:
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
-            return {}
+            return {}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeAccountingService:
         def __init__(self, exchange, state_store) -> None:
@@ -615,10 +634,10 @@ def test_run_cycle_kill_switch_blocks_side_effects_but_planning_runs(monkeypatch
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
             events.append("market")
-            return {}
+            return {}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeSweepService:
         def __init__(self, **kwargs) -> None:
@@ -685,9 +704,9 @@ def test_stage3_acceptance_run_cycle_dry_run_logs_cycle_completed(monkeypatch, c
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
-            return {"BTC_TRY": 100.0}
+            return {"BTC_TRY": 100.0}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeAccountingService:
         def __init__(self, **kwargs) -> None:
@@ -1330,9 +1349,9 @@ def test_run_cycle_kill_switch_reports_blocked_not_failed(monkeypatch) -> None:
         def __init__(self, exchange) -> None:
             del exchange
 
-        def get_best_bids(self, symbols):
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
             del symbols
-            return {}
+            return {}, _Freshness(max_age_ms=max_age_ms)
 
     class FakeSweepService:
         def __init__(self, **kwargs) -> None:

@@ -163,6 +163,7 @@ def _service(tmp_path, exchange: LifecycleExchange) -> ExecutionService:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
         ttl_seconds=1,
     )
 
@@ -362,6 +363,7 @@ def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_s
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
         unknown_reprobe_initial_seconds=60,
         unknown_reprobe_max_seconds=60,
         unknown_reprobe_escalation_attempts=5,
@@ -380,6 +382,7 @@ def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_s
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
         unknown_reprobe_initial_seconds=60,
         unknown_reprobe_max_seconds=60,
         unknown_reprobe_escalation_attempts=5,
@@ -477,6 +480,7 @@ def test_unknown_reprobe_clamps_corrupted_attempts(tmp_path) -> None:
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
         unknown_reprobe_initial_seconds=1,
         unknown_reprobe_max_seconds=60,
     )
@@ -540,6 +544,7 @@ def test_unknown_escalation_emits_metric_and_forces_observe_only(
         dry_run=False,
         kill_switch=False,
         live_trading_enabled=True,
+        live_trading_ack=True,
         unknown_reprobe_escalation_attempts=1,
         unknown_reprobe_force_observe_only=True,
     )
