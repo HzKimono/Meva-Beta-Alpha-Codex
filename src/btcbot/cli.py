@@ -33,6 +33,12 @@ from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_repl
 from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
 from btcbot.risk.policy import RiskPolicy
+from btcbot.security.secrets import (
+    build_default_provider,
+    inject_runtime_secrets,
+    log_secret_validation,
+    validate_secret_controls,
+)
 from btcbot.services.doctor import DoctorReport, run_health_checks
 from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage3
@@ -445,9 +451,24 @@ def main() -> int:
 
 
 def _load_settings(env_file: str | None) -> Settings:
-    if env_file in (None, ""):
-        return Settings()
-    return Settings(_env_file=env_file)
+    resolved_env_file = None if env_file in (None, "") else env_file
+    provider = build_default_provider(env_file=resolved_env_file)
+    inject_runtime_secrets(
+        provider,
+        keys=("BTCTURK_API_KEY", "BTCTURK_API_SECRET", "LIVE_TRADING_ACK"),
+    )
+
+    settings = Settings() if resolved_env_file is None else Settings(_env_file=resolved_env_file)
+    validation = validate_secret_controls(
+        scopes=list(getattr(settings, "btcturk_api_scopes", ["read", "trade"])),
+        rotated_at=getattr(settings, "btcturk_secret_rotated_at", None),
+        max_age_days=int(getattr(settings, "btcturk_secret_max_age_days", 90)),
+        live_trading=bool(getattr(settings, "live_trading", False)),
+    )
+    log_secret_validation(validation)
+    if not validation.ok:
+        raise ValueError("Secret controls validation failed")
+    return settings
 
 
 def run_with_optional_loop(

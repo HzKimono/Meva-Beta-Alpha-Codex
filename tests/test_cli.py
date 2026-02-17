@@ -94,7 +94,7 @@ def test_run_dry_run_does_not_crash_with_missing_market_data(monkeypatch) -> Non
 
 
 def test_run_cycle_fails_when_dry_run_disabled(capsys) -> None:
-    settings = Settings(DRY_RUN=False, KILL_SWITCH=True)
+    settings = Settings(DRY_RUN=False, KILL_SWITCH=True, SAFE_MODE=False)
 
     code = cli.run_cycle(settings, force_dry_run=False)
 
@@ -104,7 +104,7 @@ def test_run_cycle_fails_when_dry_run_disabled(capsys) -> None:
 
 
 def test_run_cycle_live_not_armed_message_is_specific(capsys) -> None:
-    settings = Settings(DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=False)
+    settings = Settings(DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=False, SAFE_MODE=False)
 
     code = cli.run_cycle(settings, force_dry_run=False)
 
@@ -214,6 +214,7 @@ def test_run_cycle_returns_two_on_configuration_error(monkeypatch) -> None:
         DRY_RUN=False,
         KILL_SWITCH=False,
         LIVE_TRADING=True,
+        SAFE_MODE=False,
         LIVE_TRADING_ACK="I_UNDERSTAND",
         BTCTURK_API_KEY="key",
         BTCTURK_API_SECRET="secret",
@@ -767,6 +768,7 @@ def test_stage4_cycle_runner_build_intents_sets_live_mode_flag() -> None:
         live_mode=True,
         bootstrap_enabled=True,
         pair_info=pair_info,
+        now_utc=datetime.now(UTC),
     )
     intents_dry, drops_dry = runner._build_intents(
         cycle_id="abc123",
@@ -805,6 +807,7 @@ def test_stage4_cycle_runner_build_intents_quantized_and_valid_min_notional() ->
         live_mode=False,
         bootstrap_enabled=True,
         pair_info=[pair],
+        now_utc=datetime.now(UTC),
     )
 
     assert drops == {}
@@ -828,6 +831,7 @@ def test_stage4_cycle_runner_build_intents_skips_missing_pair_info() -> None:
         live_mode=False,
         bootstrap_enabled=True,
         pair_info=[],
+        now_utc=datetime.now(UTC),
     )
 
     assert intents == []
@@ -838,6 +842,7 @@ def test_run_cycle_stage4_policy_block_records_audit(tmp_path, capsys) -> None:
     settings = Settings(
         DRY_RUN=False,
         KILL_SWITCH=True,
+        SAFE_MODE=False,
         STATE_DB_PATH=str(tmp_path / "policy.sqlite"),
         SYMBOLS="BTC_TRY",
     )

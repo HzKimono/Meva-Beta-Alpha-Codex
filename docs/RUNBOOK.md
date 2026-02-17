@@ -33,6 +33,8 @@ On every `run` startup, recovery executes before trading side effects:
 - HTTP/WS clients are closed best-effort before exit.
 
 ## Observability configuration
+See [SLO targets](./SLO.md) for thresholds and paging conditions.
+
 Vendor-neutral instrumentation is enabled by env flags:
 - `OBSERVABILITY_ENABLED` (default `false`)
 - `OBSERVABILITY_METRICS_EXPORTER` (`none|otlp|prometheus`)
@@ -72,6 +74,14 @@ Vendor-neutral instrumentation is enabled by env flags:
   1. Stay in observe-only (`SAFE_MODE=true` or `KILL_SWITCH=true`).
   2. Check upstream market data feeds and clock skew.
   3. Resume live only when freshness is restored.
+
+## Secret lifecycle controls
+- Secrets are loaded through centralized startup providers (environment first, then optional dotenv source).
+- Startup validates API scope least-privilege and secret rotation age.
+- Required settings:
+  - `BTCTURK_API_SCOPES` must contain `read` (and `trade` when live); must not contain `withdraw`.
+  - `BTCTURK_SECRET_ROTATED_AT` should be ISO-8601.
+  - `BTCTURK_SECRET_MAX_AGE_DAYS` controls max allowed age (default: `90`).
 
 ## API key rotation
 1. Enable `SAFE_MODE=true`.

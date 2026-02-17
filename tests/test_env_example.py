@@ -8,10 +8,14 @@ EXPECTED_KEYS = {
     "BTCTURK_API_KEY",
     "BTCTURK_API_SECRET",
     "BTCTURK_BASE_URL",
+    "BTCTURK_API_SCOPES",
+    "BTCTURK_SECRET_ROTATED_AT",
+    "BTCTURK_SECRET_MAX_AGE_DAYS",
     "KILL_SWITCH",
     "DRY_RUN",
     "LIVE_TRADING",
     "LIVE_TRADING_ACK",
+    "SAFE_MODE",
     "TARGET_TRY",
     "OFFSET_BPS",
     "TTL_SECONDS",
@@ -69,6 +73,7 @@ def test_env_example_values_load_into_settings(monkeypatch, tmp_path: Path) -> N
     assert settings.target_try == 300
     assert settings.live_trading is False
     assert settings.live_trading_ack == "I_UNDERSTAND"
+    assert settings.safe_mode is True
     assert settings.offset_bps == 20
     assert settings.ttl_seconds == 120
     assert settings.symbols == ["BTCTRY", "ETHTRY", "SOLTRY"]

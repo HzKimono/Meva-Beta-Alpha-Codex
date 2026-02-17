@@ -23,6 +23,12 @@ class Settings(BaseSettings):
 
     btcturk_api_key: SecretStr | None = Field(default=None, alias="BTCTURK_API_KEY")
     btcturk_api_secret: SecretStr | None = Field(default=None, alias="BTCTURK_API_SECRET")
+    btcturk_api_scopes: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["read", "trade"],
+        alias="BTCTURK_API_SCOPES",
+    )
+    btcturk_secret_rotated_at: str | None = Field(default=None, alias="BTCTURK_SECRET_ROTATED_AT")
+    btcturk_secret_max_age_days: int = Field(default=90, alias="BTCTURK_SECRET_MAX_AGE_DAYS")
     btcturk_base_url: str = Field(default="https://api.btcturk.com", alias="BTCTURK_BASE_URL")
     btcturk_ws_enabled: bool = Field(default=False, alias="BTCTURK_WS_ENABLED")
     btcturk_ws_url: str = Field(default="wss://ws-feed-pro.btcturk.com", alias="BTCTURK_WS_URL")
@@ -211,10 +217,8 @@ class Settings(BaseSettings):
     observability_otlp_endpoint: str | None = Field(
         default=None, alias="OBSERVABILITY_OTLP_ENDPOINT"
     )
-    observability_prometheus_port: int = Field(
-        default=9464, alias="OBSERVABILITY_PROMETHEUS_PORT"
-    )
-    safe_mode: bool = Field(default=False, alias="SAFE_MODE")
+    observability_prometheus_port: int = Field(default=9464, alias="OBSERVABILITY_PROMETHEUS_PORT")
+    safe_mode: bool = Field(default=True, alias="SAFE_MODE")
     agent_policy_enabled: bool = Field(default=False, alias="AGENT_POLICY_ENABLED")
     agent_policy_provider: str = Field(default="rule", alias="AGENT_POLICY_PROVIDER")
     agent_observe_only: bool = Field(default=False, alias="AGENT_OBSERVE_ONLY")
@@ -303,6 +307,28 @@ class Settings(BaseSettings):
             value,
             invalid_json_message="UNIVERSE symbols JSON value must be a list",
         )
+
+    @field_validator("btcturk_api_scopes", mode="before")
+    def parse_btcturk_api_scopes(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("[") or raw.startswith("{"):
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    raise ValueError("BTCTURK_API_SCOPES JSON value must be a list")
+                values = parsed
+            else:
+                values = raw.split(",")
+        else:
+            values = value
+        normalized: list[str] = []
+        for item in values:
+            token = str(item).strip().lower()
+            if token:
+                normalized.append(token)
+        return normalized
 
     @field_validator("stage7_universe_whitelist", "stage7_universe_blacklist", mode="before")
     def parse_stage7_universe_symbols(cls, value: str | list[str]) -> list[str]:
@@ -637,6 +663,8 @@ class Settings(BaseSettings):
                 raise ValueError("LIVE_TRADING=true requires LIVE_TRADING_ACK=I_UNDERSTAND")
             if self.kill_switch:
                 raise ValueError("LIVE_TRADING=true requires KILL_SWITCH=false")
+            if self.safe_mode:
+                raise ValueError("LIVE_TRADING=true requires SAFE_MODE=false")
             if self.btcturk_api_key is None or self.btcturk_api_secret is None:
                 raise ValueError(
                     "LIVE_TRADING=true requires BTCTURK_API_KEY and BTCTURK_API_SECRET"
