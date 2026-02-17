@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 from btcbot.config import Settings
+from btcbot.observability import get_instrumentation
 from btcbot.replay.validate import DatasetValidationReport, validate_replay_dataset
 from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
+from btcbot.services.state_store import StateStore
 
 
 @dataclass(frozen=True)
@@ -44,12 +48,21 @@ class DoctorReport:
         return all(check.status != "fail" for check in self.checks)
 
 
+def doctor_status(report: DoctorReport) -> str:
+    if any(check.status == "fail" for check in report.checks):
+        return "fail"
+    if any(check.status == "warn" for check in report.checks):
+        return "warn"
+    return "pass"
+
+
 def run_health_checks(
     settings: Settings,
     *,
     db_path: str | None,
     dataset_path: str | None,
 ) -> DoctorReport:
+    started = perf_counter()
     checks: list[DoctorCheck] = []
     errors: list[str] = []
     warnings: list[str] = []
@@ -164,6 +177,14 @@ def run_health_checks(
             DoctorCheck("paths", "db_path", "warn", "db path not provided; skipping db write test")
         )
 
+    _run_slo_checks(
+        settings=settings,
+        db_path=db_path,
+        checks=checks,
+        warnings=warnings,
+        actions=actions,
+    )
+
     report = DoctorReport(checks=checks, errors=errors, warnings=warnings, actions=actions)
     derived_ok = all(check.status != "fail" for check in report.checks)
     if report.ok != derived_ok:
@@ -172,7 +193,229 @@ def run_health_checks(
         )
         raise RuntimeError(f"doctor report ok invariant violated: {summary}")
 
+    _emit_doctor_telemetry(report, duration_ms=(perf_counter() - started) * 1000)
     return report
+
+
+def evaluate_slo_status_for_rows(
+    settings: Settings,
+    rows: Sequence[dict[str, object]],
+    *,
+    drawdown_ratio: float | None,
+) -> tuple[str, dict[str, float], list[str]]:
+    if not rows:
+        return "warn", {}, ["no stage7 metrics found"]
+
+    submitted = sum(max(0, int(row.get("oms_submitted_count", 0))) for row in rows)
+    rejected = sum(max(0, int(row.get("oms_rejected_count", 0))) for row in rows)
+    filled = sum(max(0, int(row.get("oms_filled_count", 0))) for row in rows)
+    latencies = [max(0, int(row.get("latency_ms_total", 0))) for row in rows]
+    reject_rate = rejected / max(1, submitted)
+    fill_rate = filled / max(1, submitted)
+    latency_p95_ms = _p95_latency(latencies)
+    if drawdown_ratio is None:
+        latest = rows[0]
+        drawdown_ratio = float(latest.get("max_drawdown_ratio") or latest.get("max_drawdown_pct") or 0)
+
+    metrics = {
+        "reject_rate": reject_rate,
+        "fill_rate": fill_rate,
+        "latency_p95_ms": float(latency_p95_ms),
+        "max_drawdown_ratio": float(drawdown_ratio),
+    }
+    violations: list[str] = []
+    status = "pass"
+
+    def bump(next_status: str, message: str) -> None:
+        nonlocal status
+        violations.append(message)
+        if next_status == "fail" or (next_status == "warn" and status == "pass"):
+            status = next_status
+
+    if reject_rate > settings.doctor_slo_max_reject_rate_fail:
+        bump(
+            "fail",
+            f"reject_rate={reject_rate:.4f} threshold_fail={settings.doctor_slo_max_reject_rate_fail:.4f}",
+        )
+    elif reject_rate > settings.doctor_slo_max_reject_rate_warn:
+        bump(
+            "warn",
+            f"reject_rate={reject_rate:.4f} threshold_warn={settings.doctor_slo_max_reject_rate_warn:.4f}",
+        )
+
+    if fill_rate < settings.doctor_slo_min_fill_rate_fail:
+        bump(
+            "fail",
+            f"fill_rate={fill_rate:.4f} threshold_fail={settings.doctor_slo_min_fill_rate_fail:.4f}",
+        )
+    elif fill_rate < settings.doctor_slo_min_fill_rate_warn:
+        bump(
+            "warn",
+            f"fill_rate={fill_rate:.4f} threshold_warn={settings.doctor_slo_min_fill_rate_warn:.4f}",
+        )
+
+    if latency_p95_ms > settings.doctor_slo_max_latency_ms_fail:
+        bump(
+            "fail",
+            f"latency_p95_ms={latency_p95_ms} threshold_fail={settings.doctor_slo_max_latency_ms_fail}",
+        )
+    elif latency_p95_ms > settings.doctor_slo_max_latency_ms_warn:
+        bump(
+            "warn",
+            f"latency_p95_ms={latency_p95_ms} threshold_warn={settings.doctor_slo_max_latency_ms_warn}",
+        )
+
+    if drawdown_ratio > settings.doctor_slo_max_drawdown_ratio_fail:
+        bump(
+            "fail",
+            "max_drawdown_ratio="
+            f"{drawdown_ratio:.4f} threshold_fail={settings.doctor_slo_max_drawdown_ratio_fail:.4f}",
+        )
+    elif drawdown_ratio > settings.doctor_slo_max_drawdown_ratio_warn:
+        bump(
+            "warn",
+            "max_drawdown_ratio="
+            f"{drawdown_ratio:.4f} threshold_warn={settings.doctor_slo_max_drawdown_ratio_warn:.4f}",
+        )
+    return status, metrics, violations
+
+
+def _p95_latency(values: Sequence[int]) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    if len(ordered) < 3:
+        return max(ordered)
+    index = int((len(ordered) - 1) * 0.95)
+    return ordered[index]
+
+
+def _run_slo_checks(
+    *,
+    settings: Settings,
+    db_path: str | None,
+    checks: list[DoctorCheck],
+    warnings: list[str],
+    actions: list[str],
+) -> None:
+    if not settings.doctor_slo_enabled:
+        checks.append(DoctorCheck("slo", "enabled", "pass", "slo checks disabled by config"))
+        return
+    if db_path is None:
+        message = "db_path not provided; skipping slo checks"
+        warnings.append(message)
+        checks.append(DoctorCheck("slo", "coverage", "warn", message))
+        return
+
+    store = StateStore(db_path=db_path)
+    rows = store.fetch_stage7_run_metrics(limit=settings.doctor_slo_lookback, order_desc=True)
+    ledger_metrics = store.get_latest_stage7_ledger_metrics()
+    drawdown_ratio = (
+        float(ledger_metrics["max_drawdown_ratio"])
+        if ledger_metrics and "max_drawdown_ratio" in ledger_metrics
+        else None
+    )
+    status, metrics, violations = evaluate_slo_status_for_rows(
+        settings,
+        rows,
+        drawdown_ratio=drawdown_ratio,
+    )
+    if not rows:
+        checks.append(DoctorCheck("slo", "coverage", "warn", "no stage7 metrics found"))
+        return
+
+    checks.append(
+        DoctorCheck(
+            "slo",
+            "coverage",
+            "pass",
+            f"metrics present window={len(rows)}/{settings.doctor_slo_lookback}",
+        )
+    )
+
+    checks.extend(
+        [
+            _slo_metric_check(
+                "reject_rate",
+                metrics["reject_rate"],
+                warn=settings.doctor_slo_max_reject_rate_warn,
+                fail=settings.doctor_slo_max_reject_rate_fail,
+                lower_is_better=True,
+            ),
+            _slo_metric_check(
+                "fill_rate",
+                metrics["fill_rate"],
+                warn=settings.doctor_slo_min_fill_rate_warn,
+                fail=settings.doctor_slo_min_fill_rate_fail,
+                lower_is_better=False,
+            ),
+            _slo_metric_check(
+                "latency",
+                metrics["latency_p95_ms"],
+                warn=float(settings.doctor_slo_max_latency_ms_warn),
+                fail=float(settings.doctor_slo_max_latency_ms_fail),
+                lower_is_better=True,
+            ),
+            _slo_metric_check(
+                "max_drawdown_ratio",
+                metrics["max_drawdown_ratio"],
+                warn=settings.doctor_slo_max_drawdown_ratio_warn,
+                fail=settings.doctor_slo_max_drawdown_ratio_fail,
+                lower_is_better=True,
+            ),
+        ]
+    )
+    if status == "fail":
+        actions.extend(
+            [
+                "Investigate exchange rejects and order rule mismatches.",
+                "Lower strategy aggressiveness and order frequency.",
+                "Check network/exchange connectivity for latency spikes.",
+            ]
+        )
+    if violations:
+        for detail in violations:
+            if "threshold_warn" in detail and status == "warn":
+                warnings.append(f"slo warning: {detail}")
+
+    inst = get_instrumentation()
+    inst.gauge("doctor_slo_reject_rate", metrics["reject_rate"])
+    inst.gauge("doctor_slo_fill_rate", metrics["fill_rate"])
+    inst.gauge("doctor_slo_latency_ms", metrics["latency_p95_ms"])
+    inst.gauge("doctor_slo_max_drawdown_ratio", metrics["max_drawdown_ratio"])
+
+
+def _slo_metric_check(
+    name: str,
+    value: float,
+    *,
+    warn: float,
+    fail: float,
+    lower_is_better: bool,
+) -> DoctorCheck:
+    if lower_is_better:
+        if value > fail:
+            return DoctorCheck("slo", name, "fail", f"value={value:.4f} threshold_fail={fail:.4f}")
+        if value > warn:
+            return DoctorCheck("slo", name, "warn", f"value={value:.4f} threshold_warn={warn:.4f}")
+    else:
+        if value < fail:
+            return DoctorCheck("slo", name, "fail", f"value={value:.4f} threshold_fail={fail:.4f}")
+        if value < warn:
+            return DoctorCheck("slo", name, "warn", f"value={value:.4f} threshold_warn={warn:.4f}")
+    return DoctorCheck("slo", name, "pass", f"value={value:.4f}")
+
+
+def _emit_doctor_telemetry(report: DoctorReport, *, duration_ms: float) -> None:
+    inst = get_instrumentation()
+    run_status = doctor_status(report)
+    inst.counter("doctor_runs_total", attrs={"status": run_status})
+    for check in report.checks:
+        inst.counter(
+            "doctor_checks_total",
+            attrs={"category": check.category, "status": check.status},
+        )
+    inst.histogram("doctor_duration_ms", max(duration_ms, 0.0), attrs={"status": run_status})
 
 
 def _check_exchange_rules(
