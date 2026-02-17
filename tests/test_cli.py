@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -17,6 +18,7 @@ from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import Balance, OrderSide, PairInfo
 from btcbot.domain.stage4 import Quantizer
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
+from btcbot.logging_utils import JsonFormatter
 
 
 class HealthyClient:
@@ -190,6 +192,80 @@ def test_run_cycle_wires_services_and_persists_last_cycle_id(monkeypatch) -> Non
     assert "execution.execute" in events
     assert "state.set_last_cycle_id" in events
     assert events[-1] == "exchange.close"
+
+
+def test_run_cycle_dry_run_emits_decision_event_with_envelope_keys(monkeypatch, caplog) -> None:
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_best_bids(self, symbols):
+            del symbols
+            return {}
+
+    class FakeSweepService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def build_order_intents(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del intents, cycle_id
+            return 0
+
+    class FakeRiskService:
+        def __init__(self, risk_policy, state_store) -> None:
+            del risk_policy, state_store
+
+        def filter(self, cycle_id: str, intents, **kwargs):
+            del cycle_id, kwargs
+            return intents
+
+    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "SweepService", FakeSweepService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+
+    caplog.set_level("INFO", logger="btcbot.cli")
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SAFE_MODE=False)
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+
+    decision_events = [record for record in caplog.records if record.getMessage() == "decision_event"]
+    assert decision_events
+    payload = json.loads(JsonFormatter().format(decision_events[0]))
+    for key in ("cycle_id", "decision_layer", "reason_code", "action"):
+        assert key in payload
 
 
 def test_run_cycle_returns_two_on_configuration_error(monkeypatch) -> None:
@@ -1160,6 +1236,7 @@ def test_main_stage7_db_count_supports_env_fallback(monkeypatch) -> None:
 def test_main_supports_env_file_override(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        state_db_path = "btcbot_state.db"
 
     captured: dict[str, object] = {}
 
@@ -1183,6 +1260,7 @@ def test_main_supports_env_file_override(monkeypatch) -> None:
 def test_main_run_accepts_sleep_seconds_alias(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        state_db_path = "btcbot_state.db"
 
     captured: dict[str, object] = {}
 

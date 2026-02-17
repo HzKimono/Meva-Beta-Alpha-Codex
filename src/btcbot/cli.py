@@ -675,7 +675,11 @@ def _log_arm_check(settings: Settings, *, dry_run: bool) -> None:
 
 
 def _compute_live_policy(
-    settings: Settings, *, force_dry_run: bool, include_safe_mode: bool
+    settings: Settings,
+    *,
+    force_dry_run: bool,
+    include_safe_mode: bool,
+    cycle_id: str | None = None,
 ) -> tuple[dict[str, bool], object]:
     safe_mode_fn = getattr(settings, "is_safe_mode_enabled", None)
     safe_mode = bool(safe_mode_fn()) if callable(safe_mode_fn) else bool(getattr(settings, "safe_mode", False))
@@ -688,7 +692,14 @@ def _compute_live_policy(
         "live_trading_enabled": bool(getattr(settings, "live_trading", False)),
         "live_trading_ack": live_ack,
     }
-    policy = validate_live_side_effects_policy(**inputs)
+    policy = validate_live_side_effects_policy(
+        **inputs,
+        cycle_id=cycle_id,
+        logger=logger if cycle_id else None,
+        decision_layer="policy_gate",
+        action="BLOCK",
+        scope="global",
+    )
     return inputs, policy
 
 
@@ -719,8 +730,12 @@ def _print_effective_side_effects_state(
 
 def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
     run_id = uuid4().hex
+    cycle_id = uuid4().hex
     inputs, live_policy = _compute_live_policy(
-        settings, force_dry_run=force_dry_run, include_safe_mode=True
+        settings,
+        force_dry_run=force_dry_run,
+        include_safe_mode=True,
+        cycle_id=cycle_id,
     )
     dry_run = inputs["dry_run"]
     effective_safe_mode = settings.is_safe_mode_enabled()
@@ -741,8 +756,6 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
 
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
     state_store = StateStore(db_path=settings.state_db_path)
-    cycle_id = uuid4().hex
-
     try:
         with with_logging_context(run_id=run_id, cycle_id=cycle_id):
             if settings.kill_switch or effective_safe_mode:

@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 
+from btcbot.domain.decision_codes import ReasonCode, map_risk_reason
 from btcbot.domain.intent import Intent
 from btcbot.domain.models import normalize_symbol
+from btcbot.observability_decisions import emit_decision
 from btcbot.risk.exchange_rules import ExchangeRules, ExchangeRulesProvider
 
 logger = logging.getLogger(__name__)
@@ -51,10 +53,25 @@ class RiskPolicy:
         approved: list[Intent] = []
         used_notional = Decimal("0")
 
+        if len(intents) > self.max_orders_per_cycle:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": context.cycle_id,
+                    "decision_layer": "risk_policy",
+                    "reason_code": str(ReasonCode.RISK_DROP_MAX_ORDERS_PER_CYCLE),
+                    "action": "CAP",
+                    "scope": "cycle_cumulative",
+                    "rule_id": str(ReasonCode.RISK_DROP_MAX_ORDERS_PER_CYCLE),
+                    "max_orders_per_cycle": str(self.max_orders_per_cycle),
+                    "dropped_intents": str(max(0, len(intents) - self.max_orders_per_cycle)),
+                },
+            )
+
         for intent in intents[: self.max_orders_per_cycle]:
             symbol = normalize_symbol(intent.symbol)
             if context.open_orders_by_symbol.get(symbol, 0) >= self.max_open_orders_per_symbol:
-                self._log_block(intent, "max_open_orders_per_symbol")
+                self._log_block(intent, map_risk_reason("max_open_orders_per_symbol"), context=context)
                 continue
 
             last_ts = context.last_intent_ts_by_symbol_side.get((symbol, intent.side.value))
@@ -62,23 +79,23 @@ class RiskPolicy:
                 now = self.now_provider()
                 age = (now - last_ts).total_seconds()
                 if age < self.cooldown_seconds:
-                    self._log_block(intent, "cooldown")
+                    self._log_block(intent, map_risk_reason("cooldown"), context=context)
                     continue
 
-            normalized_result = self._normalize_intent(intent)
+            normalized_result = self._normalize_intent(intent, context=context)
             if normalized_result is None:
                 continue
             normalized, rules = normalized_result
 
             price = normalized.limit_price
             if price is None:
-                self._log_block(intent, "missing_limit_price")
+                self._log_block(intent, map_risk_reason("missing_limit_price"), context=context)
                 continue
             notional = normalized.qty * price
             if context.investable_try > 0 and used_notional + notional > context.investable_try:
                 self._log_block(
                     normalized,
-                    "cash_reserve_target",
+                    map_risk_reason("cash_reserve_target"),
                     context=context,
                     intent_notional_try=notional,
                     used_notional_try=used_notional,
@@ -89,11 +106,26 @@ class RiskPolicy:
                 if capped_qty <= 0:
                     self._log_block(
                         normalized,
-                        "max_notional_per_order_cap_non_positive",
+                        map_risk_reason("max_notional_per_order_cap_non_positive"),
                         context=context,
                         intent_notional_try=notional,
                     )
                     continue
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": context.cycle_id,
+                        "decision_layer": "risk_policy",
+                        "reason_code": str(ReasonCode.RISK_CAP_MAX_NOTIONAL_PER_ORDER_TRY),
+                        "action": "CAP",
+                        "scope": "per_intent",
+                        "intent_id": normalized.intent_id,
+                        "symbol": normalized.symbol,
+                        "side": normalized.side.value,
+                        "rule_id": str(ReasonCode.RISK_CAP_MAX_NOTIONAL_PER_ORDER_TRY),
+                        "max_notional_per_order_try": str(self.max_notional_per_order_try),
+                    },
+                )
                 normalized = Intent(
                     intent_id=normalized.intent_id,
                     symbol=normalized.symbol,
@@ -110,7 +142,7 @@ class RiskPolicy:
             if used_notional + notional > self.notional_cap_try_per_cycle:
                 self._log_block(
                     normalized,
-                    "notional_cap",
+                    map_risk_reason("notional_cap"),
                     context=context,
                     intent_notional_try=notional,
                     used_notional_try=used_notional,
@@ -122,7 +154,12 @@ class RiskPolicy:
 
         return approved
 
-    def _normalize_intent(self, intent: Intent) -> tuple[Intent, ExchangeRules] | None:
+    def _normalize_intent(
+        self,
+        intent: Intent,
+        *,
+        context: RiskPolicyContext,
+    ) -> tuple[Intent, ExchangeRules] | None:
         if intent.limit_price is None:
             return intent, ExchangeRules(
                 min_notional=Decimal("0"),
@@ -133,10 +170,10 @@ class RiskPolicy:
         q_price = _quantize(intent.limit_price, rules.price_tick)
         q_qty = _quantize(intent.qty, rules.qty_step)
         if q_price <= 0 or q_qty <= 0:
-            self._log_block(intent, "non_positive_after_quantize")
+            self._log_block(intent, map_risk_reason("non_positive_after_quantize"), context=context)
             return None
         if q_price * q_qty < rules.min_notional:
-            self._log_block(intent, "min_notional")
+            self._log_block(intent, map_risk_reason("min_notional"), context=context)
             return None
         return Intent(
             intent_id=intent.intent_id,
@@ -154,7 +191,7 @@ class RiskPolicy:
     def _log_block(
         self,
         intent: Intent,
-        reason: str,
+        reason: ReasonCode,
         *,
         context: RiskPolicyContext | None = None,
         intent_notional_try: Decimal | None = None,
@@ -163,16 +200,22 @@ class RiskPolicy:
         extra_payload: dict[str, object] = {
             "intent_id": intent.intent_id,
             "symbol": intent.symbol,
-            "reason": reason,
-            "rule_id": reason,
+            "reason": str(reason),
+            "reason_code": str(reason),
+            "rule_id": str(reason),
+            "cycle_id": context.cycle_id if context is not None else "",
+            "decision_layer": "risk_policy",
+            "action": "BLOCK",
+            "scope": "per_intent",
+            "side": intent.side.value,
         }
-        if reason == "notional_cap":
+        if reason == ReasonCode.RISK_BLOCK_NOTIONAL_CAP:
             planned_spend_try = (used_notional_try or Decimal("0")) + (
                 intent_notional_try or Decimal("0")
             )
             extra_payload.update(
                 {
-                    "rule": "notional_cap",
+                    "rule": str(ReasonCode.RISK_BLOCK_NOTIONAL_CAP),
                     "cap_try_per_cycle": str(self.notional_cap_try_per_cycle),
                     "intent_notional_try": str(intent_notional_try or Decimal("0")),
                     "used_notional_try": str(used_notional_try or Decimal("0")),
@@ -188,7 +231,7 @@ class RiskPolicy:
                         "investable_try": str(context.investable_try),
                     }
                 )
-        if reason == "cash_reserve_target" and context is not None:
+        if reason == ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET and context is not None:
             extra_payload.update(
                 {
                     "intent_notional_try": str(intent_notional_try or Decimal("0")),
@@ -203,6 +246,7 @@ class RiskPolicy:
             "Intent blocked by risk policy",
             extra={"extra": extra_payload},
         )
+        emit_decision(logger, extra_payload)
 
 
 def _quantize(value: Decimal, step: Decimal) -> Decimal:

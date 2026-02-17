@@ -8,6 +8,7 @@ from decimal import Decimal
 import httpx
 
 from btcbot.adapters.exchange import ExchangeClient
+from btcbot.domain.decision_codes import ReasonCode
 from btcbot.domain.intent import Intent, to_order_intent
 from btcbot.domain.models import (
     ExchangeError,
@@ -28,9 +29,10 @@ from btcbot.domain.models import (
     validate_order,
 )
 from btcbot.observability import get_instrumentation
+from btcbot.observability_decisions import emit_decision
 from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
-from btcbot.services.trading_policy import validate_live_side_effects_policy
+from btcbot.services.trading_policy import policy_reason_to_code, validate_live_side_effects_policy
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +43,15 @@ CANCEL_ORDER_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 class LiveTradingNotArmedError(RuntimeError):
     """Raised when a live side-effect is attempted without explicit arming."""
 
-    def __init__(self, message: str, reasons: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        reasons: list[str] | None = None,
+        reason_codes: list[str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.reasons = tuple(reasons or ())
+        self.reason_codes = tuple(reason_codes or ())
 
 
 class ExecutionService:
@@ -263,9 +271,29 @@ class ExecutionService:
 
         if self.safe_mode:
             logger.warning("safe_mode_blocks_cancel_write_calls")
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "execution",
+                    "reason_code": str(ReasonCode.EXECUTION_SUPPRESS_SAFE_MODE),
+                    "action": "SUPPRESS",
+                    "scope": "global",
+                },
+            )
             return 0
 
         if self.kill_switch:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "execution",
+                    "reason_code": str(ReasonCode.EXECUTION_SUPPRESS_KILL_SWITCH),
+                    "action": "SUPPRESS",
+                    "scope": "global",
+                },
+            )
             for order in open_orders:
                 logger.info(
                     "Kill switch active; would cancel order",
@@ -301,7 +329,7 @@ class ExecutionService:
                 continue
 
             if not self.dry_run:
-                self._ensure_live_side_effects_allowed()
+                self._ensure_live_side_effects_allowed(cycle_id=cycle_id)
 
             payload_hash = self._cancel_hash(order.order_id)
             idempotency_key = f"cancel:{order.order_id}"
@@ -513,9 +541,31 @@ class ExecutionService:
 
         if self.safe_mode:
             logger.warning("safe_mode_blocks_submit_write_calls")
+            if normalized_intents:
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": normalized_intents[0][0].cycle_id,
+                        "decision_layer": "execution",
+                        "reason_code": str(ReasonCode.EXECUTION_SUPPRESS_SAFE_MODE),
+                        "action": "SUPPRESS",
+                        "scope": "global",
+                    },
+                )
             return 0
 
         if self.kill_switch:
+            if normalized_intents:
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": normalized_intents[0][0].cycle_id,
+                        "decision_layer": "execution",
+                        "reason_code": str(ReasonCode.EXECUTION_SUPPRESS_KILL_SWITCH),
+                        "action": "SUPPRESS",
+                        "scope": "global",
+                    },
+                )
             for intent, _raw_intent in normalized_intents:
                 logger.info(
                     "Kill switch active; would place order",
@@ -533,7 +583,12 @@ class ExecutionService:
         placed = 0
         for intent, raw_intent in normalized_intents:
             if not self.dry_run:
-                self._ensure_live_side_effects_allowed()
+                self._ensure_live_side_effects_allowed(
+                    cycle_id=intent.cycle_id,
+                    symbol=intent.symbol,
+                    side=intent.side.value,
+                    intent_id=(raw_intent.intent_id if raw_intent else None),
+                )
 
             payload_hash = self._place_hash(intent)
             idempotency_key = self._place_idempotency_key(intent, raw_intent)
@@ -611,6 +666,20 @@ class ExecutionService:
                 status="PENDING",
             )
             if self.dry_run:
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": intent.cycle_id,
+                        "decision_layer": "execution",
+                        "reason_code": str(ReasonCode.EXECUTION_SUBMIT_DRY_RUN_SIMULATED),
+                        "action": "SUBMIT",
+                        "scope": "per_intent",
+                        "intent_id": (raw_intent.intent_id if raw_intent else None),
+                        "symbol": intent.symbol,
+                        "side": intent.side.value,
+                        "simulated": True,
+                    },
+                )
                 self.state_store.attach_action_metadata(
                     action_id=action_id,
                     client_order_id=client_order_id,
@@ -688,6 +757,19 @@ class ExecutionService:
                         )
                     else:
                         logger.exception("Failed to place limit order")
+                    emit_decision(
+                        logger,
+                        {
+                            "cycle_id": intent.cycle_id,
+                            "decision_layer": "execution",
+                            "reason_code": str(ReasonCode.EXECUTION_REJECT_EXCHANGE_SUBMIT_FAILED),
+                            "action": "REJECT",
+                            "scope": "per_intent",
+                            "intent_id": (raw_intent.intent_id if raw_intent else None),
+                            "symbol": intent.symbol,
+                            "side": intent.side.value,
+                        },
+                    )
                     self.state_store.finalize_idempotency_key(
                         "place_order",
                         idempotency_key,
@@ -1194,15 +1276,34 @@ class ExecutionService:
             return "json" in message.lower()
         return "json" in str(exc).lower()
 
-    def _ensure_live_side_effects_allowed(self) -> None:
+    def _ensure_live_side_effects_allowed(
+        self,
+        *,
+        cycle_id: str = "",
+        symbol: str | None = None,
+        side: str | None = None,
+        intent_id: str | None = None,
+    ) -> None:
         policy = validate_live_side_effects_policy(
             dry_run=self.dry_run,
             kill_switch=self.kill_switch,
             live_trading_enabled=self.live_trading_enabled,
             live_trading_ack=self.live_trading_ack,
+            cycle_id=cycle_id,
+            logger=logger if cycle_id else None,
+            decision_layer="policy_gate",
+            action="REJECT",
+            scope="global",
+            symbol=symbol,
+            side=side,
+            intent_id=intent_id,
         )
         if not policy.allowed:
-            raise LiveTradingNotArmedError(policy.message, reasons=policy.reasons)
+            raise LiveTradingNotArmedError(
+                policy.message,
+                reasons=policy.reasons,
+                reason_codes=[str(policy_reason_to_code(reason)) for reason in policy.reasons],
+            )
 
     def _place_hash(self, intent: OrderIntent) -> str:
         raw = (

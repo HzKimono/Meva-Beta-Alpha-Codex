@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from btcbot.domain.decision_codes import ReasonCode
 from btcbot.domain.intent import Intent
 from btcbot.domain.models import OrderSide, PairInfo, SymbolRules
 from btcbot.logging_utils import JsonFormatter
@@ -367,12 +368,22 @@ def test_policy_notional_cap_logs_block_math(caplog) -> None:
     blocked = [r for r in caplog.records if r.getMessage() == "Intent blocked by risk policy"]
     assert blocked
     payload = json.loads(JsonFormatter().format(blocked[-1]))
-    assert payload["reason"] == "notional_cap"
+    assert payload["reason"] == str(ReasonCode.RISK_BLOCK_NOTIONAL_CAP)
+    assert payload["reason_code"] == str(ReasonCode.RISK_BLOCK_NOTIONAL_CAP)
     assert payload["cap_try_per_cycle"] == "15"
     assert payload["intent_notional_try"] == "10.0"
     assert payload["used_notional_try"] == "10.0"
     assert payload["cash_try_free"] == "320"
     assert payload["try_cash_target"] == "300"
     assert payload["investable_try"] == "20"
-    assert payload["rule"] == "notional_cap"
+    assert payload["rule"] == str(ReasonCode.RISK_BLOCK_NOTIONAL_CAP)
     assert payload["planned_spend_try"] == "20.0"
+
+    decision_events = [r for r in caplog.records if r.getMessage() == "decision_event"]
+    assert decision_events
+    decision_payload = json.loads(JsonFormatter().format(decision_events[-1]))
+    assert decision_payload["reason_code"] in {
+        str(ReasonCode.RISK_BLOCK_NOTIONAL_CAP),
+        str(ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET),
+    }
+    assert getattr(decision_events[-1], "extra", {}).get("cycle_id") == "c1"
