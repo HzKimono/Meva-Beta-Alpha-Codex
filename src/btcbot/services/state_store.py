@@ -1911,6 +1911,20 @@ class StateStore:
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
             ).fetchone()
 
+    def get_action_by_dedupe_key(self, dedupe_key: str) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM actions WHERE dedupe_key = ? ORDER BY id DESC LIMIT 1",
+                (dedupe_key,),
+            ).fetchone()
+
+    def clear_action_dedupe_key(self, action_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE actions SET dedupe_key = NULL WHERE id = ?",
+                (action_id,),
+            )
+
     def get_latest_action(
         self, action_type: str, payload_hash: str
     ) -> sqlite3.Row | None:
@@ -2021,6 +2035,7 @@ class StateStore:
         key: str,
         payload_hash: str,
         ttl_seconds: int,
+        allow_promote_simulated: bool = False,
     ) -> ReservationResult:
         now_epoch = int(datetime.now(UTC).timestamp())
         expires_at = now_epoch + max(1, ttl_seconds)
@@ -2059,6 +2074,61 @@ class StateStore:
                         f"idempotency key conflict for {action_type}:{key}: "
                         f"existing={row['payload_hash']} incoming={payload_hash}"
                     )
+                if (
+                    allow_promote_simulated
+                    and str(row["status"]).upper() == "SIMULATED"
+                ):
+                    conn.execute(
+                        """
+                        UPDATE idempotency_keys
+                        SET status = 'PENDING',
+                            created_at_epoch = ?,
+                            expires_at_epoch = ?,
+                            action_id = NULL,
+                            client_order_id = NULL,
+                            order_id = NULL
+                        WHERE action_type = ? AND key = ?
+                        """,
+                        (now_epoch, expires_at, action_type, key),
+                    )
+                    promoted = conn.execute(
+                        """
+                        SELECT * FROM idempotency_keys
+                        WHERE action_type = ? AND key = ?
+                        """,
+                        (action_type, key),
+                    ).fetchone()
+                    if promoted is None:
+                        raise RuntimeError(
+                            f"failed to promote simulated idempotency key {action_type}:{key}"
+                        )
+                    return self._row_to_reservation_result(promoted, reserved=True)
+                if str(row["status"]).upper() == "FAILED":
+                    conn.execute(
+                        """
+                        UPDATE idempotency_keys
+                        SET status = 'PENDING',
+                            created_at_epoch = ?,
+                            expires_at_epoch = ?,
+                            action_id = NULL,
+                            client_order_id = NULL,
+                            order_id = NULL
+                        WHERE action_type = ? AND key = ?
+                        """,
+                        (now_epoch, expires_at, action_type, key),
+                    )
+                    retry_row = conn.execute(
+                        """
+                        SELECT * FROM idempotency_keys
+                        WHERE action_type = ? AND key = ?
+                        """,
+                        (action_type, key),
+                    ).fetchone()
+                    if retry_row is None:
+                        raise RuntimeError(
+                            f"failed to re-reserve failed idempotency key {action_type}:{key}"
+                        )
+                    return self._row_to_reservation_result(retry_row, reserved=True)
                 return self._row_to_reservation_result(row, reserved=False)
 
     def finalize_idempotency_key(

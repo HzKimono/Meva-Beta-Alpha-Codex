@@ -79,6 +79,16 @@ class RecordingExchange(ExchangeClient):
         return list(self.open_orders)
 
 
+class CancelFailExchange(RecordingExchange):
+    def __init__(self, orders: list[Order] | None = None) -> None:
+        super().__init__(orders=orders)
+        self.cancel_attempts = 0
+
+    def cancel_order(self, order_id: str) -> bool:
+        self.cancel_attempts += 1
+        raise RuntimeError(f"cancel-failed:{order_id}")
+
+
 class FakeMarketDataService:
     def get_symbol_rules(self, pair_symbol: str) -> SymbolRules:
         assert pair_symbol in {"BTCTRY", "ETHTRY", "SOLTRY"}
@@ -315,10 +325,134 @@ def test_execute_intents_stage3_uses_idempotency_key_for_dedupe(tmp_path) -> Non
     assert second == 0
     with store._connect() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS c FROM idempotency_keys WHERE action_type='place_order' AND key=?",
+            "SELECT COUNT(*) AS c, MIN(status) AS status FROM idempotency_keys WHERE action_type='place_order' AND key=?",
             (intent.idempotency_key,),
         ).fetchone()
     assert row is not None and row["c"] == 1
+    assert row["status"] == "SIMULATED"
+
+
+def test_dry_run_then_live_promotes_simulated_idempotency(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    intent = _stage3_intent()
+
+    dry_exchange = RecordingExchange()
+    dry_service = ExecutionService(
+        exchange=dry_exchange,
+        state_store=store,
+        dry_run=True,
+        kill_switch=False,
+    )
+    assert dry_service.execute_intents([intent], cycle_id="cycle-a") == 1
+
+    with store._connect() as conn:
+        dry_row = conn.execute(
+            """
+            SELECT status FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert dry_row is not None
+    assert dry_row["status"] == "SIMULATED"
+
+    live_exchange = RecordingExchange()
+    live_service = ExecutionService(
+        exchange=live_exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+    )
+    assert live_service.execute_intents([intent], cycle_id="cycle-a") == 1
+    assert len(live_exchange.placed) == 1
+
+    with store._connect() as conn:
+        live_row = conn.execute(
+            """
+            SELECT status FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert live_row is not None
+    assert live_row["status"] == "COMMITTED"
+
+
+def test_cancel_non_uncertain_failure_finalizes_failed_and_retries(tmp_path) -> None:
+    stale_order = Order(
+        order_id="o-fail-cancel",
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=100.0,
+        quantity=0.1,
+        status=OrderStatus.OPEN,
+        created_at=datetime.now(UTC) - timedelta(seconds=3600),
+        updated_at=datetime.now(UTC),
+    )
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = CancelFailExchange([stale_order])
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+    )
+
+    assert service.cancel_stale_orders(cycle_id="cycle-fail-cancel") == 0
+    with store._connect() as conn:
+        first = conn.execute(
+            """
+            SELECT status FROM idempotency_keys
+            WHERE action_type='cancel_order' AND key='cancel:o-fail-cancel'
+            """
+        ).fetchone()
+    assert first is not None
+    assert first["status"] == "FAILED"
+
+    assert service.cancel_stale_orders(cycle_id="cycle-fail-cancel") == 0
+    assert exchange.cancel_attempts == 2
+
+
+def test_record_action_conflict_finalizes_idempotency_not_pending(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+    )
+    intent = _stage3_intent()
+    order_intent = to_order_intent(intent, cycle_id="cycle-a")
+    payload_hash = service._place_hash(order_intent)
+    dedupe_key = f"place_order:{intent.idempotency_key}"
+    existing_action_id = store.record_action(
+        "cycle-a",
+        "place_order",
+        payload_hash,
+        dedupe_key=dedupe_key,
+    )
+    assert existing_action_id is not None
+
+    assert service.execute_intents([intent], cycle_id="cycle-a") == 0
+    assert exchange.placed == []
+    with store._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT status, action_id FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "COMMITTED"
+    assert row["action_id"] == existing_action_id
 
 
 def test_place_order_idempotency_across_bucket_boundary(monkeypatch, tmp_path) -> None:

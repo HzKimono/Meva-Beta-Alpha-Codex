@@ -303,6 +303,7 @@ class ExecutionService:
                 idempotency_key,
                 payload_hash,
                 ttl_seconds=CANCEL_ORDER_IDEMPOTENCY_TTL_SECONDS,
+                allow_promote_simulated=not self.dry_run,
             )
             if not reservation.reserved:
                 logger.info(
@@ -324,6 +325,12 @@ class ExecutionService:
                 dedupe_key=f"{action_type}:{idempotency_key}",
             )
             if action_id is None:
+                finalized_status = self._handle_reservation_without_new_action(
+                    action_type=action_type,
+                    idempotency_action_type="cancel_order",
+                    idempotency_key=idempotency_key,
+                    dedupe_key=f"{action_type}:{idempotency_key}",
+                )
                 logger.info(
                     "Skipping duplicate cancel action",
                     extra={
@@ -331,6 +338,7 @@ class ExecutionService:
                             "order_id": order.order_id,
                             "cycle_id": cycle_id,
                             "action_type": action_type,
+                            "idempotency_status": finalized_status,
                         }
                     },
                 )
@@ -358,7 +366,7 @@ class ExecutionService:
                     action_id=action_id,
                     client_order_id=order.client_order_id,
                     order_id=order.order_id,
-                    status="COMMITTED",
+                    status="SIMULATED",
                 )
                 continue
 
@@ -376,6 +384,15 @@ class ExecutionService:
                         "Failed to cancel stale order",
                         extra={"extra": {"order_id": order.order_id}},
                     )
+                    self.state_store.finalize_idempotency_key(
+                        "cancel_order",
+                        idempotency_key,
+                        action_id=action_id,
+                        client_order_id=order.client_order_id,
+                        order_id=order.order_id,
+                        status="FAILED",
+                    )
+                    self.state_store.clear_action_dedupe_key(action_id)
                     continue
 
                 outcome = self._reconcile_cancel(order)
@@ -430,6 +447,7 @@ class ExecutionService:
                         order_id=order.order_id,
                         status="FAILED",
                     )
+                    self.state_store.clear_action_dedupe_key(action_id)
                 continue
 
             if not was_canceled:
@@ -441,6 +459,7 @@ class ExecutionService:
                     order_id=order.order_id,
                     status="FAILED",
                 )
+                self.state_store.clear_action_dedupe_key(action_id)
                 continue
 
             canceled += 1
@@ -516,6 +535,7 @@ class ExecutionService:
                 idempotency_key,
                 payload_hash,
                 ttl_seconds=PLACE_ORDER_IDEMPOTENCY_TTL_SECONDS,
+                allow_promote_simulated=not self.dry_run,
             )
             if not reservation.reserved:
                 logger.info(
@@ -537,6 +557,12 @@ class ExecutionService:
                 dedupe_key=f"{action_type}:{idempotency_key}",
             )
             if action_id is None:
+                finalized_status = self._handle_reservation_without_new_action(
+                    action_type=action_type,
+                    idempotency_action_type="place_order",
+                    idempotency_key=idempotency_key,
+                    dedupe_key=f"{action_type}:{idempotency_key}",
+                )
                 logger.info(
                     "Skipping duplicate place action",
                     extra={
@@ -544,6 +570,7 @@ class ExecutionService:
                             "symbol": intent.symbol,
                             "cycle_id": intent.cycle_id,
                             "action_type": action_type,
+                            "idempotency_status": finalized_status,
                         }
                     },
                 )
@@ -577,7 +604,7 @@ class ExecutionService:
                     action_id=action_id,
                     client_order_id=client_order_id,
                     order_id=None,
-                    status="COMMITTED",
+                    status="SIMULATED",
                 )
                 placed += 1
                 continue
@@ -603,6 +630,7 @@ class ExecutionService:
                     order_id=None,
                     status="FAILED",
                 )
+                self.state_store.clear_action_dedupe_key(action_id)
                 continue
 
             try:
@@ -643,6 +671,7 @@ class ExecutionService:
                         order_id=None,
                         status="FAILED",
                     )
+                    self.state_store.clear_action_dedupe_key(action_id)
                     continue
 
                 outcome = self._reconcile_submit(
@@ -778,6 +807,55 @@ class ExecutionService:
             ).encode("utf-8")
         )
         return f"place:{digest.hexdigest()}"
+
+    def _handle_reservation_without_new_action(
+        self,
+        *,
+        action_type: str,
+        idempotency_action_type: str,
+        idempotency_key: str,
+        dedupe_key: str,
+    ) -> str:
+        existing_action = self.state_store.get_action_by_dedupe_key(dedupe_key)
+        if existing_action is not None:
+            status = "SIMULATED" if action_type.startswith("would_") else "COMMITTED"
+            self.state_store.finalize_idempotency_key(
+                idempotency_action_type,
+                idempotency_key,
+                action_id=int(existing_action["id"]),
+                client_order_id=(
+                    str(existing_action["client_order_id"])
+                    if existing_action["client_order_id"] is not None
+                    else None
+                ),
+                order_id=(
+                    str(existing_action["order_id"])
+                    if existing_action["order_id"] is not None
+                    else None
+                ),
+                status=status,
+            )
+            return status
+        logger.error(
+            "idempotency reservation had no matching action dedupe row",
+            extra={
+                "extra": {
+                    "action_type": action_type,
+                    "idempotency_action_type": idempotency_action_type,
+                    "idempotency_key": idempotency_key,
+                    "dedupe_key": dedupe_key,
+                }
+            },
+        )
+        self.state_store.finalize_idempotency_key(
+            idempotency_action_type,
+            idempotency_key,
+            action_id=None,
+            client_order_id=None,
+            order_id=None,
+            status="FAILED",
+        )
+        return "FAILED"
 
     def _reconcile_submit(
         self,
