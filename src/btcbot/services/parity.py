@@ -6,8 +6,11 @@ import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import TypeVar
 
 _REQUIRED_PARITY_TABLES = ("stage7_cycle_trace", "stage7_ledger_metrics")
+
+_TJsonFallback = TypeVar("_TJsonFallback", dict[str, object], list[object])
 
 
 def find_missing_stage7_parity_tables(db_path: str | Path) -> list[str]:
@@ -75,8 +78,10 @@ def compute_run_fingerprint(
     for row in rows:
         intents_summary = _safe_load_json(row["intents_summary_json"], fallback={})
         mode_payload = _safe_load_json(row["mode_json"], fallback={})
-        universe = sorted(set(_safe_load_json(row["selected_universe_json"], fallback=[])))
-        oms_summary = dict(intents_summary.get("oms_summary") or {})
+        universe_payload = _safe_load_json(row["selected_universe_json"], fallback=[])
+        universe = sorted({str(item) for item in universe_payload})
+        oms_summary_raw = intents_summary.get("oms_summary")
+        oms_summary = dict(oms_summary_raw) if isinstance(oms_summary_raw, dict) else {}
         item: dict[str, object] = {
             "ts": row["ts"],
             "cycle_id": row["cycle_id"],
@@ -87,7 +92,7 @@ def compute_run_fingerprint(
             "fees_try": _format_try_metric(row["fees_try"], quantize=quantize_try),
             "slippage_try": _format_try_metric(row["slippage_try"], quantize=quantize_try),
             "turnover_try": _format_try_metric(row["turnover_try"], quantize=quantize_try),
-            "intents_count": int(intents_summary.get("order_intents_total", 0)),
+            "intents_count": int(str(intents_summary.get("order_intents_total", 0))),
             "filled_count": int(oms_summary.get("orders_filled", 0)),
             "rejected_count": int(oms_summary.get("orders_rejected", 0)),
         }
@@ -96,8 +101,8 @@ def compute_run_fingerprint(
             item["param_change"] = _safe_load_json(row["param_change_json"], fallback={})
         canonical.append(item)
 
-    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    canonical_payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
 
 
 def compare_fingerprints(f1: str, f2: str) -> bool:
@@ -110,7 +115,7 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
 
-def _safe_load_json(raw: object, *, fallback: dict[str, object] | list[object]) -> dict | list:
+def _safe_load_json(raw: object, *, fallback: _TJsonFallback) -> _TJsonFallback:
     text = str(raw or "").strip()
     if not text or text.lower() == "none":
         return fallback

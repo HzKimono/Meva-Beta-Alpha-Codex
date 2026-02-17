@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 
 _FIELDS = ("run_id", "cycle_id", "client_order_id", "order_id", "symbol")
 _CONTEXT_VARS: dict[str, ContextVar[str | None]] = {
@@ -21,7 +21,7 @@ def get_logging_context() -> dict[str, str | None]:
 
 @contextmanager
 def with_logging_context(**context: str | None) -> Iterator[None]:
-    tokens: dict[str, object] = {}
+    tokens: dict[str, Token[str | None]] = {}
     try:
         for key, value in context.items():
             context_var = _CONTEXT_VARS.get(key)

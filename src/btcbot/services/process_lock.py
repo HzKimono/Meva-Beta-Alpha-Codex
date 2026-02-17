@@ -6,7 +6,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,8 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
                 import msvcrt
 
                 fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt_mod: Any = msvcrt
+                msvcrt_mod.locking(fh.fileno(), msvcrt_mod.LK_NBLCK, 1)
             else:
                 import fcntl
 
@@ -61,7 +62,8 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
                     import msvcrt
 
                     fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt_mod_unlock: Any = msvcrt
+                    msvcrt_mod_unlock.locking(fh.fileno(), msvcrt_mod_unlock.LK_UNLCK, 1)
                 else:
                     import fcntl
 
