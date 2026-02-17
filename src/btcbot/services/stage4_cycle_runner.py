@@ -314,11 +314,27 @@ class Stage4CycleRunner:
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}
             planning_engine = "legacy"
             kernel_plan = None
-            latest_mode = state_store.get_latest_risk_mode()
-            budget_notional_multiplier = Decimal("1")
-            if latest_mode == Mode.REDUCE_RISK_ONLY:
-                budget_notional_multiplier = Decimal("0.5")
-            elif latest_mode == Mode.OBSERVE_ONLY:
+            risk_limits = RiskLimits(
+                max_daily_drawdown_try=settings.risk_max_daily_drawdown_try,
+                max_drawdown_try=settings.risk_max_drawdown_try,
+                max_gross_exposure_try=settings.risk_max_gross_exposure_try,
+                max_position_pct=settings.risk_max_position_pct,
+                max_order_notional_try=settings.risk_max_order_notional_try,
+                min_cash_try=settings.risk_min_cash_try,
+                max_fee_try_per_day=settings.risk_max_fee_try_per_day,
+            )
+            budget_decision, prev_mode, peak_equity, fees_today, risk_day = (
+                risk_budget_service.compute_decision(
+                    limits=risk_limits,
+                    pnl_report=pnl_report,
+                    positions=positions,
+                    mark_prices=mark_prices,
+                    realized_today_try=snapshot.realized_today_try,
+                    kill_switch_active=settings.kill_switch,
+                )
+            )
+            budget_notional_multiplier = budget_decision.position_sizing_multiplier
+            if settings.kill_switch:
                 budget_notional_multiplier = Decimal("0")
 
             if settings.stage4_use_planning_kernel:
@@ -504,29 +520,11 @@ class Stage4CycleRunner:
                 positions_by_symbol=positions_by_symbol,
             )
 
-            risk_limits = RiskLimits(
-                max_daily_drawdown_try=settings.risk_max_daily_drawdown_try,
-                max_drawdown_try=settings.risk_max_drawdown_try,
-                max_gross_exposure_try=settings.risk_max_gross_exposure_try,
-                max_position_pct=settings.risk_max_position_pct,
-                max_order_notional_try=settings.risk_max_order_notional_try,
-                min_cash_try=settings.risk_min_cash_try,
-                max_fee_try_per_day=settings.risk_max_fee_try_per_day,
-            )
-            risk_decision, prev_mode, peak_equity, fees_today, risk_day = (
-                risk_budget_service.compute_decision(
-                    limits=risk_limits,
-                    pnl_report=pnl_report,
-                    positions=positions,
-                    mark_prices=mark_prices,
-                    realized_today_try=snapshot.realized_today_try,
-                    kill_switch_active=settings.kill_switch,
-                )
-            )
+            risk_decision = budget_decision.risk_decision
             try:
                 risk_budget_service.persist_decision(
                     cycle_id=cycle_id,
-                    decision=risk_decision,
+                    decision=budget_decision,
                     prev_mode=prev_mode,
                     peak_equity=peak_equity,
                     peak_day=risk_day,

@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from btcbot.config import Settings
 from btcbot.domain.allocation import AllocationResult
+from btcbot.domain.models import PairInfo
 from btcbot.services.decision_pipeline_service import DecisionPipelineService
 
 
@@ -62,3 +63,68 @@ def test_budget_multiplier_scales_allocator_caps() -> None:
 
     assert _SpyAllocationService.capture.max_total == Decimal("250.00")
     assert _SpyAllocationService.capture.max_cycle == Decimal("100.00")
+
+
+
+def test_aggressive_path_scales_deploy_budget_with_multiplier() -> None:
+    service = DecisionPipelineService(
+        settings=Settings(
+            symbols=["BTCTRY", "ETHTRY"],
+            try_cash_target=Decimal("100"),
+            max_orders_per_cycle=10,
+            min_order_notional_try=Decimal("10"),
+        )
+    )
+
+    pair_info = [
+        PairInfo.model_validate(
+            {
+                "pairSymbol": "BTCTRY",
+                "numeratorScale": 8,
+                "denominatorScale": 2,
+                "minTotalAmount": "10",
+                "minQuantity": "0.0001",
+                "tickSize": "0.01",
+                "stepSize": "0.0001",
+            }
+        ),
+        PairInfo.model_validate(
+            {
+                "pairSymbol": "ETHTRY",
+                "numeratorScale": 8,
+                "denominatorScale": 2,
+                "minTotalAmount": "10",
+                "minQuantity": "0.0001",
+                "tickSize": "0.01",
+                "stepSize": "0.0001",
+            }
+        ),
+    ]
+
+    baseline = service.run_cycle(
+        cycle_id="c1",
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("100")},
+        open_orders=[],
+        pair_info=pair_info,
+        bootstrap_enabled=False,
+        live_mode=False,
+        aggressive_scores={"BTCTRY": Decimal("1"), "ETHTRY": Decimal("1")},
+        budget_notional_multiplier=Decimal("1"),
+    )
+    scaled = service.run_cycle(
+        cycle_id="c2",
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100"), "ETHTRY": Decimal("100")},
+        open_orders=[],
+        pair_info=pair_info,
+        bootstrap_enabled=False,
+        live_mode=False,
+        aggressive_scores={"BTCTRY": Decimal("1"), "ETHTRY": Decimal("1")},
+        budget_notional_multiplier=Decimal("0.25"),
+    )
+
+    assert scaled.deploy_budget_try < baseline.deploy_budget_try
+    assert scaled.deploy_budget_try == baseline.deploy_budget_try * Decimal("0.25")
