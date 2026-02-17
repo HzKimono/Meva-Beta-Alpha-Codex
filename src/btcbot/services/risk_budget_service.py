@@ -9,6 +9,7 @@ from decimal import Decimal
 from btcbot.accounting.models import PortfolioAccountingState
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.stage4 import Position
+from btcbot.observability_decisions import emit_decision
 from btcbot.risk.budget import RiskBudgetPolicy, RiskBudgetView
 from btcbot.services.ledger_service import PnlReport
 from btcbot.services.state_store import StateStore
@@ -38,6 +39,16 @@ class BudgetDecision:
         return self.budget_view.available_risk_capital_try
 
 
+
+
+@dataclass(frozen=True)
+class CapitalPolicyResult:
+    trading_capital_try: Decimal
+    treasury_try: Decimal
+    realized_pnl_delta_try: Decimal
+    checkpoint_id: str
+    applied: bool
+
 class RiskBudgetService:
     def __init__(
         self,
@@ -49,6 +60,122 @@ class RiskBudgetService:
         self.state_store = state_store
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
         self.budget_policy = budget_policy or RiskBudgetPolicy()
+
+    def apply_self_financing_checkpoint(
+        self,
+        *,
+        cycle_id: str,
+        realized_pnl_total_try: Decimal,
+        ledger_checkpoint_id: str,
+        seed_trading_capital_try: Decimal,
+    ) -> CapitalPolicyResult:
+        state = self.state_store.get_capital_policy_state()
+        if state is None:
+            trading_capital = seed_trading_capital_try
+            treasury = Decimal("0")
+            last_realized_total = Decimal("0")
+            last_checkpoint = None
+        else:
+            trading_capital = Decimal(str(state["trading_capital_try"]))
+            treasury = Decimal(str(state["treasury_try"]))
+            last_realized_total = Decimal(str(state["last_realized_pnl_total_try"]))
+            last_checkpoint = state.get("last_checkpoint_id")
+
+        if last_checkpoint == ledger_checkpoint_id:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "capital_policy",
+                    "reason_code": "capital_apply:checkpoint_already_applied",
+                    "action": "SUPPRESS",
+                    "payload": {
+                        "checkpoint_id": ledger_checkpoint_id,
+                        "realized_pnl_total_try": str(realized_pnl_total_try),
+                    },
+                },
+            )
+            return CapitalPolicyResult(
+                trading_capital_try=trading_capital,
+                treasury_try=treasury,
+                realized_pnl_delta_try=Decimal("0"),
+                checkpoint_id=ledger_checkpoint_id,
+                applied=False,
+            )
+
+        if last_checkpoint is not None and ledger_checkpoint_id < last_checkpoint:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "capital_policy",
+                    "reason_code": "capital_error:non_monotonic_checkpoint",
+                    "action": "BLOCK",
+                    "payload": {
+                        "checkpoint_id": ledger_checkpoint_id,
+                        "last_checkpoint_id": last_checkpoint,
+                    },
+                },
+            )
+            return CapitalPolicyResult(
+                trading_capital_try=trading_capital,
+                treasury_try=treasury,
+                realized_pnl_delta_try=Decimal("0"),
+                checkpoint_id=ledger_checkpoint_id,
+                applied=False,
+            )
+
+        realized_delta = realized_pnl_total_try - last_realized_total
+        next_trading, next_treasury = self.budget_policy.apply_self_financing(
+            trading_capital_try=trading_capital,
+            treasury_try=treasury,
+            realized_pnl_delta_try=realized_delta,
+        )
+        next_trading = max(Decimal("0"), next_trading)
+        next_treasury = max(Decimal("0"), next_treasury)
+
+        self.state_store.upsert_capital_policy_state(
+            trading_capital_try=next_trading,
+            treasury_try=next_treasury,
+            last_realized_pnl_total_try=realized_pnl_total_try,
+            last_checkpoint_id=ledger_checkpoint_id,
+            last_cycle_id=cycle_id,
+        )
+
+        emit_decision(
+            logger,
+            {
+                "cycle_id": cycle_id,
+                "decision_layer": "capital_policy",
+                "reason_code": (
+                    "capital_apply:split_positive_pnl"
+                    if realized_delta > 0
+                    else "capital_apply:apply_negative_pnl"
+                ),
+                "action": "SUBMIT",
+                "payload": {
+                    "checkpoint_id": ledger_checkpoint_id,
+                    "realized_pnl_total_try": str(realized_pnl_total_try),
+                    "realized_pnl_delta_try": str(realized_delta),
+                    "trading_capital_try_prev": str(trading_capital),
+                    "treasury_try_prev": str(treasury),
+                    "trading_capital_try_next": str(next_trading),
+                    "treasury_try_next": str(next_treasury),
+                    "deposits_try": "0",
+                    "withdrawals_try": "0",
+                    "external_costs_try": "0",
+                    "treasury_management": "manual_managed",
+                },
+            },
+        )
+
+        return CapitalPolicyResult(
+            trading_capital_try=next_trading,
+            treasury_try=next_treasury,
+            realized_pnl_delta_try=realized_delta,
+            checkpoint_id=ledger_checkpoint_id,
+            applied=True,
+        )
 
     def compute_decision(
         self,

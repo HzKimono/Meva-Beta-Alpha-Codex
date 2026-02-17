@@ -22,6 +22,7 @@ from btcbot.domain.strategy_core import (
 )
 from btcbot.domain.symbols import canonical_symbol
 from btcbot.domain.universe_models import SymbolInfo
+from btcbot.observability_decisions import emit_decision
 from btcbot.services.allocation_service import AllocationKnobs, AllocationService
 from btcbot.services.universe_service import select_universe
 from btcbot.strategies.baseline_mean_reversion import BaselineMeanReversionStrategy
@@ -83,7 +84,6 @@ class DecisionPipelineService:
         aggressive_scores: Mapping[str, Decimal] | None = None,
         budget_notional_multiplier: Decimal = Decimal("1"),
     ) -> CycleDecisionReport:
-        del cycle_id
         now_ts = self.now_provider()
         selected_universe = self._select_universe(
             pair_info=pair_info,
@@ -94,6 +94,7 @@ class DecisionPipelineService:
 
         if aggressive_scores:
             report = self._run_aggressive_path(
+                cycle_id=cycle_id,
                 selected_universe=selected_universe,
                 aggressive_scores=aggressive_scores,
                 balances=balances,
@@ -172,6 +173,14 @@ class DecisionPipelineService:
 
         selected_orders, deferred_orders = self._select_orders_for_cycle(order_requests)
 
+        self._emit_capital_gate_events(
+            cycle_id=cycle_id,
+            cash_try=allocation.cash_try,
+            try_cash_target=allocation.try_cash_target,
+            investable_total_try=allocation.investable_total_try,
+            investable_this_cycle_try=allocation.investable_this_cycle_try,
+        )
+
         report = CycleDecisionReport(
             selected_universe=tuple(selected_universe),
             intents=tuple(intents),
@@ -195,9 +204,50 @@ class DecisionPipelineService:
         self._log_report(report)
         return report
 
+    def _emit_capital_gate_events(
+        self,
+        *,
+        cycle_id: str,
+        cash_try: Decimal,
+        try_cash_target: Decimal,
+        investable_total_try: Decimal,
+        investable_this_cycle_try: Decimal,
+    ) -> None:
+        if investable_total_try <= Decimal("0"):
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "capital_policy",
+                    "reason_code": "capital_gate:cash_reserve_target",
+                    "action": "BLOCK",
+                    "payload": {
+                        "cash_try": str(cash_try),
+                        "try_cash_target": str(try_cash_target),
+                        "investable_try": str(investable_total_try),
+                    },
+                },
+            )
+            return
+        if investable_this_cycle_try <= Decimal("0"):
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "capital_policy",
+                    "reason_code": "capital_gate:insufficient_investable_cash",
+                    "action": "SUPPRESS",
+                    "payload": {
+                        "investable_total_try": str(investable_total_try),
+                        "investable_this_cycle_try": str(investable_this_cycle_try),
+                    },
+                },
+            )
+
     def _run_aggressive_path(
         self,
         *,
+        cycle_id: str,
         selected_universe: list[str],
         aggressive_scores: Mapping[str, Decimal],
         balances: Mapping[str, Decimal],
@@ -336,6 +386,14 @@ class DecisionPipelineService:
         counters = {"accepted": len(decisions)}
 
         selected_orders, deferred_orders = self._select_orders_for_cycle(order_requests)
+        self._emit_capital_gate_events(
+            cycle_id=cycle_id,
+            cash_try=cash_try,
+            try_cash_target=try_cash_target,
+            investable_total_try=investable_total_try,
+            investable_this_cycle_try=investable_total_try,
+        )
+
         report = CycleDecisionReport(
             selected_universe=tuple(selected_universe),
             intents=tuple(intents),
