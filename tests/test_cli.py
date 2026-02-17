@@ -17,7 +17,7 @@ from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import Balance, OrderSide, PairInfo
 from btcbot.domain.stage4 import Quantizer
-from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
+from btcbot.services.stage4_cycle_runner import Stage4CycleRunner, Stage4InvariantError
 from btcbot.logging_utils import JsonFormatter
 
 
@@ -943,6 +943,34 @@ def test_run_cycle_stage4_policy_block_records_audit(tmp_path, capsys) -> None:
     assert "policy_block:kill_switch" in row["decisions_json"]
     assert row["envelope_json"] is not None
 
+
+def test_run_cycle_stage4_classifies_capital_invariant_error(monkeypatch, tmp_path, caplog) -> None:
+    class FailingRunner:
+        def run_one_cycle(self, _settings):
+            raise Stage4InvariantError("capital checkpoint mismatch")
+
+    monkeypatch.setattr(cli, "Stage4CycleRunner", lambda: FailingRunner())
+
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        SAFE_MODE=False,
+        STATE_DB_PATH=str(tmp_path / "stage4.sqlite"),
+        SYMBOLS="BTC_TRY",
+    )
+
+    caplog.set_level("ERROR")
+    rc = cli.run_cycle_stage4(settings, force_dry_run=True)
+
+    assert rc == 1
+    records = [
+        rec
+        for rec in caplog.records
+        if rec.getMessage() == "Stage 4 cycle failed due to capital/invariant policy"
+    ]
+    assert records
+    payload = getattr(records[-1], "extra", {})
+    assert payload["error_category"] == "capital_invariant"
 
 def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> None:
     class FakeSettings:

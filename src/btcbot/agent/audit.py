@@ -6,12 +6,12 @@ from hashlib import sha256
 from typing import Any
 
 from btcbot.agent.contracts import AgentContext, AgentDecision, SafeDecision
-from btcbot.security.redaction import redact_value
+from btcbot.security.redaction import redact_data
 from btcbot.services.state_store import StateStore
 
 
 def redact_secrets(value: Any) -> Any:
-    return redact_value(value)
+    return redact_data(value)
 
 
 def store_compact_text(text: str, *, max_chars: int) -> dict[str, object]:
