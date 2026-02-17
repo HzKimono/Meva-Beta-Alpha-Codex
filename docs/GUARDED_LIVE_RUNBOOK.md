@@ -198,6 +198,12 @@ STATE_DB_PATH=./var/btcbot_state.db
 ### Single-cycle command
 
 ```bash
+btcbot canary once --symbol BTCTRY --notional-try 150 --ttl-seconds 30 --cycle-seconds 10
+```
+
+Legacy equivalent:
+
+```bash
 btcbot run --once
 ```
 
@@ -243,6 +249,12 @@ btcbot run --once
 Run short-lived live window with deterministic stop conditions.
 
 ### Command
+
+```bash
+btcbot canary loop --symbol BTCTRY --notional-try 150 --ttl-seconds 30 --cycle-seconds 10 --max-cycles 60
+```
+
+Legacy equivalent:
 
 ```bash
 btcbot run --loop --cycle-seconds 10 --max-cycles 60
