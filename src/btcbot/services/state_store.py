@@ -81,6 +81,20 @@ class SubmitDedupeDecision:
     related_status: str | None = None
 
 
+@dataclass(frozen=True)
+class ReservationResult:
+    reserved: bool
+    action_type: str
+    key: str
+    payload_hash: str
+    created_at_epoch: int
+    expires_at_epoch: int
+    action_id: int | None
+    client_order_id: str | None
+    order_id: str | None
+    status: str
+
+
 class StateStore:
     def __init__(self, db_path: str = "btcbot_state.db") -> None:
         self.db_path = db_path
@@ -91,6 +105,7 @@ class StateStore:
             self._ensure_anomaly_schema(conn)
             self._ensure_stage7_schema(conn)
             self._ensure_agent_audit_schema(conn)
+            self._ensure_idempotency_schema(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -248,6 +263,7 @@ class StateStore:
             self._ensure_anomaly_schema(conn)
             self._ensure_stage7_schema(conn)
             self._ensure_agent_audit_schema(conn)
+            self._ensure_idempotency_schema(conn)
 
     def _ensure_agent_audit_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -1780,6 +1796,43 @@ class StateStore:
             )
         if "unknown_escalated_at" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN unknown_escalated_at INTEGER")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_order_id_unique
+            ON orders(client_order_id)
+            WHERE client_order_id IS NOT NULL
+            """
+        )
+
+    def _ensure_idempotency_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+                action_type TEXT NOT NULL,
+                key TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                created_at_epoch INTEGER NOT NULL,
+                expires_at_epoch INTEGER NOT NULL,
+                action_id INTEGER,
+                client_order_id TEXT,
+                order_id TEXT,
+                status TEXT NOT NULL,
+                PRIMARY KEY (action_type, key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at
+            ON idempotency_keys(expires_at_epoch)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_idempotency_keys_status_expires
+            ON idempotency_keys(status, expires_at_epoch)
+            """
+        )
 
     def record_action(
         self,
@@ -1787,11 +1840,14 @@ class StateStore:
         action_type: str,
         payload_hash: str,
         dedupe_window_seconds: int = 300,
+        dedupe_key: str | None = None,
     ) -> int | None:
         now_epoch = int(datetime.now(UTC).timestamp())
-        dedupe_window = max(1, dedupe_window_seconds)
-        dedupe_bucket = now_epoch // dedupe_window
-        dedupe_key = f"{action_type}:{payload_hash}:{dedupe_bucket}"
+        resolved_dedupe_key = dedupe_key
+        if resolved_dedupe_key is None:
+            dedupe_window = max(1, dedupe_window_seconds)
+            dedupe_bucket = now_epoch // dedupe_window
+            resolved_dedupe_key = f"{action_type}:{payload_hash}:{dedupe_bucket}"
 
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1801,7 +1857,7 @@ class StateStore:
                 )
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (cycle_id, action_type, payload_hash, dedupe_key, now_epoch),
+                (cycle_id, action_type, payload_hash, resolved_dedupe_key, now_epoch),
             )
             if cursor.rowcount == 0:
                 return None
@@ -1881,41 +1937,181 @@ class StateStore:
     ) -> None:
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         with self._connect() as conn:
+            payload = (
+                order.order_id,
+                normalize_symbol(order.symbol),
+                order.client_order_id,
+                order.side.value,
+                str(Decimal(str(order.price))),
+                str(Decimal(str(order.quantity))),
+                order.status.value,
+                order.created_at.isoformat(),
+                order.updated_at.isoformat(),
+                now_ms,
+                1 if reconciled else 0,
+                exchange_status_raw,
+                idempotency_key,
+                intent_id,
+            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO orders (
+                        order_id, symbol, client_order_id, side, price, qty, status,
+                        created_at, updated_at, last_seen_at, reconciled, exchange_status_raw,
+                        idempotency_key, intent_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(order_id) DO UPDATE SET
+                        client_order_id=excluded.client_order_id,
+                        status=excluded.status,
+                        updated_at=excluded.updated_at,
+                        last_seen_at=excluded.last_seen_at,
+                        reconciled=excluded.reconciled,
+                        exchange_status_raw=excluded.exchange_status_raw,
+                        idempotency_key=COALESCE(excluded.idempotency_key, orders.idempotency_key),
+                        intent_id=COALESCE(excluded.intent_id, orders.intent_id)
+                    """,
+                    payload,
+                )
+            except sqlite3.IntegrityError:
+                if not order.client_order_id:
+                    raise
+                existing = conn.execute(
+                    "SELECT order_id FROM orders WHERE client_order_id = ?",
+                    (order.client_order_id,),
+                ).fetchone()
+                if existing is None:
+                    raise
+                conn.execute(
+                    """
+                    UPDATE orders
+                    SET symbol = ?,
+                        side = ?,
+                        price = ?,
+                        qty = ?,
+                        status = ?,
+                        updated_at = ?,
+                        last_seen_at = ?,
+                        reconciled = ?,
+                        exchange_status_raw = ?,
+                        idempotency_key = COALESCE(?, idempotency_key),
+                        intent_id = COALESCE(?, intent_id)
+                    WHERE order_id = ?
+                    """,
+                    (
+                        normalize_symbol(order.symbol),
+                        order.side.value,
+                        str(Decimal(str(order.price))),
+                        str(Decimal(str(order.quantity))),
+                        order.status.value,
+                        order.updated_at.isoformat(),
+                        now_ms,
+                        1 if reconciled else 0,
+                        exchange_status_raw,
+                        idempotency_key,
+                        intent_id,
+                        str(existing["order_id"]),
+                    ),
+                )
+
+    def reserve_idempotency_key(
+        self,
+        action_type: str,
+        key: str,
+        payload_hash: str,
+        ttl_seconds: int,
+    ) -> ReservationResult:
+        now_epoch = int(datetime.now(UTC).timestamp())
+        expires_at = now_epoch + max(1, ttl_seconds)
+        with self._connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO idempotency_keys(
+                        action_type, key, payload_hash, created_at_epoch,
+                        expires_at_epoch, status
+                    ) VALUES (?, ?, ?, ?, ?, 'PENDING')
+                    """,
+                    (action_type, key, payload_hash, now_epoch, expires_at),
+                )
+                row = conn.execute(
+                    """
+                    SELECT * FROM idempotency_keys
+                    WHERE action_type = ? AND key = ?
+                    """,
+                    (action_type, key),
+                ).fetchone()
+                assert row is not None
+                return self._row_to_reservation_result(row, reserved=True)
+            except sqlite3.IntegrityError:
+                row = conn.execute(
+                    """
+                    SELECT * FROM idempotency_keys
+                    WHERE action_type = ? AND key = ?
+                    """,
+                    (action_type, key),
+                ).fetchone()
+                if row is None:
+                    raise
+                if str(row["payload_hash"]) != payload_hash:
+                    raise IdempotencyConflictError(
+                        f"idempotency key conflict for {action_type}:{key}: "
+                        f"existing={row['payload_hash']} incoming={payload_hash}"
+                    )
+                return self._row_to_reservation_result(row, reserved=False)
+
+    def finalize_idempotency_key(
+        self,
+        action_type: str,
+        key: str,
+        *,
+        action_id: int | None,
+        client_order_id: str | None,
+        order_id: str | None,
+        status: str,
+    ) -> None:
+        with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO orders (
-                    order_id, symbol, client_order_id, side, price, qty, status,
-                    created_at, updated_at, last_seen_at, reconciled, exchange_status_raw,
-                    idempotency_key, intent_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(order_id) DO UPDATE SET
-                    client_order_id=excluded.client_order_id,
-                    status=excluded.status,
-                    updated_at=excluded.updated_at,
-                    last_seen_at=excluded.last_seen_at,
-                    reconciled=excluded.reconciled,
-                    exchange_status_raw=excluded.exchange_status_raw,
-                    idempotency_key=COALESCE(excluded.idempotency_key, orders.idempotency_key),
-                    intent_id=COALESCE(excluded.intent_id, orders.intent_id)
+                UPDATE idempotency_keys
+                SET action_id = COALESCE(?, action_id),
+                    client_order_id = COALESCE(?, client_order_id),
+                    order_id = COALESCE(?, order_id),
+                    status = ?
+                WHERE action_type = ? AND key = ?
                 """,
-                (
-                    order.order_id,
-                    normalize_symbol(order.symbol),
-                    order.client_order_id,
-                    order.side.value,
-                    str(Decimal(str(order.price))),
-                    str(Decimal(str(order.quantity))),
-                    order.status.value,
-                    order.created_at.isoformat(),
-                    order.updated_at.isoformat(),
-                    now_ms,
-                    1 if reconciled else 0,
-                    exchange_status_raw,
-                    idempotency_key,
-                    intent_id,
-                ),
+                (action_id, client_order_id, order_id, status, action_type, key),
             )
+
+    def prune_expired_idempotency_keys(self, now_epoch: int | None = None) -> int:
+        resolved_now = now_epoch or int(datetime.now(UTC).timestamp())
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM idempotency_keys WHERE expires_at_epoch <= ?",
+                (resolved_now,),
+            )
+            return int(cur.rowcount)
+
+    def _row_to_reservation_result(
+        self, row: sqlite3.Row, *, reserved: bool
+    ) -> ReservationResult:
+        return ReservationResult(
+            reserved=reserved,
+            action_type=str(row["action_type"]),
+            key=str(row["key"]),
+            payload_hash=str(row["payload_hash"]),
+            created_at_epoch=int(row["created_at_epoch"]),
+            expires_at_epoch=int(row["expires_at_epoch"]),
+            action_id=int(row["action_id"]) if row["action_id"] is not None else None,
+            client_order_id=(
+                str(row["client_order_id"])
+                if row["client_order_id"] is not None
+                else None
+            ),
+            order_id=str(row["order_id"]) if row["order_id"] is not None else None,
+            status=str(row["status"]),
+        )
 
     def save_fill(self, fill: TradeFill) -> bool:
         with self._connect() as conn:

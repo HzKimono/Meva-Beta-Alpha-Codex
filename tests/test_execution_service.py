@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from btcbot.adapters.exchange import ExchangeClient
-from btcbot.domain.intent import Intent
+from btcbot.domain.intent import Intent, to_order_intent
 from btcbot.domain.models import (
     Balance,
     OpenOrders,
@@ -313,7 +313,84 @@ def test_execute_intents_stage3_uses_idempotency_key_for_dedupe(tmp_path) -> Non
 
     assert first == 1
     assert second == 0
-    assert store.action_count("would_place_order", intent.idempotency_key) == 1
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM idempotency_keys WHERE action_type='place_order' AND key=?",
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert row is not None and row["c"] == 1
+
+
+def test_place_order_idempotency_across_bucket_boundary(monkeypatch, tmp_path) -> None:
+    class _T1:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 4, 59, tzinfo=UTC)
+
+    class _T2:
+        @staticmethod
+        def now(tz):
+            del tz
+            return datetime(2024, 1, 1, 0, 5, 1, tzinfo=UTC)
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+    )
+    intent = _stage3_intent()
+
+    monkeypatch.setattr("btcbot.services.execution_service.datetime", _T1)
+    first = service.execute_intents([intent], cycle_id="cycle-a")
+
+    monkeypatch.setattr("btcbot.services.execution_service.datetime", _T2)
+    second = service.execute_intents([intent], cycle_id="cycle-a")
+
+    assert first == 1
+    assert second == 0
+    assert len(exchange.placed) == 1
+    with store._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT status FROM idempotency_keys
+            WHERE action_type='place_order' AND key=?
+            """,
+            (intent.idempotency_key,),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "COMMITTED"
+
+
+def test_restart_safety_pending_reservation_blocks_second_submit(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+    )
+    intent = _stage3_intent()
+    payload_hash = service._place_hash(to_order_intent(intent, cycle_id="cycle-a"))
+    store.reserve_idempotency_key(
+        "place_order",
+        intent.idempotency_key,
+        payload_hash,
+        ttl_seconds=7 * 24 * 60 * 60,
+    )
+
+    placed = service.execute_intents([intent], cycle_id="cycle-a")
+
+    assert placed == 0
+    assert exchange.placed == []
 
 
 def test_execute_intents_legacy_order_intent_uses_place_hash(tmp_path) -> None:

@@ -83,6 +83,33 @@ def test_record_action_returns_action_id_and_dedupes(tmp_path) -> None:
     assert second.action_count("sweep_plan", "hash-1") == 1
 
 
+def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.reserve_idempotency_key(
+        "place_order", "k-1", "payload-a", ttl_seconds=60
+    )
+    assert first.reserved is True
+
+    with pytest.raises(IdempotencyConflictError):
+        store.reserve_idempotency_key(
+            "place_order", "k-1", "payload-b", ttl_seconds=60
+        )
+
+
+def test_reserve_idempotency_existing_key_returns_not_reserved(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.reserve_idempotency_key(
+        "cancel_order", "cancel:o1", "hash-1", ttl_seconds=60
+    )
+    second = store.reserve_idempotency_key(
+        "cancel_order", "cancel:o1", "hash-1", ttl_seconds=60
+    )
+
+    assert first.reserved is True
+    assert second.reserved is False
+    assert second.status == "PENDING"
+
+
 def test_attach_action_metadata_updates_exact_row(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
 
