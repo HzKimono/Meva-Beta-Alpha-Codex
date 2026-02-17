@@ -57,6 +57,12 @@ class Settings(BaseSettings):
         default=False,
         alias="WS_MARKET_DATA_REST_FALLBACK",
     )
+    market_data_mode: str = Field(default="rest", alias="MARKET_DATA_MODE")
+    max_market_data_age_ms: int = Field(default=15_000, alias="MAX_MARKET_DATA_AGE_MS")
+    ws_market_data_rest_fallback: bool = Field(
+        default=False,
+        alias="WS_MARKET_DATA_REST_FALLBACK",
+    )
 
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     dry_run: bool = Field(default=True, alias="DRY_RUN")
