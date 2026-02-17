@@ -2016,7 +2016,8 @@ class StateStore:
                 conn.execute(
                     """
                     UPDATE orders
-                    SET symbol = ?,
+                    SET order_id = ?,
+                        symbol = ?,
                         side = ?,
                         price = ?,
                         qty = ?,
@@ -2030,6 +2031,7 @@ class StateStore:
                     WHERE order_id = ?
                     """,
                     (
+                        order.order_id,
                         normalize_symbol(order.symbol),
                         order.side.value,
                         str(Decimal(str(order.price))),
