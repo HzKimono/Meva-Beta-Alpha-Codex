@@ -495,6 +495,7 @@ class Stage4CycleRunner:
                 snapshot=snapshot,
                 live_mode=live_mode,
                 failed_symbols=failed_symbols,
+                budget_guard_multiplier=budget_notional_multiplier,
             )
 
             mid_price = next(iter(mark_prices.values()), Decimal("0"))
@@ -1069,6 +1070,7 @@ class Stage4CycleRunner:
         snapshot: object,
         live_mode: bool,
         failed_symbols: set[str],
+        budget_guard_multiplier: Decimal,
     ) -> list[Order]:
         if not settings.agent_policy_enabled:
             return intents
@@ -1135,12 +1137,10 @@ class Stage4CycleRunner:
         if evaluated.action in {DecisionAction.NO_OP, DecisionAction.ADJUST_RISK}:
             evaluated = base_decision
 
-        latest_mode = state_store.get_latest_risk_mode()
-        guard_multiplier = Decimal("1")
-        if latest_mode == Mode.REDUCE_RISK_ONLY:
-            guard_multiplier = Decimal("0.5")
-        elif latest_mode == Mode.OBSERVE_ONLY:
-            guard_multiplier = Decimal("0")
+        guard_multiplier = min(
+            Decimal("1"),
+            max(Decimal("0"), Decimal(str(budget_guard_multiplier))),
+        )
 
         guard = SafetyGuard(
             max_exposure_try=settings.risk_max_gross_exposure_try * guard_multiplier,

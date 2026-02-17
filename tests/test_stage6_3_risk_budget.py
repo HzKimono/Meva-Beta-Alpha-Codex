@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from btcbot.agent.contracts import AgentDecision, DecisionAction, DecisionRationale, SafeDecision
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
@@ -331,3 +332,91 @@ def test_runner_mode_gating(monkeypatch, tmp_path) -> None:
         action.action_type == LifecycleActionType.SUBMIT and action.side == "BUY"
         for action in captured["actions"]
     )
+
+
+def test_apply_agent_policy_scales_guardrails_with_budget_multiplier(monkeypatch) -> None:
+    captured: dict[str, Decimal] = {}
+
+    class FakeSafetyGuard:
+        def __init__(self, **kwargs) -> None:
+            captured["max_exposure_try"] = kwargs["max_exposure_try"]
+            captured["max_order_notional_try"] = kwargs["max_order_notional_try"]
+
+        def apply(self, context, decision):
+            del context
+            return SafeDecision(decision=decision)
+
+    class FakeAuditTrail:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def persist(self, **kwargs) -> None:
+            del kwargs
+            return
+
+    class FakePolicy:
+        def evaluate(self, context):
+            del context
+            return AgentDecision(
+                action=DecisionAction.NO_OP,
+                propose_intents=[],
+                rationale=DecisionRationale(
+                    reasons=["test"],
+                    confidence=1.0,
+                    constraints_hit=[],
+                    citations=["test"],
+                ),
+            )
+
+    class FakeStore:
+        def get_latest_risk_mode(self):
+            raise AssertionError("latest mode should not be queried for guard multiplier")
+
+    monkeypatch.setattr(runner_module, "SafetyGuard", FakeSafetyGuard)
+    monkeypatch.setattr(runner_module, "AgentAuditTrail", FakeAuditTrail)
+
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        runner_module.Stage4CycleRunner,
+        "_resolve_agent_policy",
+        lambda self, settings: FakePolicy(),
+    )
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    order = runner_module.Order(
+        symbol="BTCTRY",
+        side="buy",
+        type="limit",
+        price=Decimal("100"),
+        qty=Decimal("0.1"),
+        status="new",
+        created_at=now,
+        updated_at=now,
+        client_order_id="cid-1",
+    )
+
+    runner._apply_agent_policy(
+        settings=Settings(
+            AGENT_POLICY_ENABLED=True,
+            RISK_MAX_GROSS_EXPOSURE_TRY=Decimal("1000"),
+            RISK_MAX_ORDER_NOTIONAL_TRY=Decimal("500"),
+            AGENT_MAX_ORDER_NOTIONAL_TRY=Decimal("0"),
+        ),
+        state_store=FakeStore(),
+        cycle_id="c1",
+        cycle_started_at=now,
+        cycle_now=now,
+        intents=[order],
+        mark_prices={"BTCTRY": Decimal("100")},
+        market_spreads_bps={"BTCTRY": Decimal("2")},
+        market_data_age_seconds=Decimal("1"),
+        positions=[],
+        current_open_orders=[],
+        snapshot=type("Snap", (), {"drawdown_pct": Decimal("0")})(),
+        live_mode=False,
+        failed_symbols=set(),
+        budget_guard_multiplier=Decimal("0.25"),
+    )
+
+    assert captured["max_exposure_try"] == Decimal("250")
+    assert captured["max_order_notional_try"] == Decimal("125")
