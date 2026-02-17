@@ -112,6 +112,7 @@ class RiskBudgetService:
                     "decision_layer": "capital_policy",
                     "reason_code": "capital_apply:checkpoint_already_applied",
                     "action": "SUPPRESS",
+                    "scope": "global",
                     "payload": {
                         "checkpoint_id": ledger_checkpoint_id,
                         "ledger_event_count": ledger_event_count,
@@ -177,6 +178,7 @@ class RiskBudgetService:
                     else "capital_apply:apply_negative_pnl"
                 ),
                 "action": "SUBMIT",
+                "scope": "global",
                 "payload": {
                     "checkpoint_id": ledger_checkpoint_id,
                     "ledger_event_count": ledger_event_count,

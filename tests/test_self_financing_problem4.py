@@ -113,6 +113,8 @@ def test_self_financing_checkpoint_idempotent_same_event_count_noop(caplog, tmp_
         p.get("cycle_id") and p.get("decision_layer") and p.get("reason_code") and p.get("action")
         for p in payloads
     )
+    capital_events = [p for p in payloads if p.get("decision_layer") == "capital_policy"]
+    assert capital_events and all(p.get("scope") == "global" for p in capital_events)
 
 
 def test_self_financing_non_monotonic_event_count_fails_closed(caplog, tmp_path) -> None:
@@ -141,6 +143,7 @@ def test_self_financing_non_monotonic_event_count_fails_closed(caplog, tmp_path)
     event = _decision_payloads(caplog)[-1]
     assert event["reason_code"] == "capital_error:non_monotonic_checkpoint"
     assert event["action"] == "BLOCK"
+    assert event["scope"] == "global"
 
 
 def test_self_financing_negative_capital_fails_closed(caplog, tmp_path) -> None:
@@ -160,6 +163,7 @@ def test_self_financing_negative_capital_fails_closed(caplog, tmp_path) -> None:
     event = _decision_payloads(caplog)[-1]
     assert event["reason_code"] == "capital_error:negative_capital"
     assert event["action"] == "BLOCK"
+    assert event["scope"] == "global"
 
 
 def test_compute_decision_uses_persisted_capital_state(tmp_path) -> None:
