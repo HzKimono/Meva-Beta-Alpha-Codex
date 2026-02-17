@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -965,6 +966,84 @@ def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
     assert cli.main() == 0
     assert captured["include_adaptation"] is True
 
+
+
+
+
+
+def test_main_run_lock_failure_happens_before_instrumentation(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+        state_db_path = "./btcbot_state.db"
+
+    called = {"configured": False}
+
+    class _LockFail:
+        def __enter__(self):
+            raise RuntimeError("LOCKED: test")
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(cli, "single_instance_lock", lambda **_kwargs: _LockFail())
+
+    def _configured(**_kwargs):
+        called["configured"] = True
+
+    monkeypatch.setattr(cli, "configure_instrumentation", _configured)
+    monkeypatch.setattr(sys, "argv", ["btcbot", "run", "--dry-run", "--once"])
+
+    assert cli.main() == 2
+    assert called["configured"] is False
+
+def test_run_stage3_runtime_blocks_second_instance(monkeypatch, tmp_path, capsys) -> None:
+    class _Settings:
+        state_db_path = str(tmp_path / "state.db")
+
+    started = threading.Event()
+    release = threading.Event()
+    first_result: dict[str, int] = {}
+
+    def _fake_run_cycle(_settings, force_dry_run: bool = False) -> int:
+        del _settings, force_dry_run
+        started.set()
+        assert release.wait(timeout=5)
+        return 0
+
+    monkeypatch.setattr(cli, "run_cycle", _fake_run_cycle)
+
+    def _run_first() -> None:
+        first_result["code"] = cli.run_stage3_runtime(
+            _Settings(),
+            force_dry_run=True,
+            loop_enabled=False,
+            cycle_seconds=0,
+            max_cycles=None,
+            jitter_seconds=0,
+        )
+
+    first = threading.Thread(target=_run_first)
+    first.start()
+    assert started.wait(timeout=5)
+
+    second_code = cli.run_stage3_runtime(
+        _Settings(),
+        force_dry_run=True,
+        loop_enabled=False,
+        cycle_seconds=0,
+        max_cycles=None,
+        jitter_seconds=0,
+    )
+
+    release.set()
+    first.join(timeout=5)
+
+    assert second_code == 2
+    assert first_result["code"] == 0
+    assert "LOCKED:" in capsys.readouterr().out
 
 def test_run_with_optional_loop_runs_max_cycles() -> None:
     calls = {"count": 0}
