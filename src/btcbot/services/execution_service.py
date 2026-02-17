@@ -140,7 +140,6 @@ class ExecutionService:
             logger.warning("safe_mode_blocks_cancel_write_calls")
             return 0
 
-
         if self.kill_switch:
             for order in open_orders:
                 logger.info(

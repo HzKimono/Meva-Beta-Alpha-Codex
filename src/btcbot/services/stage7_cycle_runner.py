@@ -16,6 +16,7 @@ from btcbot.domain.models import OrderSide as DomainOrderSide
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.logging_context import with_cycle_context
+from btcbot.planning_kernel import ExecutionPort, Plan, PlanningKernel
 from btcbot.services.adaptation_service import AdaptationService
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
@@ -24,13 +25,9 @@ from btcbot.services.ledger_service import LedgerService
 from btcbot.services.metrics_collector import MetricsCollector
 from btcbot.services.oms_service import OMSService, Stage7MarketSimulator
 from btcbot.services.order_builder_service import OrderBuilderService
+from btcbot.services.planning_kernel_adapters import Stage7ExecutionPort, Stage7PlanConsumer
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
-from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
-from btcbot.services.state_store import StateStore
-from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
-from btcbot.planning_kernel import ExecutionPort, Plan, PlanningKernel
-from btcbot.services.planning_kernel_adapters import Stage7ExecutionPort, Stage7PlanConsumer
 from btcbot.services.stage7_planning_kernel_integration import (
     Stage7OrderIntentBuilderAdapter,
     Stage7PassThroughAllocator,
@@ -39,6 +36,9 @@ from btcbot.services.stage7_planning_kernel_integration import (
     build_stage7_planning_context,
     normalize_stage4_open_orders,
 )
+from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
+from btcbot.services.state_store import StateStore
+from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
 
 logger = logging.getLogger(__name__)
 
@@ -522,7 +522,11 @@ class Stage7CycleRunner:
                 kernel_plan = Plan(
                     cycle_id=cycle_id,
                     generated_at=now,
-                    universe=tuple(sorted({normalize_symbol(item) for item in universe_result.selected_symbols})),
+                    universe=tuple(
+                        sorted(
+                            {normalize_symbol(item) for item in universe_result.selected_symbols}
+                        )
+                    ),
                     order_intents=tuple(order_intents),
                     planning_gates={},
                     intents_raw=tuple(),

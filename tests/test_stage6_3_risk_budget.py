@@ -40,9 +40,9 @@ def _signals(**overrides: Decimal) -> RiskSignals:
     return RiskSignals(**base)
 
 
-
-
-def _budget_decision(mode: Mode = Mode.NORMAL, multiplier: Decimal = Decimal("1")) -> BudgetDecision:
+def _budget_decision(
+    mode: Mode = Mode.NORMAL, multiplier: Decimal = Decimal("1")
+) -> BudgetDecision:
     return BudgetDecision(
         risk_decision=RiskDecision(
             mode=mode,
@@ -63,6 +63,7 @@ def _budget_decision(mode: Mode = Mode.NORMAL, multiplier: Decimal = Decimal("1"
             mode=mode,
         ),
     )
+
 
 def test_decide_mode_is_deterministic_for_same_inputs() -> None:
     first = decide_mode(_limits(), _signals(drawdown_try=Decimal("250")))

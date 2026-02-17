@@ -27,7 +27,9 @@ def _context() -> AgentContext:
 def _decision() -> AgentDecision:
     return AgentDecision(
         action=DecisionAction.PROPOSE_INTENTS,
-        rationale=DecisionRationale(reasons=["x"], confidence=0.9, citations=[], constraints_hit=[]),
+        rationale=DecisionRationale(
+            reasons=["x"], confidence=0.9, citations=[], constraints_hit=[]
+        ),
     )
 
 
@@ -97,7 +99,12 @@ def test_guard_records_spread_drop_reason() -> None:
                     "reason": "test",
                 }
             ],
-            "rationale": {"reasons": ["x"], "confidence": 0.5, "constraints_hit": [], "citations": []},
+            "rationale": {
+                "reasons": ["x"],
+                "confidence": 0.5,
+                "constraints_hit": [],
+                "citations": [],
+            },
         }
     )
     safe = guard.apply(_context(), decision)

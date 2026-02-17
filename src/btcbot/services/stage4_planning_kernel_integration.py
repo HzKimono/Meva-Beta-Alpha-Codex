@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Mapping
 
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo, normalize_symbol
@@ -144,9 +144,7 @@ class Stage4DecisionStrategyAdapter(StrategyEngine):
             live_mode=context.live_mode,
             preferred_symbols=list(universe),
             aggressive_scores=(
-                dict(context.aggressive_scores)
-                if context.aggressive_scores is not None
-                else None
+                dict(context.aggressive_scores) if context.aggressive_scores is not None else None
             ),
         )
         self._last_decision_report = report
@@ -364,7 +362,9 @@ def build_stage4_kernel_plan(
         live_mode=live_mode,
     )
     kernel = PlanningKernel(
-        universe_selector=Stage4UniverseSelectorAdapter(selected_symbols=tuple(context.preferred_symbols)),
+        universe_selector=Stage4UniverseSelectorAdapter(
+            selected_symbols=tuple(context.preferred_symbols)
+        ),
         strategy_engine=strategy_adapter,
         allocator=Stage4PassThroughAllocator(),
         order_intent_builder=order_builder_adapter,
@@ -381,7 +381,9 @@ def _open_orders_from_context(context: Stage4PlanningContext) -> list[Order]:
     return _open_orders_from_portfolio(context, context.portfolio)
 
 
-def _open_orders_from_portfolio(context: PlanningContext, portfolio: Stage4PortfolioState) -> list[Order]:
+def _open_orders_from_portfolio(
+    context: PlanningContext, portfolio: Stage4PortfolioState
+) -> list[Order]:
     open_orders: list[Order] = []
     for item in portfolio.open_orders:
         open_orders.append(

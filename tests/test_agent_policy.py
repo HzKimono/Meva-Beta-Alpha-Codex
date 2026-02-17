@@ -10,6 +10,7 @@ from btcbot.agent.contracts import AgentContext
 from btcbot.agent.policy import (
     FallbackPolicy,
     LlmPolicy,
+    LlmPolicyError,
     PromptBuilder,
     RuleBasedPolicy,
     sanitize_llm_json,
@@ -57,7 +58,7 @@ def _context() -> AgentContext:
 
 def test_llm_schema_validation_failure() -> None:
     policy = LlmPolicy(client=InvalidJsonClient(), prompt_builder=PromptBuilder())
-    with pytest.raises(Exception):
+    with pytest.raises(LlmPolicyError):
         policy.evaluate(_context())
 
 

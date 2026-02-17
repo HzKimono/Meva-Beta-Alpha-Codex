@@ -7,16 +7,16 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
+from btcbot.adapters.action_to_order import build_exchange_rules
+from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.agent.audit import AgentAuditTrail
 from btcbot.agent.contracts import AgentContext, AgentDecision, DecisionAction, DecisionRationale
 from btcbot.agent.guardrails import SafetyGuard
 from btcbot.agent.policy import FallbackPolicy, LlmPolicy, PromptBuilder, RuleBasedPolicy
-
-from btcbot.adapters.action_to_order import build_exchange_rules
-from btcbot.adapters.btcturk_http import ConfigurationError
 from btcbot.config import Settings
 from btcbot.domain.anomalies import AnomalyCode, combine_modes, decide_degrade
 from btcbot.domain.models import PairInfo, normalize_symbol
+from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.risk_budget import Mode, RiskLimits
 from btcbot.domain.stage4 import (
     LifecycleAction,
@@ -26,7 +26,7 @@ from btcbot.domain.stage4 import (
     Quantizer,
 )
 from btcbot.domain.strategy_core import PositionSummary
-from btcbot.domain.order_intent import OrderIntent
+from btcbot.planning_kernel import ExecutionPort, Plan
 from btcbot.services import metrics_service
 from btcbot.services.account_snapshot_service import AccountSnapshotService
 from btcbot.services.accounting_service_stage4 import AccountingService
@@ -39,13 +39,12 @@ from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.ledger_service import LedgerService
 from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
+from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_budget_service import RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.stage4_planning_kernel_integration import build_stage4_kernel_plan
 from btcbot.services.state_store import StateStore
-from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
-from btcbot.planning_kernel import ExecutionPort, Plan
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +158,11 @@ class Stage4CycleRunner:
                 ),
             )
 
-            market_snapshot = self._resolve_market_snapshot(exchange, active_symbols, cycle_now=cycle_now)
+            market_snapshot = self._resolve_market_snapshot(
+                exchange,
+                active_symbols,
+                cycle_now=cycle_now,
+            )
             mark_prices = market_snapshot.mark_prices
             mark_price_errors = market_snapshot.anomalies
             snapshot_service = AccountSnapshotService(exchange=exchange)
@@ -333,7 +336,9 @@ class Stage4CycleRunner:
                     kill_switch_active=settings.kill_switch,
                 )
             )
-            budget_notional_multiplier = budget_decision.position_sizing_multiplier
+            budget_notional_multiplier = getattr(
+                budget_decision, "position_sizing_multiplier", Decimal("1")
+            )
             if settings.kill_switch:
                 budget_notional_multiplier = Decimal("0")
 
@@ -343,7 +348,9 @@ class Stage4CycleRunner:
                     cycle_id=cycle_id,
                     now_utc=cycle_now,
                     selected_symbols=[
-                        symbol for symbol in active_symbols if self.norm(symbol) not in failed_symbols
+                        symbol
+                        for symbol in active_symbols
+                        if self.norm(symbol) not in failed_symbols
                     ],
                     mark_prices=mark_prices,
                     try_cash=try_cash,
@@ -466,7 +473,9 @@ class Stage4CycleRunner:
                 bootstrap_intents, bootstrap_drop_reasons = self._build_intents(
                     cycle_id=cycle_id,
                     symbols=[
-                        symbol for symbol in active_symbols if self.norm(symbol) not in failed_symbols
+                        symbol
+                        for symbol in active_symbols
+                        if self.norm(symbol) not in failed_symbols
                     ],
                     mark_prices=mark_prices,
                     try_cash=try_cash,
@@ -521,7 +530,7 @@ class Stage4CycleRunner:
                 positions_by_symbol=positions_by_symbol,
             )
 
-            risk_decision = budget_decision.risk_decision
+            risk_decision = getattr(budget_decision, "risk_decision", budget_decision)
             try:
                 risk_budget_service.persist_decision(
                     cycle_id=cycle_id,
@@ -578,7 +587,9 @@ class Stage4CycleRunner:
 
             cycle_duration_ms = int((cycle_now - cycle_started_at).total_seconds() * 1000)
             anomalies = anomaly_detector.detect(
-                market_data_age_seconds={k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()},
+                market_data_age_seconds={
+                    k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()
+                },
                 reject_count=prev_reject_count,
                 cycle_duration_ms=cycle_duration_ms,
                 cursor_stall_by_symbol=cursor_stall_by_symbol,
@@ -618,11 +629,11 @@ class Stage4CycleRunner:
             execution_report = execution_service.execute_with_report(gated_actions)
             self._assert_execution_invariant(execution_report)
 
-            updated_cycle_duration_ms = int(
-                (cycle_now - cycle_started_at).total_seconds() * 1000
-            )
+            updated_cycle_duration_ms = int((cycle_now - cycle_started_at).total_seconds() * 1000)
             updated_anomalies = anomaly_detector.detect(
-                market_data_age_seconds={k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()},
+                market_data_age_seconds={
+                    k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()
+                },
                 reject_count=execution_report.rejected,
                 cycle_duration_ms=updated_cycle_duration_ms,
                 cursor_stall_by_symbol=cursor_stall_by_symbol,
@@ -1023,7 +1034,9 @@ class Stage4CycleRunner:
                 anomalies.add(normalized)
             if bid is not None and bid > 0 and ask is not None and ask > 0:
                 mark = (bid + ask) / Decimal("2")
-                spread_bps = ((ask - bid) / mark) * Decimal("10000") if mark > 0 else Decimal("999999")
+                spread_bps = (
+                    ((ask - bid) / mark) * Decimal("10000") if mark > 0 else Decimal("999999")
+                )
                 spreads_bps[normalized] = max(Decimal("0"), spread_bps)
             elif bid is not None and bid > 0:
                 mark = bid
@@ -1101,7 +1114,10 @@ class Stage4CycleRunner:
                 "safe_mode": settings.safe_mode,
                 "drawdown_pct": getattr(snapshot, "drawdown_pct", Decimal("0")),
                 "gross_exposure_try": sum(
-                    (position.qty * mark_prices.get(self.norm(position.symbol), position.avg_cost_try))
+                    (
+                        position.qty
+                        * mark_prices.get(self.norm(position.symbol), position.avg_cost_try)
+                    )
                     for position in positions
                 ),
                 "stale_data_seconds": Decimal(str(settings.stale_market_data_seconds)),
@@ -1189,7 +1205,10 @@ class Stage4CycleRunner:
         if settings.agent_policy_provider.lower() != "llm":
             return baseline
         if not settings.agent_llm_enabled:
-            logger.info("llm_disabled_fallback", extra={"extra": {"provider": settings.agent_llm_provider}})
+            logger.info(
+                "llm_disabled_fallback",
+                extra={"extra": {"provider": settings.agent_llm_provider}},
+            )
             return baseline
         llm_policy = LlmPolicy(
             client=_UnavailableLlmClient(),
@@ -1220,7 +1239,6 @@ class Stage4CycleRunner:
                 )
             )
         return mapped
-
 
     def _assert_execution_invariant(self, report: object) -> None:
         for field in ("executed_total", "submitted", "canceled", "simulated", "rejected"):
@@ -1280,10 +1298,12 @@ class Stage4CycleRunner:
         live_mode: bool,
         bootstrap_enabled: bool,
         pair_info: list[PairInfo] | None,
-        now_utc: datetime,
+        now_utc: datetime | None = None,
     ) -> tuple[list[Order], dict[str, int]]:
         if not bootstrap_enabled:
             return [], {}
+
+        timestamp = now_utc or datetime.now(UTC)
 
         pair_info_by_symbol = {self.norm(item.pair_symbol): item for item in (pair_info or [])}
         intents: list[Order] = []
@@ -1328,8 +1348,8 @@ class Stage4CycleRunner:
                     price=price_q,
                     qty=qty_q,
                     status="new",
-                    created_at=now_utc,
-                    updated_at=now_utc,
+                    created_at=timestamp,
+                    updated_at=timestamp,
                     client_order_id=f"s4-{cycle_id[:12]}-{normalized.lower()}-buy",
                     mode=("live" if live_mode else "dry_run"),
                 )
