@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from btcbot.services.trading_policy import validate_live_side_effects_policy
+from btcbot.domain.decision_codes import ReasonCode
+from btcbot.services.trading_policy import policy_reason_to_code, validate_live_side_effects_policy
 
 
 def _expected_reasons(
@@ -80,3 +81,19 @@ def test_kill_switch_reason_is_preserved_alongside_other_failures() -> None:
     assert "KILL_SWITCH" in result.reasons
     assert result.reasons == ["KILL_SWITCH", "DRY_RUN", "NOT_ARMED", "ACK_MISSING"]
     assert "KILL_SWITCH=true blocks side effects" in result.message
+
+
+def test_policy_reasons_map_to_canonical_reason_codes() -> None:
+    result = validate_live_side_effects_policy(
+        dry_run=True,
+        kill_switch=True,
+        live_trading_enabled=False,
+        live_trading_ack=False,
+    )
+    codes = [policy_reason_to_code(reason) for reason in result.reasons]
+    assert codes == [
+        ReasonCode.POLICY_BLOCK_KILL_SWITCH,
+        ReasonCode.POLICY_BLOCK_DRY_RUN,
+        ReasonCode.POLICY_BLOCK_NOT_ARMED,
+        ReasonCode.POLICY_BLOCK_ACK_MISSING,
+    ]
