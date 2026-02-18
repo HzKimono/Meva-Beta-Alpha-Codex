@@ -203,7 +203,7 @@ Notes:
 
 ## Pilot live profile (Top-5 TRY, conservative caps)
 
-1. Copy `.env.pilot.example` to `.env.live` and set only credentials (`BTCTURK_API_KEY`, `BTCTURK_API_SECRET`).
+1. Copy `.env.example` to `.env.live` and set only credentials (`BTCTURK_API_KEY`, `BTCTURK_API_SECRET`) plus pilot-specific limits for your rollout.
 2. Verify effective config values before running:
 
 ```bash

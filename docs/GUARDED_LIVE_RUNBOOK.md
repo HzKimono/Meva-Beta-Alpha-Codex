@@ -41,7 +41,7 @@ Guarded live is a controlled rollout model:
 
 Before Stage 0, verify all items.
 
-- [ ] **Environment file prepared** (example: `.env.pilot`) with no plaintext secrets committed.
+- [ ] **Environment file prepared** (example: `.env.live`) with no plaintext secrets committed.
 - [ ] **Required secrets present at runtime** for eventual live stage:
   - `BTCTURK_API_KEY`
   - `BTCTURK_API_SECRET`
@@ -60,7 +60,7 @@ pgrep -af "btcbot run"
 
 # 2) Confirm env file is loaded when using shell-based launch
 # (or use your service manager equivalent)
-set -a; source .env.pilot; set +a
+set -a; source .env.live; set +a
 ```
 
 ---
@@ -366,7 +366,7 @@ Also archive runtime logs and decision envelopes for the incident window.
 
 ## F) Appendix
 
-## `.env.pilot` style skeleton (no real secrets)
+## `.env.live` skeleton (no real secrets)
 
 ```dotenv
 # ===== BTCTurk credentials =====
