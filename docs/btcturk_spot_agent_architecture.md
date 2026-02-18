@@ -449,3 +449,137 @@ Checkpoint policy:
 ---
 
 This architecture keeps strategy logic isolated, enforces risk/accounting invariants at service boundaries, and makes live operation observable and recoverable under real exchange failure modes.
+
+## 10) Self-financing capital policy specification (formal)
+
+### 10.1 Policy intent and invariants
+
+**Definition (self-financing):** portfolio growth/shrinkage is driven only by realized/unrealized PnL minus fees/slippage; no external capital injection during runtime. New risk is funded from available internal capital only.
+
+Hard invariants:
+1. `Equity_t = Cash_t + Σ_i PositionValue_{i,t} - AccruedFees_t`
+2. `TradableCapital_t <= Equity_t - ReservedCash_t - FeeBuffer_t`
+3. If `TradableCapital_t <= 0`, then no new risk-increasing orders.
+4. Capital policy must be enforced pre-trade by `RiskManager` and post-fill by `Portfolio`.
+
+### 10.2 Policy table
+
+| Policy component | Symbol | Formula / rule | Typical range | Enforced by |
+|---|---|---|---|---|
+| Capital base | `C_base,t` | `C_base,t = Equity_t` (or conservative: `min(Equity_t, Equity_highwater_t)`) | N/A | Portfolio snapshot + RiskManager sizing |
+| Reserved cash floor | `C_res` | `C_res = max(C_res_abs, r_res * C_base,t)` | `r_res` = 5–20% | RiskManager pre-trade gate |
+| Reinvestment rate | `r_reinv` | `TradableCapital_t = max(0, (C_base,t - C_res - FeeBuffer_t) * r_reinv)` | 0.3–1.0 | Portfolio policy + position sizing |
+| Profit harvesting | `H_t` | If `RealizedPnL_MTD > θ_h`, sweep `h * (RealizedPnL_MTD - θ_h)` to reserve bucket | `h` = 10–50% | Portfolio ledger roll-up |
+| Fee budgeting | `FeeBuffer_t` | `FeeBuffer_t = max(FeeMinAbs, α_fee * Rolling30dNotional_t)` | `α_fee` = 5–30 bps | RiskManager affordability check |
+| Drawdown de-risking multiplier | `m_dd,t` | piecewise on drawdown `DD_t`: see below | [0,1] | RiskManager exposure scaler |
+| Max per-asset exposure | `E_asset_max,i` | `|Notional_i| <= min(E_asset_abs_i, w_i * TradableCapital_t * m_dd,t)` | `w_i` e.g. 10–35% | RiskManager pre-trade |
+| Max portfolio gross exposure | `E_gross_max` | `Σ_i |Notional_i| <= E_gross_abs or β * TradableCapital_t * m_dd,t` | `β` e.g. 0.8–1.5 | RiskManager pre-trade |
+| Min expected edge gate | `edge_min` | trade only if `ExpectedEdge_bps >= edge_min_bps + fee_bps + slippage_bps + noise_margin_bps` | strategy-specific | RiskManager+Strategy handshake |
+
+### 10.3 Core formulas
+
+Let:
+- `Equity_t`: mark-to-market equity at decision time.
+- `DD_t = 1 - Equity_t / Equity_highwater_t`.
+- `FeeEst_t(order) = taker_or_maker_fee_bps * order_notional / 10_000`.
+
+1) **Tradable capital**
+
+```text
+C_base,t        = Equity_t
+C_res,t         = max(C_res_abs, r_res * C_base,t)
+FeeBuffer_t     = max(FeeMinAbs, α_fee * Rolling30dNotional_t)
+Tradable_t      = max(0, (C_base,t - C_res,t - FeeBuffer_t) * r_reinv)
+```
+
+2) **Drawdown scaler** (example piecewise)
+
+```text
+m_dd,t = 1.00   if DD_t < 5%
+m_dd,t = 0.70   if 5% <= DD_t < 10%
+m_dd,t = 0.40   if 10% <= DD_t < 15%
+m_dd,t = 0.00   if DD_t >= 15%   (halt new risk, allow risk-reducing exits only)
+```
+
+3) **Exposure caps**
+
+```text
+AssetCap_i,t    = min(E_asset_abs_i, w_i * Tradable_t * m_dd,t)
+PortfolioCap_t  = min(E_gross_abs, β * Tradable_t * m_dd,t)
+```
+
+Risk checks require post-trade exposures to satisfy:
+
+```text
+|Notional_i,post| <= AssetCap_i,t
+Σ_i |Notional_i,post| <= PortfolioCap_t
+Cash_post >= C_res,t + FeeBuffer_t
+```
+
+4) **Profit harvesting (reserve transfer)**
+
+```text
+Harvestable_t = max(0, RealizedPnL_MTD - θ_h)
+Harvest_t     = h * Harvestable_t
+ReserveBucket_{t+1} = ReserveBucket_t + Harvest_t
+Tradable_t uses (Equity_t - ReserveBucket_t) as effective base (optional strict mode)
+```
+
+5) **Minimum expected edge gate**
+
+For each proposed order:
+
+```text
+RequiredEdge_bps = edge_min_bps + fee_bps_est + slippage_bps_est + noise_margin_bps
+TradeAllowed iff ExpectedEdge_bps >= RequiredEdge_bps
+```
+
+This prevents churn around zero-alpha/noise regimes.
+
+### 10.4 Plug-in contract to RiskManager and Portfolio
+
+**RiskManager integration (pre-trade):**
+1. Pull `PortfolioState` (`Equity`, cash, positions, high-water mark, realized PnL, rolling notional).
+2. Compute `Tradable_t`, `m_dd,t`, caps, and `RequiredEdge_bps`.
+3. Reject intents with standardized decision codes:
+   - `CAPITAL_RESERVED_CASH_BREACH`
+   - `CAPITAL_FEE_BUFFER_BREACH`
+   - `RISK_DRAWDOWN_DERISK_ACTIVE`
+   - `RISK_ASSET_EXPOSURE_LIMIT`
+   - `RISK_PORTFOLIO_EXPOSURE_LIMIT`
+   - `ALPHA_EDGE_BELOW_MINIMUM`
+4. Allow only risk-reducing intents when `m_dd,t == 0`.
+
+**Portfolio integration (post-fill/accounting):**
+1. Apply fill as double-entry (`asset`, `quote`, `fee`).
+2. Update realized/unrealized PnL, `Equity_t`, and high-water mark.
+3. Update rolling notional and recompute `FeeBuffer_t` inputs.
+4. Apply profit-harvesting transfer to reserve bucket per policy cadence.
+5. Emit `CapitalPolicySnapshot` for observability and deterministic replay.
+
+### 10.5 Minimal pseudocode hook points
+
+```python
+# RiskManager.pre_trade_check(intent, portfolio)
+policy = capital_policy.compute(portfolio_state=portfolio, market=market_state)
+if policy.tradable_capital <= 0:
+    return Reject("CAPITAL_RESERVED_CASH_BREACH")
+if not policy.edge_ok(intent.expected_edge_bps, intent.estimated_costs_bps):
+    return Reject("ALPHA_EDGE_BELOW_MINIMUM")
+if not policy.within_asset_cap(intent, portfolio):
+    return Reject("RISK_ASSET_EXPOSURE_LIMIT")
+if not policy.within_portfolio_cap(intent, portfolio):
+    return Reject("RISK_PORTFOLIO_EXPOSURE_LIMIT")
+return Accept(max_size=policy.max_size_for(intent.symbol))
+```
+
+```python
+# Portfolio.apply_fill(fill)
+ledger.apply_double_entry(fill)
+state.revalue(market_prices)
+state.update_highwater_mark()
+state.update_rolling_notional(fill)
+harvest = capital_policy.compute_harvest(state)
+ledger.transfer_to_reserve(harvest)
+emit(CapitalPolicySnapshot.from_state(state, harvest=harvest))
+```
