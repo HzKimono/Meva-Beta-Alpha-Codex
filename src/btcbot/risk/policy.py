@@ -8,7 +8,7 @@ from decimal import ROUND_DOWN, Decimal
 
 from btcbot.domain.decision_codes import ReasonCode, map_risk_reason
 from btcbot.domain.intent import Intent
-from btcbot.domain.models import normalize_symbol
+from btcbot.domain.models import OrderSide, normalize_symbol
 from btcbot.observability_decisions import emit_decision
 from btcbot.risk.exchange_rules import ExchangeRules, ExchangeRulesProvider
 
@@ -94,7 +94,11 @@ class RiskPolicy:
                 self._log_block(intent, map_risk_reason("missing_limit_price"), context=context)
                 continue
             notional = normalized.qty * price
-            if context.investable_try > 0 and used_notional + notional > context.investable_try:
+            if (
+                normalized.side == OrderSide.BUY
+                and context.investable_try > 0
+                and used_notional + notional > context.investable_try
+            ):
                 self._log_block(
                     normalized,
                     map_risk_reason("cash_reserve_target"),
