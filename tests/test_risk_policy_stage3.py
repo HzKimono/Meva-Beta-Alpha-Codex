@@ -387,3 +387,35 @@ def test_policy_notional_cap_logs_block_math(caplog) -> None:
         str(ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET),
     }
     assert getattr(decision_events[-1], "extra", {}).get("cycle_id") == "c1"
+
+
+def test_cash_reserve_target_allows_intent_when_free_cash_above_target() -> None:
+    policy = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=2,
+        max_open_orders_per_symbol=2,
+        cooldown_seconds=0,
+        notional_cap_try_per_cycle=Decimal("10000"),
+        max_notional_per_order_try=Decimal("0"),
+    )
+    context = RiskPolicyContext(
+        cycle_id="c-free-cash",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={},
+        mark_prices={},
+        cash_try_free=Decimal("1306"),
+        try_cash_target=Decimal("300"),
+        investable_try=Decimal("1006"),
+    )
+    intent = Intent.create(
+        cycle_id="c-free-cash",
+        symbol="BTCTRY",
+        side=OrderSide.BUY,
+        qty=Decimal("1"),
+        limit_price=Decimal("100"),
+        reason="cash reserve should not block",
+    )
+
+    approved = policy.evaluate(context, [intent])
+
+    assert len(approved) == 1
