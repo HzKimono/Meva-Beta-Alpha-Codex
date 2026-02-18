@@ -71,7 +71,9 @@ class RiskPolicy:
         for intent in intents[: self.max_orders_per_cycle]:
             symbol = normalize_symbol(intent.symbol)
             if context.open_orders_by_symbol.get(symbol, 0) >= self.max_open_orders_per_symbol:
-                self._log_block(intent, map_risk_reason("max_open_orders_per_symbol"), context=context)
+                self._log_block(
+                    intent, map_risk_reason("max_open_orders_per_symbol"), context=context
+                )
                 continue
 
             last_ts = context.last_intent_ts_by_symbol_side.get((symbol, intent.side.value))

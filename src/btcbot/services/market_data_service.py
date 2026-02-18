@@ -105,7 +105,9 @@ class MarketDataService:
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
         self.mode = mode.strip().lower()
         self.ws_rest_fallback = ws_rest_fallback
-        self._rest_provider = RestMarketDataProvider(exchange=exchange, now_provider=self.now_provider)
+        self._rest_provider = RestMarketDataProvider(
+            exchange=exchange, now_provider=self.now_provider
+        )
         self._ws_provider = WsMarketDataProvider()
         self._last_snapshot: MarketDataSnapshot | None = None
 
@@ -157,7 +159,9 @@ class MarketDataService:
     ) -> MarketDataFreshness:
         observed_age_ms: int | None = None
         if snapshot.fetched_at is not None:
-            observed_age_ms = int((self.now_provider() - snapshot.fetched_at).total_seconds() * 1000)
+            observed_age_ms = int(
+                (self.now_provider() - snapshot.fetched_at).total_seconds() * 1000
+            )
 
         is_stale = (
             snapshot.fetched_at is None
@@ -193,7 +197,9 @@ class MarketDataService:
     def set_ws_connected(self, connected: bool) -> None:
         self._ws_provider.set_connected(connected)
 
-    def ingest_ws_best_bid(self, symbol: str, bid: float, *, observed_at: datetime | None = None) -> None:
+    def ingest_ws_best_bid(
+        self, symbol: str, bid: float, *, observed_at: datetime | None = None
+    ) -> None:
         self._ws_provider.ingest_best_bid(
             symbol,
             bid,

@@ -83,7 +83,9 @@ def test_doctor_fails_when_dataset_is_file(tmp_path: Path) -> None:
     assert any("dataset path is not a directory" in error for error in report.errors)
 
 
-def test_doctor_dataset_optional_ok(capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_doctor_dataset_optional_ok(
+    capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         "btcbot.services.doctor.resolve_effective_universe",
         lambda settings: type(
@@ -374,8 +376,8 @@ def _seed_stage7_row(
 
 def test_doctor_exit_codes(capsys, tmp_path: Path, monkeypatch) -> None:
     db = str(tmp_path / "doctor.db")
-    from btcbot.services.state_store import StateStore
     from btcbot.services.effective_universe import EffectiveUniverse
+    from btcbot.services.state_store import StateStore
 
     monkeypatch.setattr(
         "btcbot.services.doctor.resolve_effective_universe",
@@ -390,25 +392,53 @@ def test_doctor_exit_codes(capsys, tmp_path: Path, monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "btcbot.services.doctor.build_exchange_stage4",
-        lambda settings, dry_run: _DoctorExchange([
-            {
-                "name": "BTCTRY",
-                "nameNormalized": "BTC_TRY",
-                "numeratorScale": 8,
-                "denominatorScale": 2,
-                "filters": [{"filterType": "PRICE_FILTER", "tickSize": "1", "minExchangeValue": "100"}],
-            }
-        ]),
+        lambda settings, dry_run: _DoctorExchange(
+            [
+                {
+                    "name": "BTCTRY",
+                    "nameNormalized": "BTC_TRY",
+                    "numeratorScale": 8,
+                    "denominatorScale": 2,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "1", "minExchangeValue": "100"}
+                    ],
+                }
+            ]
+        ),
     )
 
     store = StateStore(db_path=db)
-    _seed_stage7_row(store, cycle_id="pass-1", ts="2024-01-01T00:00:00+00:00", submitted=10, filled=10, rejected=0, latency_ms_total=10)
+    _seed_stage7_row(
+        store,
+        cycle_id="pass-1",
+        ts="2024-01-01T00:00:00+00:00",
+        submitted=10,
+        filled=10,
+        rejected=0,
+        latency_ms_total=10,
+    )
     assert cli.run_doctor(Settings(STATE_DB_PATH=db), db_path=db, dataset_path=None) == 0
 
-    _seed_stage7_row(store, cycle_id="warn-1", ts="2024-01-01T00:01:00+00:00", submitted=10, filled=8, rejected=2, latency_ms_total=10)
+    _seed_stage7_row(
+        store,
+        cycle_id="warn-1",
+        ts="2024-01-01T00:01:00+00:00",
+        submitted=10,
+        filled=8,
+        rejected=2,
+        latency_ms_total=10,
+    )
     assert cli.run_doctor(Settings(STATE_DB_PATH=db), db_path=db, dataset_path=None) == 1
 
-    _seed_stage7_row(store, cycle_id="fail-1", ts="2024-01-01T00:02:00+00:00", submitted=10, filled=6, rejected=4, latency_ms_total=5000)
+    _seed_stage7_row(
+        store,
+        cycle_id="fail-1",
+        ts="2024-01-01T00:02:00+00:00",
+        submitted=10,
+        filled=6,
+        rejected=4,
+        latency_ms_total=5000,
+    )
     assert cli.run_doctor(Settings(STATE_DB_PATH=db), db_path=db, dataset_path=None) == 2
     out = capsys.readouterr().out
     assert "doctor_status=FAIL" in out
@@ -439,7 +469,13 @@ def test_doctor_slo_fail_on_reject_rate(tmp_path: Path) -> None:
 
     store = StateStore(db_path=db)
     _seed_stage7_row(
-        store, cycle_id="r-1", ts="2024-01-01T00:00:00+00:00", submitted=10, filled=7, rejected=3, latency_ms_total=50
+        store,
+        cycle_id="r-1",
+        ts="2024-01-01T00:00:00+00:00",
+        submitted=10,
+        filled=7,
+        rejected=3,
+        latency_ms_total=50,
     )
     report = run_health_checks(Settings(STATE_DB_PATH=db), db_path=db, dataset_path=None)
     reject_checks = [c for c in report.checks if c.category == "slo" and c.name == "reject_rate"]

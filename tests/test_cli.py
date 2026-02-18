@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
 import threading
-import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -17,8 +17,8 @@ from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import Balance, OrderSide, PairInfo
 from btcbot.domain.stage4 import Quantizer
-from btcbot.services.stage4_cycle_runner import Stage4CycleRunner, Stage4InvariantError
 from btcbot.logging_utils import JsonFormatter
+from btcbot.services.stage4_cycle_runner import Stage4CycleRunner, Stage4InvariantError
 
 
 class _Freshness:
@@ -268,7 +268,9 @@ def test_run_cycle_dry_run_emits_decision_event_with_envelope_keys(monkeypatch, 
             del cycle_id, kwargs
             return intents
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "StateStore", FakeStateStore)
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
@@ -280,7 +282,9 @@ def test_run_cycle_dry_run_emits_decision_event_with_envelope_keys(monkeypatch, 
     settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SAFE_MODE=False)
     assert cli.run_cycle(settings, force_dry_run=True) == 0
 
-    decision_events = [record for record in caplog.records if record.getMessage() == "decision_event"]
+    decision_events = [
+        record for record in caplog.records if record.getMessage() == "decision_event"
+    ]
     assert decision_events
     payload = json.loads(JsonFormatter().format(decision_events[0]))
     for key in ("cycle_id", "decision_layer", "reason_code", "action"):
@@ -991,6 +995,7 @@ def test_run_cycle_stage4_classifies_capital_invariant_error(monkeypatch, tmp_pa
     payload = getattr(records[-1], "extra", {})
     assert payload["error_category"] == "capital_invariant"
 
+
 def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
@@ -1090,10 +1095,6 @@ def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
     assert captured["include_adaptation"] is True
 
 
-
-
-
-
 def test_main_run_lock_failure_happens_before_instrumentation(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
@@ -1121,6 +1122,7 @@ def test_main_run_lock_failure_happens_before_instrumentation(monkeypatch) -> No
 
     assert cli.main() == 2
     assert called["configured"] is False
+
 
 def test_run_stage3_runtime_blocks_second_instance(monkeypatch, tmp_path, capsys) -> None:
     class _Settings:
@@ -1167,6 +1169,7 @@ def test_run_stage3_runtime_blocks_second_instance(monkeypatch, tmp_path, capsys
     assert second_code == 2
     assert first_result["code"] == 0
     assert "LOCKED:" in capsys.readouterr().out
+
 
 def test_run_with_optional_loop_runs_max_cycles() -> None:
     calls = {"count": 0}
@@ -1549,7 +1552,9 @@ def test_run_cycle_stale_market_data_fail_closed(monkeypatch, caplog) -> None:
             del cycle_id, kwargs
             return intents
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "StateStore", FakeStateStore)
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
@@ -1558,7 +1563,9 @@ def test_run_cycle_stale_market_data_fail_closed(monkeypatch, caplog) -> None:
     monkeypatch.setattr(cli, "RiskService", FakeRiskService)
 
     caplog.set_level("INFO", logger="btcbot.cli")
-    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SAFE_MODE=False, MAX_MARKET_DATA_AGE_MS=5000)
+    settings = Settings(
+        DRY_RUN=True, KILL_SWITCH=False, SAFE_MODE=False, MAX_MARKET_DATA_AGE_MS=5000
+    )
     assert cli.run_cycle(settings, force_dry_run=True) == 0
 
     assert "strategy.generate" not in calls
@@ -1566,7 +1573,9 @@ def test_run_cycle_stale_market_data_fail_closed(monkeypatch, caplog) -> None:
     assert "execution.execute" not in calls
     assert "execution.cancel_stale" not in calls
 
-    decision_events = [record for record in caplog.records if record.getMessage() == "decision_event"]
+    decision_events = [
+        record for record in caplog.records if record.getMessage() == "decision_event"
+    ]
     assert decision_events
     payload = json.loads(JsonFormatter().format(decision_events[-1]))
     assert payload["decision_layer"] == "market_data"

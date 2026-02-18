@@ -42,7 +42,11 @@ def test_single_instance_lock_writes_pid(tmp_path: Path) -> None:
 
         pid_raw = lock_path.with_suffix(".pid").read_text(encoding="utf-8").strip()
         assert pid_raw == str(lock.pid)
-        assert lock_path.read_text(encoding="utf-8").strip() == str(lock.pid)
+        if sys.platform.startswith("win"):
+            with pytest.raises(PermissionError):
+                lock_path.read_text(encoding="utf-8")
+        else:
+            assert lock_path.read_text(encoding="utf-8").strip() == str(lock.pid)
 
     assert lock_path is not None
     assert lock_path.exists()

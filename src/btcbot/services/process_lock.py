@@ -98,7 +98,7 @@ def single_instance_lock(*, db_path: str, account_key: str = "default"):
         try:
             fh.seek(0)
             fh.truncate(0)
-            fh.write(f"{pid}\n".encode("utf-8"))
+            fh.write(f"{pid}\n".encode())
             fh.flush()
             os.fsync(fh.fileno())
         except OSError:

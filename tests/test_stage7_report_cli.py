@@ -399,7 +399,10 @@ def test_report_includes_slo_status(capsys, tmp_path: Path) -> None:
     assert "slo_status" in report
     assert "window_status=PASS" in report
 
-    assert cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5, json_output=True) == 0
+    assert (
+        cli.run_stage7_report(settings, db_path=settings.state_db_path, last=5, json_output=True)
+        == 0
+    )
     payload = capsys.readouterr().out
     assert '"summary"' in payload
     assert '"slo_status"' in payload

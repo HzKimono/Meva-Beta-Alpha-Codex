@@ -746,7 +746,9 @@ def _build_canary_settings(
     return settings.model_copy(update=overrides)
 
 
-def _check_canary_min_notional(settings: Settings, symbol: str, requested_notional: Decimal) -> tuple[bool, str]:
+def _check_canary_min_notional(
+    settings: Settings, symbol: str, requested_notional: Decimal
+) -> tuple[bool, str]:
     exchange = build_exchange_stage3(settings, force_dry_run=True)
     try:
         min_notional: Decimal | None = None
@@ -1047,7 +1049,11 @@ def _compute_live_policy(
     cycle_id: str | None = None,
 ) -> tuple[dict[str, bool], object]:
     safe_mode_fn = getattr(settings, "is_safe_mode_enabled", None)
-    safe_mode = bool(safe_mode_fn()) if callable(safe_mode_fn) else bool(getattr(settings, "safe_mode", False))
+    safe_mode = (
+        bool(safe_mode_fn())
+        if callable(safe_mode_fn)
+        else bool(getattr(settings, "safe_mode", False))
+    )
     effective_safe_mode = safe_mode if include_safe_mode else False
     dry_run = bool(force_dry_run or getattr(settings, "dry_run", False) or effective_safe_mode)
     live_ack = getattr(settings, "live_trading_ack", None) == "I_UNDERSTAND"
@@ -1190,7 +1196,9 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 )
                 if freshness is not None and bool(getattr(freshness, "is_stale", False)):
                     observed_age_ms = getattr(freshness, "observed_age_ms", None)
-                    max_age_ms = int(getattr(freshness, "max_age_ms", settings.max_market_data_age_ms))
+                    max_age_ms = int(
+                        getattr(freshness, "max_age_ms", settings.max_market_data_age_ms)
+                    )
                     source_mode = str(getattr(freshness, "source_mode", settings.market_data_mode))
                     connected = bool(getattr(freshness, "connected", False))
                     missing_symbols = list(getattr(freshness, "missing_symbols", ()))
@@ -1692,21 +1700,25 @@ def run_stage7_report(
             payload_rows.append({**by_cycle.get(cycle_id, row), "slo_status": row["slo_status"]})
         print(
             json.dumps(
-                redact_data({
-                    "summary": {
-                        "status": window_status,
-                        "notes": window_notes,
-                        "window_size": len(enriched_rows),
-                    },
-                    "rows": payload_rows,
-                }),
+                redact_data(
+                    {
+                        "summary": {
+                            "status": window_status,
+                            "notes": window_notes,
+                            "window_size": len(enriched_rows),
+                        },
+                        "rows": payload_rows,
+                    }
+                ),
                 sort_keys=True,
                 default=str,
             )
         )
         return 0
 
-    print("cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason slo_status")
+    print(
+        "cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason slo_status"
+    )
     for row in enriched_rows:
         no_trades_reason = row.get("no_trades_reason") or "-"
         no_metrics_reason = row.get("no_metrics_reason") or "-"
@@ -2153,7 +2165,9 @@ def run_doctor(
         print(_doctor_report_json(report))
     else:
         for check in report.checks:
-            print(f"doctor: {check.status.upper()} [{check.category}] {check.name} - {check.message}")
+            print(
+                f"doctor: {check.status.upper()} [{check.category}] {check.name} - {check.message}"
+            )
 
         check_messages = {check.message for check in report.checks}
         for message in report.warnings:

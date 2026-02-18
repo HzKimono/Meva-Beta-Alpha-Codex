@@ -547,7 +547,9 @@ def test_restart_safety_inflight_pending_blocks_second_submit(monkeypatch, tmp_p
     assert exchange.placed == []
 
 
-def test_restart_safety_stale_pending_without_client_order_id_recovers(monkeypatch, tmp_path) -> None:
+def test_restart_safety_stale_pending_without_client_order_id_recovers(
+    monkeypatch, tmp_path
+) -> None:
     class _T0:
         @staticmethod
         def now(tz):
@@ -678,9 +680,7 @@ def test_restart_safety_stale_pending_with_client_order_id_reconciles_without_re
     assert row["order_id"] == "oid-existing"
 
 
-def test_stale_pending_lookup_failure_backoff_and_eventual_failed(
-    monkeypatch, tmp_path
-) -> None:
+def test_stale_pending_lookup_failure_backoff_and_eventual_failed(monkeypatch, tmp_path) -> None:
     class FailingRecoveryExchange(RecordingExchange):
         def __init__(self) -> None:
             super().__init__()

@@ -15,6 +15,7 @@ from btcbot.domain.symbols import canonical_symbol
 class MarketDataSchemaError(ValueError):
     """Raised when replay input files do not match expected schema."""
 
+
 class MarketDataReplay:
     def __init__(
         self,
@@ -145,14 +146,14 @@ def _normalize_series(series_by_symbol: dict[str, list[_T]]) -> dict[str, list[_
     out: dict[str, list[_T]] = {}
     for symbol, rows in series_by_symbol.items():
         normalized = canonical_symbol(symbol)
-        out[normalized] = sorted(rows, key=lambda item: getattr(item, "ts"))
+        out[normalized] = sorted(rows, key=lambda item: item.ts)
     return out
 
 
 def _nearest_prior(series: list[_T], now_ts: datetime) -> _T | None:
     last = None
     for item in series:
-        if getattr(item, "ts") <= now_ts:
+        if item.ts <= now_ts:
             last = item
         else:
             break
