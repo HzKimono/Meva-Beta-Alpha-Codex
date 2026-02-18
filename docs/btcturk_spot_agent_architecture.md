@@ -254,6 +254,198 @@ Example top-level settings groups:
   2. risk limits block violations,
   3. reconciliation restores consistency after crash/restart.
 
+## 8) Runtime model proposal: `asyncio` event loop (recommended)
+
+### 8.1 Option analysis: asyncio vs threads vs sync loop
+
+- **`asyncio` (recommended)**
+  - Best fit for exchange-heavy I/O (REST + websocket + timers) with one process and explicit cooperative scheduling.
+  - Enables precise rate-limit token sharing across tasks (data feed, reconcile, submit/cancel).
+  - Keeps deterministic behavior by centralizing state mutation in one coordinator task (single writer pattern).
+  - Failure handling is explicit per awaited boundary (timeouts, retry wrappers, circuit checks).
+
+- **Threads**
+  - Good for blocking SDKs, but increases race-condition surface for order/portfolio state unless strict locks or queue ownership are used.
+  - Harder to guarantee determinism because interleavings are timing-dependent.
+  - Viable fallback only if exchange client is fundamentally blocking and cannot be adapted.
+
+- **Synchronous loop**
+  - Highest determinism and easiest mental model.
+  - But poor latency overlap: market data wait, REST calls, and persistence become serialized; can underutilize rate-limit windows and react slowly.
+  - Acceptable for very low-frequency systems; less ideal for continuous live operation with websocket + reconciliation.
+
+### 8.2 Why `asyncio` is the right default here
+
+- Exchange I/O is predominantly network-bound and benefits from concurrent awaitable operations.
+- BTC Turk rate-limits can be modeled as shared async limiters to coordinate all API consumers.
+- Determinism is preserved by funneling order-state/portfolio-state mutations through one sequential actor (`CycleCoordinator`).
+
+## 9) Concrete event-loop design (pseudocode only)
+
+### 9.1 Top-level tasks and ownership
+
+- `MarketDataTask`: websocket first, REST poll fallback, publishes snapshots/ticks.
+- `CycleSchedulerTask`: emits cycle ticks at fixed cadence.
+- `ExecutionTask`: submits/cancels orders and reconciles exchange status.
+- `PersistenceTask`: commits checkpointed state and outbox atomically.
+- `Supervisor`: lifecycle, health checks, graceful shutdown orchestration.
+
+**Single-writer rule:** only `CycleCoordinator` mutates in-memory `PortfolioState` and `OrderState`; other tasks send messages/events.
+
+### 9.2 Tick scheduling (websocket + polling placeholder)
+
+```python
+async def market_data_task(bus, ws_client, rest_client, cfg, shutdown):
+    mode = "ws"
+    retry = RetryPolicy(base=0.25, cap=8.0, jitter="full")
+
+    while not shutdown.is_set():
+        if mode == "ws":
+            try:
+                async for tick in ws_client.stream_ticks(symbols=cfg.symbols5):
+                    await bus.publish(MarketTick(tick))
+            except TransientError:
+                await bus.publish(FeedDegraded(reason="ws_error"))
+                await asyncio.sleep(retry.next_delay())
+                mode = "poll" if retry.exhausted_soft_threshold() else "ws"
+            else:
+                retry.reset()
+        else:
+            try:
+                snapshot = await rest_client.fetch_snapshot(symbols=cfg.symbols5)
+                await bus.publish(MarketSnapshotEvent(snapshot))
+                await asyncio.sleep(cfg.poll_interval_s)
+            except TransientError:
+                await asyncio.sleep(retry.next_delay())
+            if ws_client.healthcheck_ok_for(cfg.ws_rejoin_after_s):
+                mode = "ws"
+                retry.reset()
+
+
+async def cycle_scheduler_task(bus, cfg, shutdown):
+    # deterministic cadence using monotonic clock
+    next_t = monotonic()
+    while not shutdown.is_set():
+        next_t += cfg.cycle_interval_s
+        await asyncio.sleep(max(0.0, next_t - monotonic()))
+        await bus.publish(CycleTick(ts=utcnow()))
+```
+
+### 9.3 Backoff / retry strategy
+
+```python
+class RetryPolicy:
+    # bounded exponential backoff with full jitter
+    def next_delay(self):
+        raw = min(cap, base * (2 ** attempts))
+        attempts += 1
+        return random.uniform(0, raw)
+
+
+async def call_with_retry(op, retry_policy, timeout_s, breaker, idempotency_key=None):
+    for _ in range(retry_policy.max_attempts):
+        if breaker.is_open():
+            raise CircuitOpen()
+        try:
+            with tracer.span("exchange_call"):
+                return await asyncio.wait_for(op(idempotency_key=idempotency_key), timeout=timeout_s)
+        except TransientError as e:
+            breaker.record_failure(e)
+            await asyncio.sleep(retry_policy.next_delay())
+            continue
+    raise RetryExhausted()
+```
+
+Policy notes:
+- Retry only transient classes (`timeout`, `429`, `5xx`, connection reset).
+- Never blindly retry non-idempotent submit without a deterministic `client_order_id`.
+- Use endpoint-specific retry budgets to avoid starving reconciliation.
+
+### 9.4 Circuit breaker behavior
+
+```python
+class CircuitBreaker:
+    # states: CLOSED -> OPEN -> HALF_OPEN
+    def on_result(self, ok):
+        if state == CLOSED and consecutive_failures >= threshold:
+            state = OPEN; opened_at = now()
+        elif state == OPEN and now() - opened_at >= cooldown_s:
+            state = HALF_OPEN; probe_budget = n_probes
+        elif state == HALF_OPEN:
+            if ok and probe_budget_depleted():
+                state = CLOSED; reset_counters()
+            elif not ok:
+                state = OPEN; opened_at = now()
+
+
+# Separate breaker instances:
+breaker_orders = CircuitBreaker(...)
+breaker_account = CircuitBreaker(...)
+breaker_market_data = CircuitBreaker(...)
+```
+
+Behavioral contract:
+- `orders` breaker OPEN ⇒ block new entries, allow protective cancels/exit reductions when possible.
+- `market_data` breaker OPEN or stale feed ⇒ safe mode (no new risk-increasing intents).
+- `account` breaker OPEN ⇒ freeze sizing updates; continue only with conservative protections.
+
+### 9.5 Graceful shutdown
+
+```python
+async def shutdown_sequence(supervisor, tasks, bus, persistence, cfg):
+    supervisor.set_shutdown_flag()
+    await bus.publish(ShutdownRequested())
+
+    # stop accepting new strategy intents
+    await supervisor.pause_cycle_scheduler()
+
+    # optional: cancel non-protective open orders
+    if cfg.cancel_open_orders_on_shutdown:
+        await supervisor.cancel_non_protective_orders(deadline_s=cfg.shutdown_deadline_s)
+
+    # flush in-flight events and checkpoint state
+    await supervisor.drain_event_bus(timeout_s=cfg.shutdown_drain_timeout_s)
+    await persistence.checkpoint(reason="shutdown")
+
+    # cancel remaining tasks and await completion
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+```
+
+### 9.6 State persistence checkpoints
+
+```python
+async def cycle_coordinator(bus, stores, shutdown):
+    cycle_no = 0
+    while not shutdown.is_set():
+        event = await bus.next_event()
+
+        if isinstance(event, CycleTick):
+            cycle_no += 1
+            begin_tx()
+            # 1) snapshot market/account views
+            # 2) strategy.decide
+            # 3) risk.pre_trade gate
+            # 4) order intents -> execution commands
+            # 5) apply fills/ledger deltas seen this cycle
+            commit_tx()  # atomic: order state + portfolio ledger + outbox
+
+            if cycle_no % 1 == 0:
+                await stores.checkpoint(tag=f"cycle:{cycle_no}")
+
+        elif isinstance(event, FillEvent):
+            begin_tx(); apply_fill_and_ledger(event); commit_tx()
+
+        elif isinstance(event, ReconcileEvent):
+            begin_tx(); apply_reconciliation(event); commit_tx()
+```
+
+Checkpoint policy:
+- **Hard checkpoint every cycle** (small state, stronger crash recovery).
+- Additional checkpoint on critical transitions: breaker state change, risk halt, shutdown.
+- Recovery boot sequence: load last checkpoint → replay outbox/ledger offsets → reconcile against exchange truth.
+
 ---
 
 This architecture keeps strategy logic isolated, enforces risk/accounting invariants at service boundaries, and makes live operation observable and recoverable under real exchange failure modes.
