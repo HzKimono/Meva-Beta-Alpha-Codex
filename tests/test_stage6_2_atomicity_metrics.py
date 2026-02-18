@@ -241,3 +241,34 @@ def test_compute_execution_quality_per_symbol_counts_all_fills_with_partial_slip
     assert snapshot.per_symbol[0].symbol == "BTCTRY"
     assert snapshot.per_symbol[0].fills_count == 2
     assert snapshot.per_symbol[0].slippage_bps_avg == Decimal("100")
+
+
+def test_cycle_metrics_fills_count_uses_persisted_semantics_for_deduped_fills(monkeypatch, tmp_path) -> None:
+    exchange = ExchangeForAtomicity()
+    runner = Stage4CycleRunner()
+    db_path = tmp_path / "fills_semantics.sqlite"
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+    )
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(str(db_path))
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT fills_count, meta_json FROM cycle_metrics ORDER BY ts_start DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    assert int(row["fills_count"]) == 0
+    meta = json.loads(str(row["meta_json"]))
+    assert meta["fills_fetched_count"] >= 1
+    assert meta["fills_persisted_count"] == 0

@@ -10,6 +10,7 @@ from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import OrderSide, PairInfo
 from btcbot.domain.stage4 import (
+    ExchangeRules,
     LifecycleAction,
     LifecycleActionType,
     Order,
@@ -586,6 +587,7 @@ def test_execution_rejects_and_continues_when_rules_missing(store: StateStore) -
     report = svc.execute_with_report(actions)
 
     assert report.rejected == 1
+    assert report.rejected_min_notional == 0
     assert report.canceled == 1
     rejected_order = store.get_stage4_order_by_client_id("cid-missing-rules")
     assert rejected_order is not None
@@ -596,3 +598,75 @@ def test_execution_rejects_and_continues_when_rules_missing(store: StateStore) -
         ).fetchone()
     assert row is not None
     assert row["last_error"] == "missing_exchange_rules"
+
+
+def test_execution_report_tracks_only_min_notional_rejections(tmp_path) -> None:
+    store = StateStore(str(tmp_path / "stage4_reject_breakdown.sqlite"))
+
+    class MixedRulesService:
+        def resolve_boundary(self, symbol: str):
+            del symbol
+            return type("R", (), {"rules": None, "resolution": type("D", (), {"status": "missing"})()})()
+
+    class MinNotionalRulesService:
+        def resolve_boundary(self, symbol: str):
+            del symbol
+            return type(
+                "R",
+                (),
+                {
+                    "rules": ExchangeRules(
+                        tick_size=Decimal("0.1"),
+                        step_size=Decimal("0.0001"),
+                        min_notional_try=Decimal("200"),
+                        price_precision=2,
+                        qty_precision=4,
+                    )
+                },
+            )()
+
+    exchange = FakeExchangeStage4()
+    svc_missing = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False),
+        rules_service=MixedRulesService(),
+    )
+    report_missing = svc_missing.execute_with_report(
+        [
+            LifecycleAction(
+                action_type=LifecycleActionType.SUBMIT,
+                symbol="BTC_TRY",
+                side="buy",
+                price=Decimal("100"),
+                qty=Decimal("0.1"),
+                reason="missing_rules",
+                client_order_id="cid-missing-only",
+            )
+        ]
+    )
+
+    svc_min = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False),
+        rules_service=MinNotionalRulesService(),
+    )
+    report_min = svc_min.execute_with_report(
+        [
+            LifecycleAction(
+                action_type=LifecycleActionType.SUBMIT,
+                symbol="BTC_TRY",
+                side="buy",
+                price=Decimal("100"),
+                qty=Decimal("1"),
+                reason="min_notional",
+                client_order_id="cid-min-only",
+            )
+        ]
+    )
+
+    assert report_missing.rejected == 1
+    assert report_missing.rejected_min_notional == 0
+    assert report_min.rejected == 1
+    assert report_min.rejected_min_notional == 1

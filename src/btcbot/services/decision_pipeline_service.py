@@ -78,6 +78,7 @@ class DecisionPipelineService:
         mark_prices: Mapping[str, Decimal],
         open_orders: list[Order],
         pair_info: list[PairInfo] | None,
+        orderbooks: Mapping[str, OrderBookSummary] | None = None,
         bootstrap_enabled: bool,
         live_mode: bool,
         preferred_symbols: list[str] | None = None,
@@ -113,6 +114,7 @@ class DecisionPipelineService:
             positions=positions,
             mark_prices=mark_prices,
             open_orders=open_orders,
+            orderbooks=orderbooks,
             bootstrap_enabled=bootstrap_enabled,
             now_ts=now_ts,
         )
@@ -476,6 +478,7 @@ class DecisionPipelineService:
         positions: Mapping[str, PositionSummary],
         mark_prices: Mapping[str, Decimal],
         open_orders: list[Order],
+        orderbooks: Mapping[str, OrderBookSummary] | None,
         bootstrap_enabled: bool,
         now_ts: datetime,
     ) -> list[Intent]:
@@ -505,11 +508,16 @@ class DecisionPipelineService:
                 timestamp=now_ts,
                 symbol=symbol,
                 mark_price=mark,
-                orderbook=OrderBookSummary(best_bid=mark, best_ask=mark),
+                orderbook=(orderbooks or {}).get(symbol, OrderBookSummary(best_bid=mark, best_ask=mark)),
                 balances=balances,
                 position=positions.get(symbol),
                 open_orders=orders_summary.get(symbol, OpenOrdersSummary()),
-                knobs=StrategyKnobs(),
+                knobs=StrategyKnobs(
+                    max_notional_try=self._to_decimal(self.settings.stage5_max_intent_notional_try),
+                    bootstrap_notional_try=self._to_decimal(
+                        self.settings.stage5_bootstrap_notional_try
+                    ),
+                ),
             )
             intents.extend(self.registry.generate_intents(context))
         return intents
