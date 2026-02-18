@@ -5,13 +5,13 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, StrEnum
 
 from btcbot.domain.ledger import ensure_utc
 from btcbot.domain.risk_models import stable_hash_payload
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     PLANNED = "PLANNED"
     SUBMITTED = "SUBMITTED"
     ACKED = "ACKED"

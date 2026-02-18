@@ -5,10 +5,10 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, StrEnum
 
 
-class RiskMode(str, Enum):
+class RiskMode(StrEnum):
     NORMAL = "NORMAL"
     REDUCE_RISK_ONLY = "REDUCE_RISK_ONLY"
     OBSERVE_ONLY = "OBSERVE_ONLY"
