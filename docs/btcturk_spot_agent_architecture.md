@@ -583,3 +583,305 @@ harvest = capital_policy.compute_harvest(state)
 ledger.transfer_to_reserve(harvest)
 emit(CapitalPolicySnapshot.from_state(state, harvest=harvest))
 ```
+
+## 11) ExchangeClient contract for BTC Turk spot (endpoint-agnostic)
+
+This contract intentionally avoids undocumented path assumptions. All concrete HTTP routes are represented as `TODO` constants in adapter implementations.
+
+### 11.1 Typed normalized models (pydantic)
+
+```python
+# src/btcbot/contracts/exchange_models.py
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from enum import Enum
+from pydantic import BaseModel, Field, ConfigDict
+
+
+class Side(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderType(str, Enum):
+    LIMIT = "LIMIT"
+    MARKET = "MARKET"
+
+
+class TimeInForce(str, Enum):
+    GTC = "GTC"
+    IOC = "IOC"
+    FOK = "FOK"
+
+
+class OrderStatus(str, Enum):
+    NEW = "NEW"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELED = "CANCELED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+
+
+class CandleInterval(str, Enum):
+    M1 = "1m"
+    M5 = "5m"
+    M15 = "15m"
+    H1 = "1h"
+    H4 = "4h"
+    D1 = "1d"
+
+
+class SymbolInfo(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    base_asset: str
+    quote_asset: str
+    price_step: Decimal
+    qty_step: Decimal
+    min_qty: Decimal
+    min_notional: Decimal | None = None
+
+
+class Order(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    exchange_order_id: str
+    client_order_id: str
+    symbol: str
+    side: Side
+    order_type: OrderType
+    tif: TimeInForce | None = None
+    price: Decimal | None = None
+    quantity: Decimal
+    executed_quantity: Decimal = Decimal("0")
+    avg_price: Decimal | None = None
+    status: OrderStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+class Trade(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    trade_id: str
+    order_id: str | None = None
+    client_order_id: str | None = None
+    symbol: str
+    side: Side
+    price: Decimal
+    quantity: Decimal
+    fee: Decimal
+    fee_asset: str
+    traded_at: datetime
+
+
+class Balance(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    asset: str
+    free: Decimal
+    locked: Decimal
+
+
+class Ticker(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    bid: Decimal
+    ask: Decimal
+    last: Decimal
+    volume_24h: Decimal
+    quote_volume_24h: Decimal | None = None
+    ts: datetime
+
+
+class Candle(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    interval: CandleInterval
+    open_time: datetime
+    close_time: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    quote_volume: Decimal | None = None
+
+
+class PlaceOrderRequest(BaseModel):
+    symbol: str
+    side: Side
+    order_type: OrderType
+    quantity: Decimal
+    price: Decimal | None = None
+    tif: TimeInForce | None = None
+    client_order_id: str = Field(min_length=8, max_length=64)
+
+
+class CancelOrderRequest(BaseModel):
+    symbol: str
+    client_order_id: str | None = None
+    exchange_order_id: str | None = None
+
+
+class ExchangeTime(BaseModel):
+    server_time: datetime
+    rtt_ms: float | None = None
+    local_offset_ms: float | None = None
+```
+
+### 11.2 Auth, signing, and rate-limit abstractions
+
+```python
+# src/btcbot/contracts/exchange_auth.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol, Mapping
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    api_key: str
+    api_secret_ref: str  # reference to secret store key, not raw secret in logs
+    passphrase_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class SignedRequest:
+    method: str
+    path: str  # TODO: concrete BTC Turk path per operation
+    query: Mapping[str, str]
+    headers: Mapping[str, str]
+    body: bytes | None
+
+
+class RequestSigner(Protocol):
+    def sign(
+        self,
+        *,
+        method: str,
+        path: str,
+        query: Mapping[str, str],
+        body: bytes | None,
+        nonce: str,
+        timestamp_ms: int,
+        auth: AuthContext,
+    ) -> SignedRequest: ...
+
+
+class TimeSync(Protocol):
+    async def sync(self) -> float: ...  # returns local_offset_ms
+    def now_ms(self) -> int: ...        # local clock + offset
+
+
+class RateLimiter(Protocol):
+    async def acquire(self, bucket: str, weight: int = 1) -> None: ...
+    def on_response(self, bucket: str, status_code: int, headers: Mapping[str, str]) -> None: ...
+```
+
+Design notes:
+- `RequestSigner` owns canonical string construction and signature headers; adapter supplies `TODO` path constants.
+- `TimeSync` offsets local timestamps to server time to reduce timestamp drift rejects.
+- `RateLimiter` is shared across market/account/order clients for global fairness.
+
+### 11.3 ExchangeClient interface methods (Protocol)
+
+```python
+# src/btcbot/contracts/exchange_client.py
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol, Sequence
+
+from btcbot.contracts.exchange_models import (
+    Balance,
+    Candle,
+    CandleInterval,
+    CancelOrderRequest,
+    ExchangeTime,
+    Order,
+    PlaceOrderRequest,
+    SymbolInfo,
+    Ticker,
+    Trade,
+)
+
+
+class ExchangeClient(Protocol):
+    # ----- lifecycle / health -----
+    async def ping(self) -> bool: ...
+    async def get_exchange_time(self) -> ExchangeTime: ...
+    async def sync_time(self) -> float: ...  # local_offset_ms
+
+    # ----- market metadata/data -----
+    async def get_symbols(self) -> list[SymbolInfo]: ...
+    async def get_tickers(self, symbols: Sequence[str]) -> list[Ticker]: ...
+    async def get_candles(
+        self,
+        *,
+        symbol: str,
+        interval: CandleInterval,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 500,
+    ) -> list[Candle]: ...
+
+    # ----- account -----
+    async def get_balances(self) -> list[Balance]: ...
+    async def get_my_trades(
+        self,
+        *,
+        symbol: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 500,
+    ) -> list[Trade]: ...
+
+    # ----- orders -----
+    async def place_order(self, req: PlaceOrderRequest) -> Order: ...
+    async def cancel_order(self, req: CancelOrderRequest) -> Order: ...
+    async def get_order(
+        self,
+        *,
+        symbol: str,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> Order | None: ...
+    async def list_open_orders(self, symbols: Sequence[str] | None = None) -> list[Order]: ...
+
+    # ----- reconciliation helpers -----
+    async def get_order_trades(self, *, symbol: str, order_id: str) -> list[Trade]: ...
+```
+
+### 11.4 Adapter placeholder shape (no endpoint guessing)
+
+```python
+# src/btcbot/adapters/btcturk/exchange_client.py (shape only)
+
+# TODO: define BTC Turk route constants once confirmed:
+# TODO_ROUTE_PING = "..."
+# TODO_ROUTE_SERVER_TIME = "..."
+# TODO_ROUTE_SYMBOLS = "..."
+# TODO_ROUTE_TICKERS = "..."
+# TODO_ROUTE_CANDLES = "..."
+# TODO_ROUTE_BALANCES = "..."
+# TODO_ROUTE_TRADES = "..."
+# TODO_ROUTE_ORDER_PLACE = "..."
+# TODO_ROUTE_ORDER_CANCEL = "..."
+# TODO_ROUTE_ORDER_GET = "..."
+# TODO_ROUTE_OPEN_ORDERS = "..."
+```
+
+### 11.5 Boundary guarantees
+
+- All adapter responses must be normalized into `Order/Trade/Balance/Ticker/Candle` models before entering domain services.
+- Raw exchange payloads remain adapter-local and are never consumed directly by strategy/risk/portfolio layers.
+- `place_order` must enforce idempotency via `client_order_id`; retries rely on `get_order`/`list_open_orders` reconciliation before re-submit.
+- Every signed/private request goes through `TimeSync` + `RateLimiter` + `RequestSigner` pipeline in that order.
