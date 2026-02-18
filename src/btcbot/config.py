@@ -226,10 +226,18 @@ class Settings(BaseSettings):
     doctor_slo_max_reject_rate_fail: float = Field(
         default=0.10, alias="DOCTOR_SLO_MAX_REJECT_RATE_FAIL"
     )
-    doctor_slo_max_latency_ms_warn: int = Field(default=1000, alias="DOCTOR_SLO_MAX_LATENCY_MS_WARN")
-    doctor_slo_max_latency_ms_fail: int = Field(default=2000, alias="DOCTOR_SLO_MAX_LATENCY_MS_FAIL")
-    doctor_slo_min_fill_rate_warn: float = Field(default=0.90, alias="DOCTOR_SLO_MIN_FILL_RATE_WARN")
-    doctor_slo_min_fill_rate_fail: float = Field(default=0.80, alias="DOCTOR_SLO_MIN_FILL_RATE_FAIL")
+    doctor_slo_max_latency_ms_warn: int = Field(
+        default=1000, alias="DOCTOR_SLO_MAX_LATENCY_MS_WARN"
+    )
+    doctor_slo_max_latency_ms_fail: int = Field(
+        default=2000, alias="DOCTOR_SLO_MAX_LATENCY_MS_FAIL"
+    )
+    doctor_slo_min_fill_rate_warn: float = Field(
+        default=0.90, alias="DOCTOR_SLO_MIN_FILL_RATE_WARN"
+    )
+    doctor_slo_min_fill_rate_fail: float = Field(
+        default=0.80, alias="DOCTOR_SLO_MIN_FILL_RATE_FAIL"
+    )
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -524,7 +532,6 @@ class Settings(BaseSettings):
             raise ValueError("PNL_DIVERGENCE_TRY_ERROR must be >= PNL_DIVERGENCE_TRY_WARN")
         return value
 
-
     @field_validator("market_data_mode")
     def validate_market_data_mode(cls, value: str) -> str:
         normalized = value.strip().lower()
@@ -537,6 +544,7 @@ class Settings(BaseSettings):
         if value < 1:
             raise ValueError("MAX_MARKET_DATA_AGE_MS must be >= 1")
         return value
+
     @field_validator("stage7_score_weights", mode="before")
     def validate_stage7_score_weights(
         cls, value: str | dict[str, object] | None
@@ -710,7 +718,6 @@ class Settings(BaseSettings):
                 "STAGE7_LOSS_GUARDRAIL_MODE must be one of: reduce_risk_only,observe_only"
             )
         return normalized
-
 
     @model_validator(mode="after")
     def validate_market_data_settings(self) -> Settings:

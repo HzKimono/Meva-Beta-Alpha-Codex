@@ -7,3 +7,7 @@ __pycache__/
 !/data/replay/
 /data/replay/*
 !/data/replay/README.md
+# local runtime artifacts
+*.db
+.env.live
+.env.pilot

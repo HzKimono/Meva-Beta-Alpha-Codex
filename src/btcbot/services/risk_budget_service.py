@@ -47,6 +47,7 @@ class CapitalPolicyResult:
     checkpoint_id: str
     applied: bool
 
+
 class CapitalPolicyError(RuntimeError):
     pass
 

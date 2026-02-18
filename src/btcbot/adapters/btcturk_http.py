@@ -256,7 +256,9 @@ class BtcturkHttpClient(ExchangeClient):
             except Exception:  # noqa: BLE001
                 payload = None
 
-            safe_payload_message = sanitize_text(str(payload_message)) if payload_message is not None else None
+            safe_payload_message = (
+                sanitize_text(str(payload_message)) if payload_message is not None else None
+            )
             raise ExchangeError(
                 "BTCTurk private endpoint error "
                 f"status={response.status_code} method={method} path={path} "

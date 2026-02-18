@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import btcbot.services.execution_service as execution_service_module
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.models import (
     Balance,
@@ -18,7 +19,6 @@ from btcbot.domain.models import (
     PairInfo,
     SymbolRules,
 )
-import btcbot.services.execution_service as execution_service_module
 from btcbot.services.execution_service import ExecutionService
 from btcbot.services.state_store import StateStore
 
@@ -43,9 +43,7 @@ class LifecycleExchange(ExchangeClient):
     def get_balances(self) -> list[Balance]:
         return []
 
-    def get_orderbook(
-        self, symbol: str, limit: int | None = None
-    ) -> tuple[float, float]:
+    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
         del symbol, limit
         return (0.0, 0.0)
 
@@ -78,17 +76,11 @@ class LifecycleExchange(ExchangeClient):
                 bids.append(item)
         return OpenOrders(bids=bids, asks=asks)
 
-    def get_all_orders(
-        self, pair_symbol: str, start_ms: int, end_ms: int
-    ) -> list[OrderSnapshot]:
+    def get_all_orders(self, pair_symbol: str, start_ms: int, end_ms: int) -> list[OrderSnapshot]:
         self.get_all_orders_calls += 1
         self.last_start_ms = start_ms
         self.last_end_ms = end_ms
-        return [
-            snapshot
-            for snapshot in self.all_snapshots
-            if snapshot.pair_symbol == pair_symbol
-        ]
+        return [snapshot for snapshot in self.all_snapshots if snapshot.pair_symbol == pair_symbol]
 
     def get_order(self, order_id: str) -> OrderSnapshot:
         for snapshot in self.all_snapshots:
@@ -398,9 +390,7 @@ def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_s
     assert exchange.get_all_orders_calls == 1
 
     with restarted.state_store._connect() as conn:
-        conn.execute(
-            "UPDATE orders SET unknown_next_probe_at = 0 WHERE order_id = ?", ("101",)
-        )
+        conn.execute("UPDATE orders SET unknown_next_probe_at = 0 WHERE order_id = ?", ("101",))
 
     exchange.all_snapshots = [
         OrderSnapshot(
@@ -419,9 +409,7 @@ def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_s
 
     restarted.refresh_order_lifecycle(["BTC_TRY"])
     with restarted.state_store._connect() as conn:
-        row = conn.execute(
-            "SELECT status FROM orders WHERE order_id = ?", ("101",)
-        ).fetchone()
+        row = conn.execute("SELECT status FROM orders WHERE order_id = ?", ("101",)).fetchone()
 
     assert row is not None
     assert row["status"] == "filled"
@@ -521,9 +509,7 @@ def test_unknown_reprobe_clamps_corrupted_attempts(tmp_path) -> None:
     assert row["unknown_next_probe_at"] is not None
 
 
-def test_unknown_escalation_emits_metric_and_forces_observe_only(
-    tmp_path, monkeypatch
-) -> None:
+def test_unknown_escalation_emits_metric_and_forces_observe_only(tmp_path, monkeypatch) -> None:
     class FakeInstrumentation:
         def __init__(self) -> None:
             self.calls: list[tuple[str, int, dict | None]] = []
@@ -532,9 +518,7 @@ def test_unknown_escalation_emits_metric_and_forces_observe_only(
             self.calls.append((name, value, attrs))
 
     fake_metrics = FakeInstrumentation()
-    monkeypatch.setattr(
-        execution_service_module, "get_instrumentation", lambda: fake_metrics
-    )
+    monkeypatch.setattr(execution_service_module, "get_instrumentation", lambda: fake_metrics)
 
     exchange = LifecycleExchange()
     service = ExecutionService(
@@ -563,9 +547,7 @@ def test_unknown_escalation_emits_metric_and_forces_observe_only(
         )
     )
     with service.state_store._connect() as conn:
-        conn.execute(
-            "UPDATE orders SET unknown_next_probe_at = 0 WHERE order_id = ?", ("101",)
-        )
+        conn.execute("UPDATE orders SET unknown_next_probe_at = 0 WHERE order_id = ?", ("101",))
 
     service.refresh_order_lifecycle(["BTC_TRY"])
 

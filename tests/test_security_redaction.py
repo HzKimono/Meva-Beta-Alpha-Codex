@@ -70,12 +70,18 @@ def test_cli_json_outputs_doctor_and_canary_are_sanitized(monkeypatch, capsys) -
     assert FAKE_KEY not in doctor_out
     assert FAKE_SECRET not in doctor_out
 
-    monkeypatch.setattr(cli, "single_instance_lock", lambda **kwargs: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(
+        cli, "single_instance_lock", lambda **kwargs: __import__("contextlib").nullcontext()
+    )
     monkeypatch.setattr(cli, "_resolve_canary_symbol", lambda *_args, **_kwargs: "BTCTRY")
     monkeypatch.setattr(cli, "_check_canary_min_notional", lambda *_args, **_kwargs: (True, ""))
     monkeypatch.setattr(cli, "_run_canary_doctor_gate", lambda *_args, **_kwargs: ("ok", 0))
     monkeypatch.setattr(cli, "_print_effective_side_effects_state", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli, "_compute_live_policy", lambda *args, **kwargs: (None, type("P", (), {"allowed": True})()))
+    monkeypatch.setattr(
+        cli,
+        "_compute_live_policy",
+        lambda *args, **kwargs: (None, type("P", (), {"allowed": True})()),
+    )
     monkeypatch.setattr(cli, "run_cycle", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(cli, "_print_canary_evidence_commands", lambda *_args, **_kwargs: None)
 

@@ -26,9 +26,7 @@ class ReasonCode(StrEnum):
     EXECUTION_SUBMIT_DRY_RUN_SIMULATED = "execution_submit:dry_run_simulated"
     EXECUTION_REJECT_EXCHANGE_SUBMIT_FAILED = "execution_reject:exchange_submit_failed"
     EXECUTION_RECONCILE_CONFIRMED = "execution_reconcile:confirmed"
-    EXECUTION_RECONCILE_UNKNOWN_BOUNDED_EXCEEDED = (
-        "execution_reconcile:unknown_bounded_exceeded"
-    )
+    EXECUTION_RECONCILE_UNKNOWN_BOUNDED_EXCEEDED = "execution_reconcile:unknown_bounded_exceeded"
 
 
 RISK_REASON_CODE_MAP: dict[str, ReasonCode] = {

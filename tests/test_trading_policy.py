@@ -21,7 +21,9 @@ def _expected_reasons(
     return reasons
 
 
-def _case_id(dry_run: bool, kill_switch: bool, live_trading_enabled: bool, live_trading_ack: bool) -> str:
+def _case_id(
+    dry_run: bool, kill_switch: bool, live_trading_enabled: bool, live_trading_ack: bool
+) -> str:
     return (
         f"dry_run={int(dry_run)}|kill_switch={int(kill_switch)}|"
         f"live={int(live_trading_enabled)}|ack={int(live_trading_ack)}"
@@ -29,8 +31,13 @@ def _case_id(dry_run: bool, kill_switch: bool, live_trading_enabled: bool, live_
 
 
 _TRUTH_TABLE_CASES = [
-    pytest.param(dry_run, kill_switch, live_trading_enabled, live_trading_ack,
-                 id=_case_id(dry_run, kill_switch, live_trading_enabled, live_trading_ack))
+    pytest.param(
+        dry_run,
+        kill_switch,
+        live_trading_enabled,
+        live_trading_ack,
+        id=_case_id(dry_run, kill_switch, live_trading_enabled, live_trading_ack),
+    )
     for dry_run in (False, True)
     for kill_switch in (False, True)
     for live_trading_enabled in (False, True)
@@ -56,10 +63,7 @@ def test_validate_live_side_effects_policy_truth_table(
     )
 
     assert result.allowed is (
-        (not dry_run)
-        and (not kill_switch)
-        and live_trading_enabled
-        and live_trading_ack
+        (not dry_run) and (not kill_switch) and live_trading_enabled and live_trading_ack
     )
     assert result.reasons == _expected_reasons(
         dry_run=dry_run,
