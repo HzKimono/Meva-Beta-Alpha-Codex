@@ -1,17 +1,28 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 
 from btcbot.domain.intent import Intent
 from btcbot.risk.policy import RiskPolicy, RiskPolicyContext
+from btcbot.services.cycle_account_snapshot import CycleAccountSnapshot
 from btcbot.services.state_store import StateStore
+
+logger = logging.getLogger(__name__)
 
 
 class RiskService:
-    def __init__(self, risk_policy: RiskPolicy, state_store: StateStore) -> None:
+    def __init__(
+        self,
+        risk_policy: RiskPolicy,
+        state_store: StateStore,
+        *,
+        balance_debug_enabled: bool = False,
+    ) -> None:
         self.risk_policy = risk_policy
         self.state_store = state_store
+        self.balance_debug_enabled = balance_debug_enabled
 
     def filter(
         self,
@@ -20,6 +31,7 @@ class RiskService:
         *,
         try_cash_target: Decimal = Decimal("0"),
         investable_try: Decimal = Decimal("0"),
+        account_snapshot: CycleAccountSnapshot | None = None,
     ) -> list[Intent]:
         open_orders_by_symbol: dict[str, int] = {}
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
@@ -38,12 +50,34 @@ class RiskService:
             else {}
         )
 
+        resolved_cash_try_free = (
+            account_snapshot.cash_try_free
+            if account_snapshot is not None
+            else self._extract_try_balance()
+        )
+
+        if self.balance_debug_enabled:
+            logger.debug(
+                "risk_balance_snapshot",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "cash_try_free": str(resolved_cash_try_free),
+                        "try_cash_target": str(try_cash_target),
+                        "investable_try": str(investable_try),
+                        "source_fields": list(account_snapshot.source_fields)
+                        if account_snapshot is not None
+                        else ["state_store:get_latest_balances", "asset=TRY", "field=free"],
+                    }
+                },
+            )
+
         context = RiskPolicyContext(
             cycle_id=cycle_id,
             open_orders_by_symbol=open_orders_by_symbol,
             last_intent_ts_by_symbol_side=last_intent_ts,
             mark_prices={},
-            cash_try_free=self._extract_try_balance(),
+            cash_try_free=resolved_cash_try_free,
             try_cash_target=try_cash_target,
             investable_try=investable_try,
         )
