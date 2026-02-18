@@ -4,14 +4,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal
 
 from btcbot.domain.models import normalize_symbol
 
 
-class Signal(str, Enum):
+class Signal(StrEnum):
     BUY = "buy"
     SELL = "sell"
     HOLD = "hold"
