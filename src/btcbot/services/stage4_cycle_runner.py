@@ -291,10 +291,15 @@ class Stage4CycleRunner:
             for symbol, diag in cursor_diag.items():
                 diag["cursor_after"] = cursor_after.get(symbol)
                 ingested_count = int(diag.get("ingested_count", 0) or 0)
-                diag["deduped_count"] = (
-                    int(ledger_ingest.events_ignored) if ingested_count > 0 else 0
-                )
-                diag["persisted_count"] = max(0, ingested_count - int(diag["deduped_count"]))
+                deduped_count = 0
+                if (
+                    ingested_count > 0
+                    and ledger_ingest.events_inserted == 0
+                    and ledger_ingest.events_ignored >= ingested_count
+                ):
+                    deduped_count = ingested_count
+                diag["deduped_count"] = deduped_count
+                diag["persisted_count"] = max(0, ingested_count - deduped_count)
             logger.info(
                 "fills_cursor_diagnostics",
                 extra={"extra": {"cycle_id": cycle_id, "cursor": cursor_diag}},
@@ -499,6 +504,9 @@ class Stage4CycleRunner:
                 ]
                 bootstrap_intents, bootstrap_drop_reasons = self._build_intents(
                     cycle_id=cycle_id,
+                    min_order_notional_try=Decimal(str(settings.min_order_notional_try)),
+                    bootstrap_notional_try=Decimal(str(settings.stage5_bootstrap_notional_try)),
+                    max_notional_per_order_try=Decimal(str(settings.max_notional_per_order_try)),
                     symbols=[
                         symbol
                         for symbol in active_symbols
@@ -607,7 +615,13 @@ class Stage4CycleRunner:
                     prev = int(prev_stall_cycles.get(symbol, 0))
                     before_value = cursor_before.get(symbol)
                     after_value = cursor_after.get(symbol)
-                    if before_value is not None and before_value == after_value:
+                    dedupe_only_cycle = (
+                        int(cursor_diag.get(symbol, {}).get("ingested_count", 0) or 0) > 0
+                        and int(cursor_diag.get(symbol, {}).get("persisted_count", 0) or 0) == 0
+                        and ledger_ingest.events_inserted == 0
+                        and ledger_ingest.events_ignored > 0
+                    )
+                    if before_value is not None and before_value == after_value and not dedupe_only_cycle:
                         cursor_stall_by_symbol[symbol] = prev + 1
                     else:
                         cursor_stall_by_symbol[symbol] = 0
@@ -772,6 +786,8 @@ class Stage4CycleRunner:
                 cycle_ended_at=cycle_now,
                 mode=final_mode.value,
                 fills=fills,
+                fills_fetched_count=fills_fetched,
+                fills_persisted_count=accounting_service.last_applied_fills_count,
                 ledger_append_result=ledger_ingest,
                 pnl_report=pnl_report,
                 orders_submitted=execution_report.submitted,
@@ -833,7 +849,7 @@ class Stage4CycleRunner:
                 "unknown_closed": len(reconcile_result.mark_unknown_closed),
                 "external_missing_client_id": len(reconcile_result.external_missing_client_id),
                 "fills_fetched": fills_fetched,
-                "fills_applied": len(fills),
+                "fills_applied": accounting_service.last_applied_fills_count,
                 "cursor_before": sum(1 for value in cursor_before.values() if value is not None),
                 "cursor_after": sum(1 for value in cursor_after.values() if value is not None),
                 "planned_actions": len(lifecycle_plan.actions),
@@ -1318,6 +1334,9 @@ class Stage4CycleRunner:
         self,
         *,
         cycle_id: str,
+        min_order_notional_try: Decimal = Decimal("10"),
+        bootstrap_notional_try: Decimal = Decimal("50"),
+        max_notional_per_order_try: Decimal = Decimal("0"),
         symbols: list[str],
         mark_prices: dict[str, Decimal],
         try_cash: Decimal,
@@ -1350,21 +1369,31 @@ class Stage4CycleRunner:
             if (normalized, "buy") in existing_keys:
                 continue
 
-            budget = min(try_cash, Decimal("50"))
-            if budget <= 0:
+            rules = build_exchange_rules(rules_source)
+            min_required_notional_try = max(min_order_notional_try, rules.min_notional_try)
+            if try_cash < min_required_notional_try:
+                self._inc_reason(drop_reasons, "cash_below_min_notional")
                 continue
+
+            budget = min(try_cash, bootstrap_notional_try)
+            if max_notional_per_order_try > 0:
+                budget = min(budget, max_notional_per_order_try)
+            if budget < min_required_notional_try:
+                self._inc_reason(drop_reasons, "bootstrap_budget_below_min_notional")
+                continue
+
             qty_raw = budget / mark
             if qty_raw <= 0:
                 continue
 
-            rules = build_exchange_rules(rules_source)
             price_q = Quantizer.quantize_price(mark, rules)
             qty_q = Quantizer.quantize_qty(qty_raw, rules)
             if qty_q <= 0:
                 self._inc_reason(drop_reasons, "qty_became_zero")
                 continue
-            if not Quantizer.validate_min_notional(price_q, qty_q, rules):
-                self._inc_reason(drop_reasons, "min_notional")
+            order_notional_try = price_q * qty_q
+            if order_notional_try < min_required_notional_try:
+                self._inc_reason(drop_reasons, "min_notional_after_quantize")
                 continue
 
             intents.append(

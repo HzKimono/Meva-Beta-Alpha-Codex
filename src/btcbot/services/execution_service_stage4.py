@@ -120,10 +120,28 @@ class ExecutionService:
                         continue
                 q_price = Quantizer.quantize_price(action.price, rules)
                 q_qty = Quantizer.quantize_qty(action.qty, rules)
+                order_notional_try = q_price * q_qty
                 if not Quantizer.validate_min_notional(q_price, q_qty, rules):
+                    reason = (
+                        "min_notional_violation:"
+                        f"notional_try={order_notional_try}:"
+                        f"required_try={rules.min_notional_try}"
+                    )
+                    logger.info(
+                        "submit_rejected_min_notional",
+                        extra={
+                            "extra": {
+                                "symbol": action.symbol,
+                                "side": action.side,
+                                "client_order_id": action.client_order_id,
+                                "order_notional_try": str(order_notional_try),
+                                "required_min_notional_try": str(rules.min_notional_try),
+                            }
+                        },
+                    )
                     self.state_store.record_stage4_order_rejected(
                         action.client_order_id,
-                        "min_notional_violation",
+                        reason,
                         symbol=action.symbol,
                         side=action.side,
                         price=q_price,
