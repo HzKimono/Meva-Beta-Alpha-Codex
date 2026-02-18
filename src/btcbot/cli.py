@@ -41,6 +41,7 @@ from btcbot.security.secrets import (
     log_secret_validation,
     validate_secret_controls,
 )
+from btcbot.services.cycle_account_snapshot import build_cycle_account_snapshot
 from btcbot.services.doctor import (
     DoctorReport,
     doctor_status,
@@ -1187,6 +1188,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                         ),
                     ),
                     state_store=state_store,
+                    balance_debug_enabled=settings.risk_balance_debug,
                 )
 
                 balances = portfolio_service.get_balances()
@@ -1285,18 +1287,11 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     )
 
                 fills_inserted = accounting_service.refresh(settings.symbols, mark_prices)
-                cash_try_free = Decimal(
-                    str(
-                        next(
-                            (
-                                b.free
-                                for b in balances
-                                if str(getattr(b, "asset", "")).upper() == "TRY"
-                            ),
-                            0.0,
-                        )
-                    )
+                account_snapshot = build_cycle_account_snapshot(
+                    balances,
+                    quote_asset=getattr(settings, "universe_quote_currency", "TRY"),
                 )
+                cash_try_free = account_snapshot.cash_try_free
                 try_cash_target = Decimal(str(settings.try_cash_target))
                 investable_try = max(Decimal("0"), cash_try_free - try_cash_target)
                 raw_intents = strategy_service.generate(
@@ -1307,6 +1302,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     intents=raw_intents,
                     try_cash_target=try_cash_target,
                     investable_try=investable_try,
+                    account_snapshot=account_snapshot,
                 )
 
                 _ = sweep_service.build_order_intents(

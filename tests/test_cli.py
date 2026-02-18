@@ -15,9 +15,11 @@ from btcbot.adapters.btcturk_http import (
 )
 from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
+from btcbot.domain.intent import Intent
 from btcbot.domain.models import Balance, OrderSide, PairInfo
 from btcbot.domain.stage4 import Quantizer
 from btcbot.logging_utils import JsonFormatter
+from btcbot.risk.exchange_rules import ExchangeRules
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner, Stage4InvariantError
 
 
@@ -1588,3 +1590,165 @@ def test_run_cycle_stale_market_data_fail_closed(monkeypatch, caplog) -> None:
 
     assert audits
     assert audits[-1]["decisions"] == ["market_data:stale"]
+
+
+def test_run_cycle_uses_single_cash_snapshot_for_risk_and_summary(monkeypatch, caplog) -> None:
+    import btcbot.cli as cli
+
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+        def find_open_or_unknown_orders(self):
+            return []
+
+        def get_last_intent_ts_by_symbol_side(self):
+            return {}
+
+        def record_intent(self, intent, now) -> None:
+            del intent, now
+
+        def record_action(self, cycle_id: str, action_type: str, payload_hash: str):
+            del cycle_id, action_type
+            return payload_hash
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return [
+                Balance(asset="TRY", free=1306.0, locked=0.0),
+                Balance(asset="BTC", free=0.0, locked=0.0),
+            ]
+
+    class Freshness:
+        is_stale = False
+
+    class FakeMarketDataService:
+        def __init__(self, exchange, **kwargs) -> None:
+            del exchange, kwargs
+
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
+            del max_age_ms
+            return {symbol: 100.0 for symbol in symbols}, Freshness()
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.kill_switch = False
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del intents, cycle_id
+            return 0
+
+    class FakeAccountingService:
+        def __init__(self, exchange, state_store) -> None:
+            del exchange, state_store
+
+        def refresh(self, symbols, mark_prices):
+            del symbols, mark_prices
+            return 0
+
+        def get_positions(self):
+            return []
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, **kwargs):
+            cycle_id = kwargs["cycle_id"]
+            return [
+                Intent.create(
+                    cycle_id=cycle_id,
+                    symbol="BTCTRY",
+                    side=OrderSide.BUY,
+                    qty=Decimal("20"),
+                    limit_price=Decimal("100"),
+                    reason="force cash reserve block",
+                )
+            ]
+
+    class FakeStartupRecoveryService:
+        def run(self, **kwargs):
+            del kwargs
+
+            class Result:
+                observe_only_required = False
+                invariant_errors: list[str] = []
+                observe_only_reason: str | None = None
+
+            return Result()
+
+    class StaticRulesProvider:
+        def __init__(self, market_data_service) -> None:
+            del market_data_service
+
+        def get_rules(self, symbol: str):
+            del symbol
+            return ExchangeRules(
+                min_notional=Decimal("0"),
+                price_tick=Decimal("0.01"),
+                qty_step=Decimal("0.0001"),
+            )
+
+    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+    monkeypatch.setattr(cli, "AccountingService", FakeAccountingService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "StartupRecoveryService", FakeStartupRecoveryService)
+    monkeypatch.setattr(cli, "MarketDataExchangeRulesProvider", StaticRulesProvider)
+
+    caplog.set_level("INFO")
+    settings = Settings(
+        DRY_RUN=True,
+        SAFE_MODE=False,
+        KILL_SWITCH=False,
+        TRY_CASH_TARGET="300",
+        SYMBOLS='["BTCTRY"]',
+        MAX_ORDERS_PER_CYCLE=1,
+    )
+
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+
+    decision_payloads = [
+        json.loads(JsonFormatter().format(record))
+        for record in caplog.records
+        if record.getMessage() == "decision_event"
+    ]
+    reserve_blocks = [
+        payload
+        for payload in decision_payloads
+        if payload.get("reason_code") == "risk_block:cash_reserve_target"
+    ]
+    assert reserve_blocks
+
+    completed_payloads = [
+        json.loads(JsonFormatter().format(record))
+        for record in caplog.records
+        if record.getMessage() == "Cycle completed"
+    ]
+    assert completed_payloads
+
+    reserve_payload = reserve_blocks[-1]
+    cycle_payload = completed_payloads[-1]
+    assert reserve_payload["cash_try_free"] == cycle_payload["cash_try_free"]
+    assert reserve_payload["try_cash_target"] == cycle_payload["try_cash_target"]
+    assert reserve_payload["investable_try"] == cycle_payload["investable_try"]
+    assert cycle_payload["cash_try_free"] == "1306.0"
+    assert cycle_payload["investable_try"] == "1006.0"

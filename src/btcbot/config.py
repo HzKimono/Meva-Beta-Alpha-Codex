@@ -250,6 +250,7 @@ class Settings(BaseSettings):
     )
     observability_prometheus_port: int = Field(default=9464, alias="OBSERVABILITY_PROMETHEUS_PORT")
     safe_mode: bool = Field(default=True, alias="SAFE_MODE")
+    risk_balance_debug: bool = Field(default=False, alias="RISK_BALANCE_DEBUG")
     agent_policy_enabled: bool = Field(default=False, alias="AGENT_POLICY_ENABLED")
     agent_policy_provider: str = Field(default="rule", alias="AGENT_POLICY_PROVIDER")
     agent_observe_only: bool = Field(default=False, alias="AGENT_OBSERVE_ONLY")
