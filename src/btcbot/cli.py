@@ -1287,13 +1287,16 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     )
 
                 fills_inserted = accounting_service.refresh(settings.symbols, mark_prices)
+                try_cash_target = Decimal(str(settings.try_cash_target))
                 account_snapshot = build_cycle_account_snapshot(
                     balances,
+                    try_cash_target=try_cash_target,
+                    now_utc=datetime.now(UTC),
                     quote_asset=getattr(settings, "universe_quote_currency", "TRY"),
                 )
                 cash_try_free = account_snapshot.cash_try_free
-                try_cash_target = Decimal(str(settings.try_cash_target))
-                investable_try = max(Decimal("0"), cash_try_free - try_cash_target)
+                investable_try = account_snapshot.investable_try
+                try_cash_target = account_snapshot.try_cash_target
                 raw_intents = strategy_service.generate(
                     cycle_id=cycle_id, symbols=settings.symbols, balances=balances
                 )

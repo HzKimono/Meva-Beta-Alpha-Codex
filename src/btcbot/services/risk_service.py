@@ -55,6 +55,12 @@ class RiskService:
             if account_snapshot is not None
             else self._extract_try_balance()
         )
+        resolved_try_cash_target = (
+            account_snapshot.try_cash_target if account_snapshot is not None else try_cash_target
+        )
+        resolved_investable_try = (
+            account_snapshot.investable_try if account_snapshot is not None else investable_try
+        )
 
         if self.balance_debug_enabled:
             logger.debug(
@@ -63,11 +69,16 @@ class RiskService:
                     "extra": {
                         "cycle_id": cycle_id,
                         "cash_try_free": str(resolved_cash_try_free),
-                        "try_cash_target": str(try_cash_target),
-                        "investable_try": str(investable_try),
+                        "try_cash_target": str(resolved_try_cash_target),
+                        "investable_try": str(resolved_investable_try),
+                        "source_name": (
+                            account_snapshot.source_name
+                            if account_snapshot is not None
+                            else "state_store:get_latest_balances"
+                        ),
                         "source_fields": list(account_snapshot.source_fields)
                         if account_snapshot is not None
-                        else ["state_store:get_latest_balances", "asset=TRY", "field=free"],
+                        else ["balance.asset", "balance.free", "asset=TRY"],
                     }
                 },
             )
@@ -78,8 +89,8 @@ class RiskService:
             last_intent_ts_by_symbol_side=last_intent_ts,
             mark_prices={},
             cash_try_free=resolved_cash_try_free,
-            try_cash_target=try_cash_target,
-            investable_try=investable_try,
+            try_cash_target=resolved_try_cash_target,
+            investable_try=resolved_investable_try,
         )
         approved = self.risk_policy.evaluate(context, intents)
         now = datetime.now(UTC)
