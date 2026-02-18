@@ -5,7 +5,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
-import pytest
 
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.models import (
@@ -187,7 +186,6 @@ class ScriptedExchange(ExchangeClient):
         return order_id
 
 
-
 def _intent(cycle_id: str = "cycle-a") -> OrderIntent:
     return OrderIntent(
         symbol="BTC_TRY",
@@ -197,7 +195,6 @@ def _intent(cycle_id: str = "cycle-a") -> OrderIntent:
         notional=10.0,
         cycle_id=cycle_id,
     )
-
 
 
 def _service(tmp_path, exchange: ScriptedExchange, **kwargs) -> ExecutionService:
@@ -287,13 +284,19 @@ def test_partial_fill_then_cancel_request(tmp_path) -> None:
 
 def test_restart_recovery_with_unknown_record_converges(tmp_path) -> None:
     exchange = ScriptedExchange()
-    service = _service(tmp_path, exchange, unknown_reprobe_initial_seconds=1, unknown_reprobe_escalation_attempts=3)
+    service = _service(
+        tmp_path, exchange, unknown_reprobe_initial_seconds=1, unknown_reprobe_escalation_attempts=3
+    )
     assert service.execute_intents([_intent("cycle-restart")]) == 1
 
     order_id = next(iter(exchange.orders_by_id.keys()))
-    service.state_store.update_order_status(order_id=order_id, status=OrderStatus.UNKNOWN, reconciled=True)
+    service.state_store.update_order_status(
+        order_id=order_id, status=OrderStatus.UNKNOWN, reconciled=True
+    )
 
-    restarted = _service(tmp_path, exchange, unknown_reprobe_initial_seconds=1, unknown_reprobe_escalation_attempts=3)
+    restarted = _service(
+        tmp_path, exchange, unknown_reprobe_initial_seconds=1, unknown_reprobe_escalation_attempts=3
+    )
     assert restarted.execute_intents([_intent("cycle-restart")]) == 0
     restarted.refresh_order_lifecycle(["BTC_TRY"])
     assert restarted.safe_mode is False
@@ -306,7 +309,9 @@ def test_eventual_visibility_open_orders_resolves_unknown(tmp_path) -> None:
     assert service.execute_intents([_intent("cycle-late-visible")]) == 1
 
     order_id = next(iter(exchange.orders_by_id.keys()))
-    service.state_store.update_order_status(order_id=order_id, status=OrderStatus.UNKNOWN, reconciled=True)
+    service.state_store.update_order_status(
+        order_id=order_id, status=OrderStatus.UNKNOWN, reconciled=True
+    )
     service.refresh_order_lifecycle(["BTC_TRY"])
 
     with service.state_store._connect() as conn:

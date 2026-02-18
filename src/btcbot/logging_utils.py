@@ -29,7 +29,9 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             exc_type, exc_value, _ = record.exc_info
             payload["error_type"] = exc_type.__name__ if exc_type else "Exception"
-            payload["error_message"] = sanitize_text(str(exc_value)) if exc_value is not None else ""
+            payload["error_message"] = (
+                sanitize_text(str(exc_value)) if exc_value is not None else ""
+            )
             payload["traceback"] = sanitize_text(self.formatException(record.exc_info))
         elif record.exc_text:
             payload["traceback"] = sanitize_text(record.exc_text)

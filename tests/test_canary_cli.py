@@ -33,7 +33,9 @@ def test_canary_aborts_on_doctor_fail(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(cli, "run_health_checks", lambda *args, **kwargs: _DoctorReport("fail"))
     monkeypatch.setattr(cli, "doctor_status", lambda report: report._status)
-    monkeypatch.setattr(cli, "run_cycle", lambda *args, **kwargs: called.__setitem__("run_cycle", 1) or 0)
+    monkeypatch.setattr(
+        cli, "run_cycle", lambda *args, **kwargs: called.__setitem__("run_cycle", 1) or 0
+    )
     monkeypatch.setattr(cli, "_check_canary_min_notional", lambda *args, **kwargs: (True, ""))
 
     rc = cli.run_canary(
@@ -60,7 +62,9 @@ def test_canary_aborts_on_doctor_warn_without_allow_warn(monkeypatch, tmp_path: 
 
     monkeypatch.setattr(cli, "run_health_checks", lambda *args, **kwargs: _DoctorReport("warn"))
     monkeypatch.setattr(cli, "doctor_status", lambda report: report._status)
-    monkeypatch.setattr(cli, "run_cycle", lambda *args, **kwargs: called.__setitem__("run_cycle", 1) or 0)
+    monkeypatch.setattr(
+        cli, "run_cycle", lambda *args, **kwargs: called.__setitem__("run_cycle", 1) or 0
+    )
     monkeypatch.setattr(cli, "_check_canary_min_notional", lambda *args, **kwargs: (True, ""))
 
     rc = cli.run_canary(
@@ -178,7 +182,9 @@ def test_canary_requires_db_path(monkeypatch, capsys, tmp_path: Path) -> None:
     monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
     monkeypatch.setattr(cli, "configure_instrumentation", lambda **kwargs: None)
     monkeypatch.setattr(cli, "_apply_effective_universe", lambda s: s)
-    monkeypatch.setattr(cli, "run_cycle", lambda *args, **kwargs: called.__setitem__("run_cycle", 1) or 0)
+    monkeypatch.setattr(
+        cli, "run_cycle", lambda *args, **kwargs: called.__setitem__("run_cycle", 1) or 0
+    )
     monkeypatch.setattr(
         cli.sys,
         "argv",

@@ -56,9 +56,7 @@ def test_orders_unknown_retry_columns_are_added_for_legacy_db(tmp_path) -> None:
     StateStore(str(db_path))
 
     with sqlite3.connect(str(db_path)) as conn:
-        columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()
-        }
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
 
     assert "unknown_first_seen_at" in columns
     assert "unknown_last_probe_at" in columns
@@ -70,30 +68,21 @@ def test_orders_unknown_retry_columns_are_added_for_legacy_db(tmp_path) -> None:
 def test_record_action_returns_action_id_and_dedupes(tmp_path) -> None:
     db_path = str(tmp_path / "state.db")
     first = StateStore(db_path=db_path)
-    action_id = first.record_action(
-        "c1", "sweep_plan", "hash-1", dedupe_window_seconds=3600
-    )
+    action_id = first.record_action("c1", "sweep_plan", "hash-1", dedupe_window_seconds=3600)
     assert action_id is not None
 
     second = StateStore(db_path=db_path)
-    assert (
-        second.record_action("c2", "sweep_plan", "hash-1", dedupe_window_seconds=3600)
-        is None
-    )
+    assert second.record_action("c2", "sweep_plan", "hash-1", dedupe_window_seconds=3600) is None
     assert second.action_count("sweep_plan", "hash-1") == 1
 
 
 def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.reserve_idempotency_key(
-        "place_order", "k-1", "payload-a", ttl_seconds=60
-    )
+    first = store.reserve_idempotency_key("place_order", "k-1", "payload-a", ttl_seconds=60)
     assert first.reserved is True
 
     with pytest.raises(IdempotencyConflictError):
-        store.reserve_idempotency_key(
-            "place_order", "k-1", "payload-b", ttl_seconds=60
-        )
+        store.reserve_idempotency_key("place_order", "k-1", "payload-b", ttl_seconds=60)
 
 
 def test_reserve_idempotency_defaults_recovery_tracking_fields(tmp_path) -> None:
@@ -108,12 +97,8 @@ def test_reserve_idempotency_defaults_recovery_tracking_fields(tmp_path) -> None
 
 def test_reserve_idempotency_existing_key_returns_not_reserved(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.reserve_idempotency_key(
-        "cancel_order", "cancel:o1", "hash-1", ttl_seconds=60
-    )
-    second = store.reserve_idempotency_key(
-        "cancel_order", "cancel:o1", "hash-1", ttl_seconds=60
-    )
+    first = store.reserve_idempotency_key("cancel_order", "cancel:o1", "hash-1", ttl_seconds=60)
+    second = store.reserve_idempotency_key("cancel_order", "cancel:o1", "hash-1", ttl_seconds=60)
 
     assert first.reserved is True
     assert second.reserved is False
@@ -137,15 +122,11 @@ def test_reserve_idempotency_stale_pending_without_metadata_is_recovered(
 
     monkeypatch.setattr(state_store_module, "datetime", _T0)
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.reserve_idempotency_key(
-        "cancel_order", "cancel:stale", "hash-1", ttl_seconds=60
-    )
+    first = store.reserve_idempotency_key("cancel_order", "cancel:stale", "hash-1", ttl_seconds=60)
     assert first.reserved is True
 
     monkeypatch.setattr(state_store_module, "datetime", _T1)
-    second = store.reserve_idempotency_key(
-        "cancel_order", "cancel:stale", "hash-1", ttl_seconds=60
-    )
+    second = store.reserve_idempotency_key("cancel_order", "cancel:stale", "hash-1", ttl_seconds=60)
 
     assert second.reserved is True
     assert second.status == "PENDING"
@@ -153,9 +134,7 @@ def test_reserve_idempotency_stale_pending_without_metadata_is_recovered(
 
 def test_reserve_idempotency_can_promote_simulated(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.reserve_idempotency_key(
-        "place_order", "k-sim", "payload-a", ttl_seconds=60
-    )
+    first = store.reserve_idempotency_key("place_order", "k-sim", "payload-a", ttl_seconds=60)
     store.finalize_idempotency_key(
         "place_order",
         "k-sim",
@@ -165,9 +144,7 @@ def test_reserve_idempotency_can_promote_simulated(tmp_path) -> None:
         status="SIMULATED",
     )
 
-    blocked = store.reserve_idempotency_key(
-        "place_order", "k-sim", "payload-a", ttl_seconds=60
-    )
+    blocked = store.reserve_idempotency_key("place_order", "k-sim", "payload-a", ttl_seconds=60)
     promoted = store.reserve_idempotency_key(
         "place_order",
         "k-sim",
@@ -207,9 +184,7 @@ def test_attach_action_metadata_updates_exact_row(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
 
     first_id = store.record_action("c1", "place_order", "same")
-    second_id = store.record_action(
-        "c2", "place_order", "same-2", dedupe_window_seconds=0
-    )
+    second_id = store.record_action("c2", "place_order", "same-2", dedupe_window_seconds=0)
     assert first_id is not None
     assert second_id is not None
 
@@ -442,9 +417,7 @@ def test_connect_context_manager_commits_and_closes(monkeypatch) -> None:
             self.closed = True
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(
-        state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn
-    )
+    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -478,9 +451,7 @@ def test_connect_context_manager_rolls_back_and_closes_on_error(monkeypatch) -> 
             self.closed = True
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(
-        state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn
-    )
+    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -506,21 +477,15 @@ def test_record_action_dedupes_in_same_bucket(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(state_store_module, "datetime", FixedDateTime)
 
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.record_action(
-        "c1", "place_order", "hash-1", dedupe_window_seconds=300
-    )
-    second = store.record_action(
-        "c2", "place_order", "hash-1", dedupe_window_seconds=300
-    )
+    first = store.record_action("c1", "place_order", "hash-1", dedupe_window_seconds=300)
+    second = store.record_action("c2", "place_order", "hash-1", dedupe_window_seconds=300)
 
     assert first is not None
     assert second is None
     assert store.action_count("place_order", "hash-1") == 1
 
 
-def test_record_action_allows_same_payload_in_different_bucket(
-    monkeypatch, tmp_path
-) -> None:
+def test_record_action_allows_same_payload_in_different_bucket(monkeypatch, tmp_path) -> None:
     class StepDateTime:
         now_epoch = 1_000
 
@@ -534,12 +499,8 @@ def test_record_action_allows_same_payload_in_different_bucket(
     monkeypatch.setattr(state_store_module, "datetime", StepDateTime)
 
     store = StateStore(db_path=str(tmp_path / "state.db"))
-    first = store.record_action(
-        "c1", "place_order", "hash-2", dedupe_window_seconds=300
-    )
-    second = store.record_action(
-        "c2", "place_order", "hash-2", dedupe_window_seconds=300
-    )
+    first = store.record_action("c1", "place_order", "hash-2", dedupe_window_seconds=300)
+    second = store.record_action("c2", "place_order", "hash-2", dedupe_window_seconds=300)
 
     assert first is not None
     assert second is not None
@@ -566,9 +527,7 @@ def test_connect_close_failure_does_not_mask_primary_error(monkeypatch) -> None:
             raise RuntimeError("close boom")
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(
-        state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn
-    )
+    monkeypatch.setattr(state_store_module.sqlite3, "connect", lambda *args, **kwargs: fake_conn)
 
     store = object.__new__(StateStore)
     store.db_path = "fake.db"
@@ -675,9 +634,7 @@ def test_stage7_risk_reasons_json_is_stable_sorted(tmp_path) -> None:
     store.save_stage7_risk_decision(cycle_id="c2", decision=decision)
 
     with sqlite3.connect(str(db_path)) as conn:
-        row = conn.execute(
-            "SELECT reasons_json FROM stage7_risk_decisions LIMIT 1"
-        ).fetchone()
+        row = conn.execute("SELECT reasons_json FROM stage7_risk_decisions LIMIT 1").fetchone()
 
     assert row is not None
     assert json.loads(row[0]) == {"a": 1, "z": 2}

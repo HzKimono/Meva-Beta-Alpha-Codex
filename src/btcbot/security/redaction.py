@@ -62,7 +62,9 @@ def sanitize_mapping(d: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, Mapping):
             sanitized[key_str] = sanitize_mapping(value)
         elif isinstance(value, list):
-            sanitized[key_str] = [sanitize_mapping(item) if isinstance(item, Mapping) else item for item in value]
+            sanitized[key_str] = [
+                sanitize_mapping(item) if isinstance(item, Mapping) else item for item in value
+            ]
         elif isinstance(value, tuple):
             sanitized[key_str] = tuple(
                 sanitize_mapping(item) if isinstance(item, Mapping) else item for item in value
