@@ -309,6 +309,7 @@ def test_runner_reject_and_cursor_stall_anomalies_use_real_inputs(monkeypatch, t
                     "canceled": 0,
                     "simulated": 0,
                     "rejected": 3,
+                    "rejected_min_notional": 0,
                 },
             )()
 

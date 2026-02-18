@@ -33,6 +33,7 @@ class AccountingService:
         self.exchange = exchange
         self.state_store = state_store
         self.lookback_minutes = lookback_minutes
+        self.last_applied_fills_count = 0
 
     def fetch_new_fills(self, symbol: str) -> FetchFillsResult:
         cursor_key = f"fills_cursor:{normalize_symbol(symbol)}"
@@ -94,9 +95,11 @@ class AccountingService:
         try_cash: Decimal,
     ) -> PnLSnapshot:
         fee_notes: list[str] = []
+        applied_fills_count = 0
         for fill in fills:
             if not self.state_store.mark_fill_applied(fill.fill_id):
                 continue
+            applied_fills_count += 1
             self.state_store.save_stage4_fill(fill)
             position = self.state_store.get_stage4_position(fill.symbol) or Position(
                 symbol=fill.symbol,
@@ -170,4 +173,5 @@ class AccountingService:
                 counts={"fills": len(fills)},
                 decisions=fee_notes,
             )
+        self.last_applied_fills_count = applied_fills_count
         return snapshot

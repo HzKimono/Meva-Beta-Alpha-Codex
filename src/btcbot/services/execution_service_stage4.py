@@ -20,6 +20,7 @@ class ExecutionReport:
     canceled: int
     simulated: int
     rejected: int
+    rejected_min_notional: int
 
 
 class ExecutionService:
@@ -44,7 +45,7 @@ class ExecutionService:
         if self.settings.kill_switch:
             logger.warning("kill_switch_active_blocking_writes")
             return ExecutionReport(
-                executed_total=0, submitted=0, canceled=0, simulated=0, rejected=0
+                executed_total=0, submitted=0, canceled=0, simulated=0, rejected=0, rejected_min_notional=0
             )
         if self.settings.live_trading and not self.settings.is_live_trading_enabled():
             raise RuntimeError("LIVE_TRADING requires LIVE_TRADING_ACK=I_UNDERSTAND")
@@ -54,6 +55,7 @@ class ExecutionService:
         canceled = 0
         simulated = 0
         rejected = 0
+        rejected_min_notional = 0
         for action in actions:
             if action.action_type == LifecycleActionType.SUBMIT:
                 if not action.client_order_id:
@@ -120,10 +122,28 @@ class ExecutionService:
                         continue
                 q_price = Quantizer.quantize_price(action.price, rules)
                 q_qty = Quantizer.quantize_qty(action.qty, rules)
+                order_notional_try = q_price * q_qty
                 if not Quantizer.validate_min_notional(q_price, q_qty, rules):
+                    reason = (
+                        "min_notional_violation:"
+                        f"notional_try={order_notional_try}:"
+                        f"required_try={rules.min_notional_try}"
+                    )
+                    logger.info(
+                        "submit_rejected_min_notional",
+                        extra={
+                            "extra": {
+                                "symbol": action.symbol,
+                                "side": action.side,
+                                "client_order_id": action.client_order_id,
+                                "order_notional_try": str(order_notional_try),
+                                "required_min_notional_try": str(rules.min_notional_try),
+                            }
+                        },
+                    )
                     self.state_store.record_stage4_order_rejected(
                         action.client_order_id,
-                        "min_notional_violation",
+                        reason,
                         symbol=action.symbol,
                         side=action.side,
                         price=q_price,
@@ -131,6 +151,7 @@ class ExecutionService:
                         mode=("live" if live_mode else "dry_run"),
                     )
                     rejected += 1
+                    rejected_min_notional += 1
                     continue
 
                 if not live_mode:
@@ -216,4 +237,5 @@ class ExecutionService:
             canceled=canceled,
             simulated=simulated,
             rejected=rejected,
+            rejected_min_notional=rejected_min_notional,
         )
