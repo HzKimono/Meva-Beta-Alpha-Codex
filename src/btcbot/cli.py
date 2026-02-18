@@ -1339,6 +1339,8 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     len(approved_intents) if (settings.kill_switch or effective_safe_mode) else 0
                 )
                 suppressed_dry_run = len(approved_intents) if dry_run else 0
+                rejected_by_risk = max(0, len(raw_intents) - len(approved_intents))
+                top_reject_reasons = ["risk_policy:blocked"] if rejected_by_risk else []
                 logger.info(
                     "Cycle completed",
                     extra={
@@ -1354,6 +1356,9 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                             "orders_submitted": placed,
                             "orders_blocked_by_gate": blocked_by_gate,
                             "orders_suppressed_dry_run": suppressed_dry_run,
+                            "orders_simulated": suppressed_dry_run,
+                            "rejected_intents": rejected_by_risk,
+                            "top_reject_reasons": top_reject_reasons,
                             "orders_failed_exchange": max(
                                 0,
                                 len(approved_intents)

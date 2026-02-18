@@ -263,8 +263,8 @@ def test_run_cycle_dry_run_emits_decision_event_with_envelope_keys(monkeypatch, 
             return 0
 
     class FakeRiskService:
-        def __init__(self, risk_policy, state_store) -> None:
-            del risk_policy, state_store
+        def __init__(self, risk_policy, state_store, **kwargs) -> None:
+            del risk_policy, state_store, kwargs
 
         def filter(self, cycle_id: str, intents, **kwargs):
             del cycle_id, kwargs
@@ -291,6 +291,92 @@ def test_run_cycle_dry_run_emits_decision_event_with_envelope_keys(monkeypatch, 
     payload = json.loads(JsonFormatter().format(decision_events[0]))
     for key in ("cycle_id", "decision_layer", "reason_code", "action"):
         assert key in payload
+
+
+def test_run_cycle_accepts_forward_compatible_risk_service_kwargs(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def get_latest_balances(self):
+            return []
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
+            del symbols
+            return {}, _Freshness(max_age_ms=max_age_ms)
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeRiskService:
+        def __init__(self, risk_policy, state_store, **kwargs) -> None:
+            del risk_policy, state_store
+            captured.update(kwargs)
+
+        def filter(self, cycle_id: str, intents, **kwargs):
+            del cycle_id, kwargs
+            return intents
+
+    class FakeSweepService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def build_order_intents(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del intents, cycle_id
+            return 0
+
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+    monkeypatch.setattr(cli, "SweepService", FakeSweepService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SAFE_MODE=False, RISK_BALANCE_DEBUG=True)
+
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+    assert captured["balance_debug_enabled"] is True
 
 
 def test_run_cycle_returns_two_on_configuration_error(monkeypatch) -> None:
@@ -1546,8 +1632,8 @@ def test_run_cycle_stale_market_data_fail_closed(monkeypatch, caplog) -> None:
             return []
 
     class FakeRiskService:
-        def __init__(self, risk_policy, state_store) -> None:
-            del risk_policy, state_store
+        def __init__(self, risk_policy, state_store, **kwargs) -> None:
+            del risk_policy, state_store, kwargs
 
         def filter(self, cycle_id: str, intents, **kwargs):
             calls.append("risk.filter")

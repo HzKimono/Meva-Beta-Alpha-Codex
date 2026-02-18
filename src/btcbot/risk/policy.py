@@ -237,6 +237,12 @@ class RiskPolicy:
                         "investable_try": str(context.investable_try),
                     }
                 )
+        if context is not None:
+            normalized_symbol = normalize_symbol(intent.symbol)
+            extra_payload["open_orders_for_symbol"] = str(
+                context.open_orders_by_symbol.get(normalized_symbol, 0)
+            )
+
         if reason == ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET and context is not None:
             extra_payload.update(
                 {
