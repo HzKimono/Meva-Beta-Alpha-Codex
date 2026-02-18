@@ -8,6 +8,7 @@ from decimal import Decimal
 from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import OrderSide, PairInfo
+from btcbot.domain.stage4 import Order
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
@@ -428,3 +429,45 @@ def test_bootstrap_intents_skip_when_budget_below_min_notional() -> None:
 
     assert intents == []
     assert drop_reasons.get("bootstrap_budget_below_min_notional") == 1
+
+
+def test_bootstrap_intents_skip_when_open_buy_order_exists() -> None:
+    runner = Stage4CycleRunner()
+    pair = PairInfo(
+        pairSymbol="BTCTRY",
+        numeratorScale=6,
+        denominatorScale=2,
+        minTotalAmount=Decimal("10"),
+        tickSize=Decimal("0.1"),
+        stepSize=Decimal("0.0001"),
+    )
+    now = datetime.now(UTC)
+    open_buy = Order(
+        symbol="BTCTRY",
+        side="buy",
+        type="limit",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        status="open",
+        created_at=now,
+        updated_at=now,
+        client_order_id="cid-open-buy",
+        mode="live",
+    )
+
+    intents, drop_reasons = runner._build_intents(
+        cycle_id="cycle-1",
+        symbols=["BTCTRY"],
+        mark_prices={"BTCTRY": Decimal("100")},
+        try_cash=Decimal("500"),
+        open_orders=[open_buy],
+        live_mode=True,
+        bootstrap_enabled=True,
+        pair_info=[pair],
+        min_order_notional_try=Decimal("10"),
+        bootstrap_notional_try=Decimal("200"),
+        max_notional_per_order_try=Decimal("200"),
+    )
+
+    assert intents == []
+    assert drop_reasons.get("skipped_due_to_open_orders") == 1

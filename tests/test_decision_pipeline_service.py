@@ -280,3 +280,55 @@ def test_stage4_order_selection_is_deterministic() -> None:
 
     assert first.order_requests == second.order_requests
     assert first.deferred_order_requests == second.deferred_order_requests
+
+
+def test_allocation_knob_max_intent_notional_respects_settings_and_multiplier() -> None:
+    captured: dict[str, Decimal] = {}
+
+    class CapturingAllocationService:
+        @staticmethod
+        def allocate(*, intents, balances, positions, mark_prices, knobs):
+            del intents, balances, positions, mark_prices
+            captured["max_intent_notional_try"] = knobs.max_intent_notional_try
+            return type(
+                "R",
+                (),
+                {
+                    "actions": tuple(),
+                    "decisions": tuple(),
+                    "counters": {},
+                    "cash_try": Decimal("0"),
+                    "try_cash_target": Decimal("0"),
+                    "investable_total_try": Decimal("0"),
+                    "investable_this_cycle_try": Decimal("0"),
+                    "deploy_budget_try": Decimal("0"),
+                    "planned_total_try": Decimal("0"),
+                    "unused_budget_try": Decimal("0"),
+                    "investable_usage_reason": "test",
+                },
+            )()
+
+    service = DecisionPipelineService(
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="BTC_TRY",
+            STAGE5_MAX_INTENT_NOTIONAL_TRY="200",
+        ),
+        allocation_service=CapturingAllocationService,
+        now_provider=lambda: datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    service.run_cycle(
+        cycle_id="cycle-intent-cap",
+        balances={"TRY": Decimal("1000")},
+        positions={},
+        mark_prices={"BTCTRY": Decimal("100")},
+        open_orders=[],
+        pair_info=[_btc_pair_info()],
+        bootstrap_enabled=True,
+        live_mode=False,
+        budget_notional_multiplier=Decimal("0.5"),
+    )
+
+    assert captured["max_intent_notional_try"] == Decimal("100.0")

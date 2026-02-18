@@ -859,6 +859,12 @@ class Stage4CycleRunner:
                 if entry.endswith(":rejected") or ":reject" in entry
             )
 
+            # Counter semantics:
+            # - pipeline_intents: intents emitted by DecisionPipelineService
+            # - bootstrap_mapped_orders: fallback bootstrap orders mapped by Stage4 runner
+            # - planned_actions: lifecycle actions that survived risk + prefilter gating
+            # - rejects_total: all submit rejects from execution service
+            # - rejected_min_notional: strict subset of rejects_total due to min-notional
             counts = {
                 "ledger_events_attempted": ledger_ingest.events_attempted,
                 "ledger_events_inserted": ledger_ingest.events_inserted,
@@ -873,7 +879,7 @@ class Stage4CycleRunner:
                 "fills_applied": accounting_service.last_applied_fills_count,
                 "cursor_before": sum(1 for value in cursor_before.values() if value is not None),
                 "cursor_after": sum(1 for value in cursor_after.values() if value is not None),
-                "planned_actions": len(lifecycle_plan.actions),
+                "planned_actions": len(prefiltered_actions),
                 "pipeline_intents": len(decision_report.intents),
                 "pipeline_order_requests": len(decision_report.order_requests),
                 "pipeline_mapped_orders": decision_report.mapped_orders_count,
@@ -1374,6 +1380,8 @@ class Stage4CycleRunner:
                             "symbol": self.norm(action.symbol),
                             "side": str(action.side),
                             "client_order_id": action.client_order_id,
+                            "q_price": str(q_price),
+                            "q_qty": str(q_qty),
                             "order_notional_try": str(notional_try),
                             "required_min_notional_try": str(min_required),
                             "reason_code": "prefilter_min_notional",
@@ -1441,12 +1449,35 @@ class Stage4CycleRunner:
                 self._inc_reason(drop_reasons, "missing_mark_price")
                 continue
             if (normalized, "buy") in existing_keys:
+                self._inc_reason(drop_reasons, "skipped_due_to_open_orders")
+                logger.info(
+                    "stage4_bootstrap_skipped_due_to_open_orders",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "symbol": normalized,
+                            "reason_code": "skipped_due_to_open_orders",
+                        }
+                    },
+                )
                 continue
 
             rules = build_exchange_rules(rules_source)
             min_required_notional_try = max(min_order_notional_try, rules.min_notional_try)
             if try_cash < min_required_notional_try:
                 self._inc_reason(drop_reasons, "cash_below_min_notional")
+                logger.info(
+                    "stage4_bootstrap_dropped_min_notional",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "symbol": normalized,
+                            "budget_try": str(try_cash),
+                            "min_required_notional_try": str(min_required_notional_try),
+                            "reason_code": "cash_below_min_notional",
+                        }
+                    },
+                )
                 continue
 
             budget = min(try_cash, bootstrap_notional_try)
@@ -1454,6 +1485,18 @@ class Stage4CycleRunner:
                 budget = min(budget, max_notional_per_order_try)
             if budget < min_required_notional_try:
                 self._inc_reason(drop_reasons, "bootstrap_budget_below_min_notional")
+                logger.info(
+                    "stage4_bootstrap_dropped_min_notional",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "symbol": normalized,
+                            "budget_try": str(budget),
+                            "min_required_notional_try": str(min_required_notional_try),
+                            "reason_code": "bootstrap_budget_below_min_notional",
+                        }
+                    },
+                )
                 continue
 
             qty_raw = budget / mark

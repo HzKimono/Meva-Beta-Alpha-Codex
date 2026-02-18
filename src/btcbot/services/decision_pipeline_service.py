@@ -130,7 +130,10 @@ class DecisionPipelineService:
                 min_order_notional_try=self._to_decimal(self.settings.min_order_notional_try),
                 fee_buffer_bps=self._to_decimal(self.settings.allocation_fee_buffer_bps),
                 fee_buffer_ratio=self._to_decimal(self.settings.fee_buffer_ratio),
-                max_intent_notional_try=Decimal("0"),
+                max_intent_notional_try=(
+                    self._to_decimal(self.settings.stage5_max_intent_notional_try)
+                    * max(Decimal("0"), budget_notional_multiplier)
+                ),
                 max_position_try_per_symbol=self._to_decimal(
                     self.settings.max_position_try_per_symbol
                 ),
@@ -500,15 +503,20 @@ class DecisionPipelineService:
                 )
 
         intents: list[Intent] = []
+        missing_orderbook_symbols: list[str] = []
         for symbol in sorted(symbols):
             mark = mark_prices.get(symbol)
             if mark is None or mark <= Decimal("0"):
                 continue
+            orderbook = (orderbooks or {}).get(symbol)
+            if orderbook is None:
+                missing_orderbook_symbols.append(symbol)
+                orderbook = OrderBookSummary(best_bid=mark, best_ask=mark)
             context = StrategyContext(
                 timestamp=now_ts,
                 symbol=symbol,
                 mark_price=mark,
-                orderbook=(orderbooks or {}).get(symbol, OrderBookSummary(best_bid=mark, best_ask=mark)),
+                orderbook=orderbook,
                 balances=balances,
                 position=positions.get(symbol),
                 open_orders=orders_summary.get(symbol, OpenOrdersSummary()),
@@ -520,6 +528,16 @@ class DecisionPipelineService:
                 ),
             )
             intents.extend(self.registry.generate_intents(context))
+        if missing_orderbook_symbols:
+            logger.info(
+                "stage5_missing_orderbook_mark_fallback",
+                extra={
+                    "extra": {
+                        "symbols": sorted(missing_orderbook_symbols),
+                        "reason_code": "orderbook_unavailable_mark_fallback",
+                    }
+                },
+            )
         return intents
 
     def _to_orderbooks(self, mark_prices: Mapping[str, Decimal]) -> dict[str, OrderBookSummary]:
