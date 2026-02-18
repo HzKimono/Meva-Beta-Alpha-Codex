@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     offset_bps: int = Field(default=20, alias="OFFSET_BPS")
     ttl_seconds: int = Field(default=120, alias="TTL_SECONDS")
     min_order_notional_try: float = Field(default=10.0, alias="MIN_ORDER_NOTIONAL_TRY")
+    stage5_bootstrap_notional_try: Decimal = Field(
+        default=Decimal("50"), alias="STAGE5_BOOTSTRAP_NOTIONAL_TRY"
+    )
+    stage5_max_intent_notional_try: Decimal = Field(
+        default=Decimal("100"), alias="STAGE5_MAX_INTENT_NOTIONAL_TRY"
+    )
 
     state_db_path: str = Field(default="btcbot_state.db", alias="STATE_DB_PATH")
     dry_run_try_balance: float = Field(default=1000.0, alias="DRY_RUN_TRY_BALANCE")

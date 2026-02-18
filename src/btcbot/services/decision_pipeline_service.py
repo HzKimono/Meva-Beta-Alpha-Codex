@@ -509,7 +509,12 @@ class DecisionPipelineService:
                 balances=balances,
                 position=positions.get(symbol),
                 open_orders=orders_summary.get(symbol, OpenOrdersSummary()),
-                knobs=StrategyKnobs(),
+                knobs=StrategyKnobs(
+                    max_notional_try=self._to_decimal(self.settings.stage5_max_intent_notional_try),
+                    bootstrap_notional_try=self._to_decimal(
+                        self.settings.stage5_bootstrap_notional_try
+                    ),
+                ),
             )
             intents.extend(self.registry.generate_intents(context))
         return intents
