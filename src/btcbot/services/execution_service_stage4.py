@@ -20,6 +20,7 @@ class ExecutionReport:
     canceled: int
     simulated: int
     rejected: int
+    rejected_min_notional: int
 
 
 class ExecutionService:
@@ -44,7 +45,7 @@ class ExecutionService:
         if self.settings.kill_switch:
             logger.warning("kill_switch_active_blocking_writes")
             return ExecutionReport(
-                executed_total=0, submitted=0, canceled=0, simulated=0, rejected=0
+                executed_total=0, submitted=0, canceled=0, simulated=0, rejected=0, rejected_min_notional=0
             )
         if self.settings.live_trading and not self.settings.is_live_trading_enabled():
             raise RuntimeError("LIVE_TRADING requires LIVE_TRADING_ACK=I_UNDERSTAND")
@@ -54,6 +55,7 @@ class ExecutionService:
         canceled = 0
         simulated = 0
         rejected = 0
+        rejected_min_notional = 0
         for action in actions:
             if action.action_type == LifecycleActionType.SUBMIT:
                 if not action.client_order_id:
@@ -149,6 +151,7 @@ class ExecutionService:
                         mode=("live" if live_mode else "dry_run"),
                     )
                     rejected += 1
+                    rejected_min_notional += 1
                     continue
 
                 if not live_mode:
@@ -234,4 +237,5 @@ class ExecutionService:
             canceled=canceled,
             simulated=simulated,
             rejected=rejected,
+            rejected_min_notional=rejected_min_notional,
         )

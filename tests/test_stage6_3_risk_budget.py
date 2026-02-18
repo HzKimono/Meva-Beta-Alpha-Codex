@@ -286,7 +286,7 @@ def test_runner_mode_gating(monkeypatch, tmp_path) -> None:
             return type(
                 "ER",
                 (),
-                {"executed_total": 0, "submitted": 0, "canceled": 0, "simulated": 0, "rejected": 0},
+                {"executed_total": 0, "submitted": 0, "canceled": 0, "simulated": 0, "rejected": 0, "rejected_min_notional": 0},
             )()
 
     class FakeRiskBudgetService:

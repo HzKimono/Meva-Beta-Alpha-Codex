@@ -218,6 +218,7 @@ def test_runner_order_of_stage4_pipeline(monkeypatch, tmp_path) -> None:
                     "canceled": 0,
                     "simulated": 0,
                     "rejected": 0,
+                    "rejected_min_notional": 0,
                 },
             )()
 

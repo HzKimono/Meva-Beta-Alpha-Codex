@@ -25,7 +25,7 @@ from btcbot.domain.stage4 import (
     Position,
     Quantizer,
 )
-from btcbot.domain.strategy_core import PositionSummary
+from btcbot.domain.strategy_core import OrderBookSummary, PositionSummary
 from btcbot.observability_decisions import emit_decision
 from btcbot.planning_kernel import ExecutionPort, Plan
 from btcbot.services import metrics_service
@@ -59,6 +59,7 @@ class _UnavailableLlmClient:
 @dataclass(frozen=True)
 class MarketSnapshot:
     mark_prices: dict[str, Decimal]
+    orderbooks: dict[str, tuple[Decimal, Decimal]]
     anomalies: set[str]
     spreads_bps: dict[str, Decimal]
     age_seconds_by_symbol: dict[str, Decimal]
@@ -89,6 +90,16 @@ class Stage4CycleRunner:
         exchange = build_exchange_stage4(settings, dry_run=settings.dry_run)
         live_mode = settings.is_live_trading_enabled() and not settings.dry_run
         state_store = StateStore(db_path=settings.state_db_path)
+        if live_mode and state_store.get_latest_stage7_ledger_metrics() is not None:
+            logger.warning(
+                "stage4_live_stage7_data_present",
+                extra={
+                    "extra": {
+                        "state_db_path": settings.state_db_path,
+                        "reason_code": "db_mixed_stage4_stage7",
+                    }
+                },
+            )
         cycle_id = uuid4().hex
         cycle_now = datetime.now(UTC)
         cycle_started_at = cycle_now
@@ -413,6 +424,10 @@ class Stage4CycleRunner:
                     mark_prices=mark_prices,
                     open_orders=current_open_orders,
                     pair_info=pair_info,
+                    orderbooks={
+                        symbol: OrderBookSummary(best_bid=bid, best_ask=ask)
+                        for symbol, (bid, ask) in market_snapshot.orderbooks.items()
+                    },
                     bootstrap_enabled=settings.stage4_bootstrap_intents,
                     live_mode=live_mode,
                     preferred_symbols=active_symbols,
@@ -661,13 +676,19 @@ class Stage4CycleRunner:
 
             final_mode = combine_modes(risk_decision.mode, degrade_decision.mode_override)
             gated_actions = self._gate_actions_by_mode(accepted_actions, final_mode)
+            prefiltered_actions, prefilter_min_notional_dropped = self._prefilter_submit_actions_min_notional(
+                actions=gated_actions,
+                pair_info=pair_info,
+                min_order_notional_try=Decimal(str(settings.min_order_notional_try)),
+                cycle_id=cycle_id,
+            )
             if final_mode == Mode.OBSERVE_ONLY:
                 logger.info(
                     "mode_gate_observe_only",
                     extra={"extra": {"cycle_id": cycle_id, "reasons": degrade_decision.reasons}},
                 )
 
-            execution_report = execution_service.execute_with_report(gated_actions)
+            execution_report = execution_service.execute_with_report(prefiltered_actions)
             self._assert_execution_invariant(execution_report)
 
             updated_cycle_duration_ms = int((cycle_now - cycle_started_at).total_seconds() * 1000)
@@ -860,10 +881,12 @@ class Stage4CycleRunner:
                 "bootstrap_mapped_orders": len(bootstrap_intents),
                 "bootstrap_dropped_symbols": sum(bootstrap_drop_reasons.values()),
                 "accepted_actions": len(accepted_actions),
+                "prefilter_min_notional_dropped": prefilter_min_notional_dropped,
                 "executed": execution_report.executed_total,
                 "submitted": execution_report.submitted,
                 "canceled": execution_report.canceled,
-                "rejected_min_notional": execution_report.rejected,
+                "rejected_min_notional": execution_report.rejected_min_notional,
+                "rejects_total": execution_report.rejected,
                 "accepted_by_risk": accepted_by_risk,
                 "rejected_by_risk": rejected_by_risk,
                 "open_order_failures": open_order_failures,
@@ -1047,6 +1070,7 @@ class Stage4CycleRunner:
         base = getattr(exchange, "client", exchange)
         get_orderbook = getattr(base, "get_orderbook", None)
         mark_prices: dict[str, Decimal] = {}
+        orderbooks: dict[str, tuple[Decimal, Decimal]] = {}
         spreads_bps: dict[str, Decimal] = {}
         fetch_ages: list[Decimal] = []
         age_by_symbol: dict[str, Decimal] = {}
@@ -1054,6 +1078,7 @@ class Stage4CycleRunner:
         if not callable(get_orderbook):
             return MarketSnapshot(
                 mark_prices=mark_prices,
+                orderbooks=orderbooks,
                 anomalies=set(symbols),
                 spreads_bps=spreads_bps,
                 age_seconds_by_symbol={self.norm(symbol): Decimal("999999") for symbol in symbols},
@@ -1076,15 +1101,18 @@ class Stage4CycleRunner:
                 bid, ask = ask, bid
                 anomalies.add(normalized)
             if bid is not None and bid > 0 and ask is not None and ask > 0:
+                orderbooks[normalized] = (bid, ask)
                 mark = (bid + ask) / Decimal("2")
                 spread_bps = (
                     ((ask - bid) / mark) * Decimal("10000") if mark > 0 else Decimal("999999")
                 )
                 spreads_bps[normalized] = max(Decimal("0"), spread_bps)
             elif bid is not None and bid > 0:
+                orderbooks[normalized] = (bid, bid)
                 mark = bid
                 spreads_bps[normalized] = Decimal("999999")
             elif ask is not None and ask > 0:
+                orderbooks[normalized] = (ask, ask)
                 mark = ask
                 spreads_bps[normalized] = Decimal("999999")
             else:
@@ -1103,6 +1131,7 @@ class Stage4CycleRunner:
             max_age = max(fetch_ages)
         return MarketSnapshot(
             mark_prices=mark_prices,
+            orderbooks=orderbooks,
             anomalies=anomalies,
             spreads_bps=spreads_bps,
             age_seconds_by_symbol=age_by_symbol,
@@ -1284,7 +1313,7 @@ class Stage4CycleRunner:
         return mapped
 
     def _assert_execution_invariant(self, report: object) -> None:
-        for field in ("executed_total", "submitted", "canceled", "simulated", "rejected"):
+        for field in ("executed_total", "submitted", "canceled", "simulated", "rejected", "rejected_min_notional"):
             if not hasattr(report, field):
                 raise Stage4InvariantError(f"execution_report_missing_{field}")
             value = getattr(report, field)
@@ -1309,6 +1338,51 @@ class Stage4CycleRunner:
                     gated.append(action)
             return gated
         return actions
+
+
+    def _prefilter_submit_actions_min_notional(
+        self,
+        *,
+        actions: list[LifecycleAction],
+        pair_info: list[PairInfo] | None,
+        min_order_notional_try: Decimal,
+        cycle_id: str,
+    ) -> tuple[list[LifecycleAction], int]:
+        pair_info_by_symbol = {self.norm(item.pair_symbol): item for item in (pair_info or [])}
+        filtered: list[LifecycleAction] = []
+        dropped = 0
+        for action in actions:
+            if action.action_type != LifecycleActionType.SUBMIT:
+                filtered.append(action)
+                continue
+            rules_source = pair_info_by_symbol.get(self.norm(action.symbol))
+            if rules_source is None:
+                filtered.append(action)
+                continue
+            rules = build_exchange_rules(rules_source)
+            q_price = Quantizer.quantize_price(action.price, rules)
+            q_qty = Quantizer.quantize_qty(action.qty, rules)
+            notional_try = q_price * q_qty
+            min_required = max(Decimal(str(min_order_notional_try)), rules.min_notional_try)
+            if notional_try < min_required:
+                dropped += 1
+                logger.info(
+                    "stage4_prefilter_drop_min_notional",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "symbol": self.norm(action.symbol),
+                            "side": str(action.side),
+                            "client_order_id": action.client_order_id,
+                            "order_notional_try": str(notional_try),
+                            "required_min_notional_try": str(min_required),
+                            "reason_code": "prefilter_min_notional",
+                        }
+                    },
+                )
+                continue
+            filtered.append(action)
+        return filtered, dropped
 
     def _fills_cursor_key(self, symbol: str) -> str:
         return f"fills_cursor:{self.norm(symbol)}"
