@@ -419,3 +419,43 @@ def test_cash_reserve_target_allows_intent_when_free_cash_above_target() -> None
     approved = policy.evaluate(context, [intent])
 
     assert len(approved) == 1
+
+
+def test_cash_reserve_target_blocks_buy_but_not_sell() -> None:
+    policy = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=3,
+        max_open_orders_per_symbol=2,
+        cooldown_seconds=0,
+        notional_cap_try_per_cycle=Decimal("10000"),
+        max_notional_per_order_try=Decimal("0"),
+    )
+    context = RiskPolicyContext(
+        cycle_id="c-cash-target",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={},
+        mark_prices={},
+        cash_try_free=Decimal("300"),
+        try_cash_target=Decimal("500"),
+        investable_try=Decimal("50"),
+    )
+    buy_intent = Intent.create(
+        cycle_id="c-cash-target",
+        symbol="BTCTRY",
+        side=OrderSide.BUY,
+        qty=Decimal("1"),
+        limit_price=Decimal("100"),
+        reason="buy should be blocked by cash reserve target",
+    )
+    sell_intent = Intent.create(
+        cycle_id="c-cash-target",
+        symbol="BTCTRY",
+        side=OrderSide.SELL,
+        qty=Decimal("1"),
+        limit_price=Decimal("100"),
+        reason="sell should pass because it increases free cash",
+    )
+
+    approved = policy.evaluate(context, [buy_intent, sell_intent])
+
+    assert [intent.side for intent in approved] == [OrderSide.SELL]

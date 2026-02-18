@@ -127,6 +127,61 @@ def test_execution_enforces_live_ack_and_kill_switch(store: StateStore) -> None:
     assert svc.execute([action]) == 0
 
 
+def test_execution_contract_live_submits_and_dry_run_simulates(store: StateStore) -> None:
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="contract",
+        client_order_id="cid-contract",
+    )
+
+    dry_exchange = FakeExchangeStage4()
+    dry_service = ExecutionService(
+        exchange=dry_exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False, SAFE_MODE=False),
+        rules_service=ExchangeRulesService(dry_exchange),
+    )
+    dry_report = dry_service.execute_with_report([action])
+
+    assert dry_report.submitted == 0
+    assert dry_report.simulated == 1
+    assert dry_exchange.submits == []
+
+    live_exchange = FakeExchangeStage4()
+    live_service = ExecutionService(
+        exchange=live_exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            SAFE_MODE=False,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(live_exchange),
+    )
+    live_action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="contract",
+        client_order_id="cid-contract-live",
+    )
+    live_report = live_service.execute_with_report([live_action])
+
+    assert live_report.submitted == 1
+    assert live_report.simulated == 0
+    assert len(live_exchange.submits) == 1
+
+
 def test_decimal_end_to_end_and_idempotent_submit(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
     svc = ExecutionService(
