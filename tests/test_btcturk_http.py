@@ -373,6 +373,52 @@ def test_private_write_request_is_not_retried() -> None:
     client.close()
 
 
+def test_private_get_retries_429_using_retry_after_header_and_penalizes_limiter(
+    monkeypatch,
+) -> None:
+    class SpyLimiter:
+        def __init__(self) -> None:
+            self.penalties: list[float | None] = []
+
+        def acquire(self, group: str, cost: int = 1) -> float:
+            del group, cost
+            return 0.0
+
+        def penalize_on_429(self, group: str, retry_after_s: float | None) -> None:
+            del group
+            self.penalties.append(retry_after_s)
+
+    calls = {"count": 0}
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if request.url.path == "/api/v1/users/balances" and calls["count"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "1.5"}, json={}, request=request)
+        if request.url.path == "/api/v1/users/balances":
+            return httpx.Response(200, json={"success": True, "data": []}, request=request)
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr("btcbot.adapters.btcturk_http.sleep", lambda seconds: sleeps.append(seconds))
+
+    limiter = SpyLimiter()
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c3VwZXItc2VjcmV0LWJ5dGVz",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        rate_limiter=limiter,  # type: ignore[arg-type]
+    )
+
+    balances = client.get_balances()
+
+    assert balances == []
+    assert calls["count"] == 2
+    assert sleeps == [1.5]
+    assert limiter.penalties == [1.5]
+    client.close()
+
+
 def test_should_not_retry_on_permanent_transport_error() -> None:
     req = httpx.Request("GET", "https://example.com")
     cert_error = httpx.ConnectError("cert failed", request=req)
@@ -617,3 +663,23 @@ def test_stage4_recent_fills_fallback_id_is_deterministic() -> None:
 
     assert first == second
     assert first is not None
+
+
+def test_private_request_non_429_4xx_is_not_retried() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, json={"success": False, "message": "bad req"})
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c3VwZXItc2VjcmV0LWJ5dGVz",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ExchangeError):
+        client.get_balances()
+
+    assert calls["n"] == 1
+    client.close()

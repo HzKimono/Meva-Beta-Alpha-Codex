@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     btcturk_rest_max_delay_ms: int = Field(default=4_000, alias="BTCTURK_REST_MAX_DELAY_MS")
     btcturk_rate_limit_rps: float = Field(default=8.0, alias="BTCTURK_RATE_LIMIT_RPS")
     btcturk_rate_limit_burst: int = Field(default=8, alias="BTCTURK_RATE_LIMIT_BURST")
+    rate_limit_marketdata_tps: float = Field(default=8.0, alias="RATE_LIMIT_MARKETDATA_TPS")
+    rate_limit_marketdata_burst: int = Field(default=8, alias="RATE_LIMIT_MARKETDATA_BURST")
+    rate_limit_account_tps: float = Field(default=4.0, alias="RATE_LIMIT_ACCOUNT_TPS")
+    rate_limit_account_burst: int = Field(default=4, alias="RATE_LIMIT_ACCOUNT_BURST")
+    rate_limit_orders_tps: float = Field(default=2.0, alias="RATE_LIMIT_ORDERS_TPS")
+    rate_limit_orders_burst: int = Field(default=2, alias="RATE_LIMIT_ORDERS_BURST")
+    breaker_429_consecutive_threshold: int = Field(
+        default=3, alias="BREAKER_429_CONSECUTIVE_THRESHOLD"
+    )
+    breaker_cooldown_seconds: float = Field(default=3.0, alias="BREAKER_COOLDOWN_SECONDS")
+    max_retry_attempts: int = Field(default=4, alias="MAX_RETRY_ATTEMPTS")
+    max_retry_total_sleep_s: float = Field(default=8.0, alias="MAX_RETRY_TOTAL_SLEEP_S")
     btcturk_http_max_connections: int = Field(default=10, alias="BTCTURK_HTTP_MAX_CONNECTIONS")
     btcturk_clock_sync_interval_seconds: int = Field(
         default=60,
@@ -56,6 +68,11 @@ class Settings(BaseSettings):
     ws_market_data_rest_fallback: bool = Field(
         default=False,
         alias="WS_MARKET_DATA_REST_FALLBACK",
+    )
+    orderbook_ttl_ms: int = Field(default=2000, alias="ORDERBOOK_TTL_MS")
+    orderbook_max_staleness_ms: int = Field(
+        default=5000,
+        alias="ORDERBOOK_MAX_STALENESS_MS",
     )
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     dry_run: bool = Field(default=True, alias="DRY_RUN")

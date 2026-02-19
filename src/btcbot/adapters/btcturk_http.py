@@ -4,6 +4,7 @@ import hashlib
 import logging
 import ssl
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from math import isfinite
@@ -44,6 +45,7 @@ from btcbot.domain.stage4 import Order as Stage4Order
 from btcbot.observability import get_instrumentation
 from btcbot.security.redaction import sanitize_mapping, sanitize_text
 from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
+from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter, map_endpoint_group
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,26 @@ _RETRY_BASE_DELAY_SECONDS = 0.4
 _RETRY_MAX_DELAY_SECONDS = 4.0
 _RETRY_TOTAL_WAIT_CAP_SECONDS = 8.0
 _DEFAULT_MIN_NOTIONAL_TRY = Decimal("10")
+_BREAKER_CONSECUTIVE_429_THRESHOLD = 3
+_BREAKER_COOLDOWN_SECONDS = 3.0
+
+
+@dataclass
+class _BreakerState:
+    consecutive_429: int = 0
+    open_until: float = 0.0
+
+
+class _RetryableRequestError(Exception):
+    def __init__(
+        self,
+        exchange_error: ExchangeError,
+        *,
+        retry_after_header: str | None = None,
+    ) -> None:
+        super().__init__(str(exchange_error))
+        self.exchange_error = exchange_error
+        self.retry_after_header = retry_after_header
 
 
 def _is_permanent_transport_error(exc: httpx.TransportError) -> bool:
@@ -149,6 +171,9 @@ class BtcturkHttpClient(ExchangeClient):
         timeout: float | httpx.Timeout = 10.0,
         base_url: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        rate_limiter: TokenBucketRateLimiter | None = None,
+        breaker_429_consecutive_threshold: int = _BREAKER_CONSECUTIVE_429_THRESHOLD,
+        breaker_cooldown_seconds: float = _BREAKER_COOLDOWN_SECONDS,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -163,6 +188,17 @@ class BtcturkHttpClient(ExchangeClient):
             transport=transport,
         )
         self._nonce = MonotonicNonceGenerator()
+        self._rate_limiter = rate_limiter or TokenBucketRateLimiter(
+            EndpointBudget(tokens_per_second=8.0, burst_capacity=8),
+            group_budgets={
+                "market_data": EndpointBudget(tokens_per_second=8.0, burst_capacity=8),
+                "account": EndpointBudget(tokens_per_second=4.0, burst_capacity=4),
+                "orders": EndpointBudget(tokens_per_second=2.0, burst_capacity=2),
+            },
+        )
+        self._breaker_429_consecutive_threshold = max(1, breaker_429_consecutive_threshold)
+        self._breaker_cooldown_seconds = max(0.0, breaker_cooldown_seconds)
+        self._breaker_state: dict[str, _BreakerState] = {}
 
     def __enter__(self) -> BtcturkHttpClient:
         return self
@@ -171,17 +207,67 @@ class BtcturkHttpClient(ExchangeClient):
         del exc_type, exc, tb
         self.close()
 
+    def _request_group(self, path: str) -> str:
+        return map_endpoint_group(path)
+
+    def _breaker_for(self, group: str) -> _BreakerState:
+        state = self._breaker_state.get(group)
+        if state is None:
+            state = _BreakerState()
+            self._breaker_state[group] = state
+        return state
+
+    def _check_breaker(self, group: str) -> None:
+        state = self._breaker_for(group)
+        now = monotonic()
+        if state.open_until > now:
+            get_instrumentation().counter("breaker_open_total", 1, attrs={"group": group})
+            raise ExchangeError(
+                f"Circuit breaker open for group={group}",
+                status_code=429,
+                error_code="breaker_open",
+            )
+
+    def _record_success(self, group: str) -> None:
+        self._breaker_for(group).consecutive_429 = 0
+
+    def _record_429(self, group: str, retry_after_s: float | None) -> None:
+        state = self._breaker_for(group)
+        state.consecutive_429 += 1
+        self._rate_limiter.penalize_on_429(group, retry_after_s)
+        if state.consecutive_429 >= self._breaker_429_consecutive_threshold:
+            cooldown = retry_after_s if retry_after_s is not None else self._breaker_cooldown_seconds
+            state.open_until = max(state.open_until, monotonic() + cooldown)
+            get_instrumentation().counter("breaker_open_total", 1, attrs={"group": group})
+
     def _get(self, path: str, params: dict[str, str | int] | None = None) -> dict:
+        group = self._request_group(path)
         request_id = uuid4().hex
 
         def _call() -> dict:
-            with get_instrumentation().trace("rest_call", attrs={"method": "GET", "path": path}):
+            self._check_breaker(group)
+            waited = self._rate_limiter.acquire(group)
+            get_instrumentation().histogram("rate_limiter_wait_seconds", waited, attrs={"group": group})
+            with get_instrumentation().trace("rest_call", attrs={"method": "GET", "path": path, "group": group}):
                 response = self.client.get(
                     path,
                     params=params,
                     headers={"X-Request-ID": request_id},
                 )
-            response.raise_for_status()
+            get_instrumentation().counter(
+                "rest_requests_total",
+                1,
+                attrs={"group": group, "path": path, "status": str(response.status_code)},
+            )
+            if response.status_code >= 500 or response.status_code == 429:
+                response.raise_for_status()
+            if 400 <= response.status_code < 500 and response.status_code != 429:
+                raise ExchangeError(
+                    f"BTCTurk public endpoint error status={response.status_code} path={path}",
+                    status_code=response.status_code,
+                    request_path=path,
+                    request_method="GET",
+                )
             payload = response.json()
             if not isinstance(payload, dict):
                 raise ValueError("BTCTurk response payload must be a JSON object")
@@ -190,6 +276,7 @@ class BtcturkHttpClient(ExchangeClient):
                 raise ValueError(
                     f"BTCTurk API returned unsuccessful payload: {message}; request_id={request_id}"
                 )
+            self._record_success(group)
             return payload
 
         def _retry_after(exc: Exception) -> str | None:
@@ -198,20 +285,32 @@ class BtcturkHttpClient(ExchangeClient):
                 return None
             return response.headers.get("Retry-After")
 
-        return retry_with_backoff(
-            _call,
-            max_attempts=_RETRY_ATTEMPTS,
-            base_delay_ms=int(_RETRY_BASE_DELAY_SECONDS * 1000),
-            max_delay_ms=int(_RETRY_MAX_DELAY_SECONDS * 1000),
-            jitter_seed=17,
-            retry_on_exceptions=(
-                httpx.TimeoutException,
-                httpx.TransportError,
-                httpx.HTTPStatusError,
-            ),
-            retry_after_getter=_retry_after,
-            sleep_fn=sleep,
-        )
+        def _on_retry(attempt: object) -> None:
+            get_instrumentation().counter("rest_retry_total", 1, attrs={"group": group, "path": path})
+
+        try:
+            return retry_with_backoff(
+                _call,
+                max_attempts=_RETRY_ATTEMPTS,
+                base_delay_ms=int(_RETRY_BASE_DELAY_SECONDS * 1000),
+                max_delay_ms=int(_RETRY_MAX_DELAY_SECONDS * 1000),
+                max_total_sleep_seconds=_RETRY_TOTAL_WAIT_CAP_SECONDS,
+                jitter_seed=17,
+                retry_on_exceptions=(
+                    httpx.TimeoutException,
+                    httpx.TransportError,
+                    httpx.HTTPStatusError,
+                ),
+                retry_after_getter=_retry_after,
+                on_retry=_on_retry,
+                sleep_fn=sleep,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                retry_after_s = parse_retry_after_seconds(exc.response.headers.get("Retry-After"))
+                self._record_429(group, retry_after_s)
+                get_instrumentation().counter("rest_429_total", 1, attrs={"group": group, "path": path})
+            raise
 
     def _next_stamp_ms(self) -> str:
         return str(self._nonce.next_stamp_ms())
@@ -229,90 +328,127 @@ class BtcturkHttpClient(ExchangeClient):
                 "BTCTURK_API_KEY and BTCTURK_API_SECRET are required for private endpoints"
             )
 
+        group = self._request_group(path)
         request_id = uuid4().hex
-        headers = build_auth_headers(
-            api_key=self.api_key,
-            api_secret=self.api_secret,
-            stamp_ms=self._next_stamp_ms(),
-        )
-        headers["X-Request-ID"] = request_id
-        with get_instrumentation().trace("rest_call", attrs={"method": method, "path": path}):
-            response = self.client.request(
-                method=method,
-                url=path,
-                params=params,
-                json=json,
-                headers=headers,
-            )
-        if response.status_code != 200:
-            snippet = _response_snippet(response)
-            payload_code = None
-            payload_message = None
-            try:
-                payload = response.json()
-                if isinstance(payload, dict):
-                    payload_code = payload.get("code")
-                    payload_message = payload.get("message")
-            except Exception:  # noqa: BLE001
-                payload = None
 
-            safe_payload_message = (
-                sanitize_text(str(payload_message)) if payload_message is not None else None
+        def _call() -> dict:
+            self._check_breaker(group)
+            waited = self._rate_limiter.acquire(group)
+            get_instrumentation().histogram("rate_limiter_wait_seconds", waited, attrs={"group": group})
+            headers = build_auth_headers(
+                api_key=self.api_key or "",
+                api_secret=self.api_secret or "",
+                stamp_ms=self._next_stamp_ms(),
             )
-            raise ExchangeError(
-                "BTCTurk private endpoint error "
-                f"status={response.status_code} method={method} path={path} "
-                f"code={payload_code} message={safe_payload_message} response={snippet} "
-                f"request_has_params={params is not None} request_has_json={json is not None} "
-                f"request_id={request_id}",
-                status_code=response.status_code,
-                error_code=payload_code,
-                error_message=safe_payload_message,
-                request_path=path,
-                request_method=method,
-                request_params=_sanitize_request_params(params),
-                request_json=_sanitize_request_json(json),
-                response_body=snippet,
+            headers["X-Request-ID"] = request_id
+            with get_instrumentation().trace("rest_call", attrs={"method": method, "path": path, "group": group}):
+                response = self.client.request(
+                    method=method,
+                    url=path,
+                    params=params,
+                    json=json,
+                    headers=headers,
+                )
+            get_instrumentation().counter(
+                "rest_requests_total",
+                1,
+                attrs={"group": group, "path": path, "status": str(response.status_code)},
             )
+            if response.status_code != 200:
+                snippet = _response_snippet(response)
+                payload_code = None
+                payload_message = None
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        payload_code = payload.get("code")
+                        payload_message = payload.get("message")
+                except Exception:  # noqa: BLE001
+                    payload = None
 
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ExchangeError("BTCTurk response payload must be a JSON object")
-        if payload.get("success") is False:
-            message = payload.get("message") or payload.get("code") or "unknown BTCTurk error"
-            safe_message = sanitize_text(str(message))
-            raise ExchangeError(
-                f"BTCTurk API returned unsuccessful payload: {safe_message}; request_id={request_id}",
-                status_code=200,
-                error_code=payload.get("code"),
-                error_message=safe_message,
-                request_path=path,
-                request_method=method,
-                request_params=_sanitize_request_params(params),
-                request_json=_sanitize_request_json(json),
+                safe_payload_message = (
+                    sanitize_text(str(payload_message)) if payload_message is not None else None
+                )
+                err = ExchangeError(
+                    "BTCTurk private endpoint error "
+                    f"status={response.status_code} method={method} path={path} "
+                    f"code={payload_code} message={safe_payload_message} response={snippet} "
+                    f"request_has_params={params is not None} request_has_json={json is not None} "
+                    f"request_id={request_id}",
+                    status_code=response.status_code,
+                    error_code=payload_code,
+                    error_message=safe_payload_message,
+                    request_path=path,
+                    request_method=method,
+                    request_params=_sanitize_request_params(params),
+                    request_json=_sanitize_request_json(json),
+                    response_body=snippet,
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    retry_after_header = response.headers.get("Retry-After")
+                    if response.status_code == 429:
+                        self._record_429(group, parse_retry_after_seconds(retry_after_header))
+                        get_instrumentation().counter(
+                            "rest_429_total",
+                            1,
+                            attrs={"group": group, "path": path},
+                        )
+                    raise _RetryableRequestError(
+                        err,
+                        retry_after_header=retry_after_header,
+                    ) from err
+                raise err
+
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ExchangeError("BTCTurk response payload must be a JSON object")
+            if payload.get("success") is False:
+                message = payload.get("message") or payload.get("code") or "unknown BTCTurk error"
+                safe_message = sanitize_text(str(message))
+                raise ExchangeError(
+                    f"BTCTurk API returned unsuccessful payload: {safe_message}; request_id={request_id}",
+                    status_code=200,
+                    error_code=payload.get("code"),
+                    error_message=safe_message,
+                    request_path=path,
+                    request_method=method,
+                    request_params=_sanitize_request_params(params),
+                    request_json=_sanitize_request_json(json),
+                )
+            self._record_success(group)
+            return payload
+
+        def _retry_after(exc: Exception) -> str | None:
+            if isinstance(exc, _RetryableRequestError):
+                return exc.retry_after_header
+            if isinstance(exc, ExchangeError) and exc.response_body is not None:
+                return None
+            response = getattr(exc, "response", None)
+            if response is None:
+                return None
+            return response.headers.get("Retry-After")
+
+        def _on_retry(_attempt: object) -> None:
+            get_instrumentation().counter("rest_retry_total", 1, attrs={"group": group, "path": path})
+
+        try:
+            return retry_with_backoff(
+                _call,
+                max_attempts=_RETRY_ATTEMPTS,
+                base_delay_ms=int(_RETRY_BASE_DELAY_SECONDS * 1000),
+                max_delay_ms=int(_RETRY_MAX_DELAY_SECONDS * 1000),
+                max_total_sleep_seconds=_RETRY_TOTAL_WAIT_CAP_SECONDS,
+                jitter_seed=23,
+                retry_on_exceptions=(_RetryableRequestError, httpx.TimeoutException, httpx.TransportError),
+                retry_after_getter=_retry_after,
+                on_retry=_on_retry,
+                sleep_fn=sleep,
             )
-        return payload
+        except _RetryableRequestError as exc:
+            raise exc.exchange_error
 
     def _private_get(self, path: str, params: dict[str, str | int] | None = None) -> dict:
-        start = monotonic()
-        last_exc: BaseException | None = None
-        for attempt in range(1, _RETRY_ATTEMPTS + 1):
-            try:
-                return self._private_request("GET", path, params=params)
-            except ExchangeError as exc:
-                if exc.status_code not in {429, 500, 502, 503, 504} or attempt >= _RETRY_ATTEMPTS:
-                    raise
-                if exc.status_code == 429:
-                    get_instrumentation().counter("rest_429_rate", 1, attrs={"path": path})
-                get_instrumentation().counter("rest_retry_rate", 1, attrs={"path": path})
-                delay = _retry_delay_seconds(attempt)
-                if monotonic() - start + delay > _RETRY_TOTAL_WAIT_CAP_SECONDS:
-                    raise
-                sleep(delay)
-                last_exc = exc
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("Unexpected private GET retry loop termination")
+        return self._private_request("GET", path, params=params)
 
     def get_recent_fills(self, pair_symbol: str, since_ms: int | None = None) -> list[TradeFill]:
         params: dict[str, str | int] = {"pairSymbol": self._pair_symbol(pair_symbol)}
