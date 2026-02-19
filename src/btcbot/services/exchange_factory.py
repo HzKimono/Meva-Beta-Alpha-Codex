@@ -11,6 +11,7 @@ from btcbot.adapters.btcturk_http import (
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
+from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
 from btcbot.domain.models import Balance
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,14 @@ logger = logging.getLogger(__name__)
 
 def build_exchange_stage3(settings: Settings, *, force_dry_run: bool) -> ExchangeClient:
     dry_run = force_dry_run or settings.dry_run
+    limiter = _build_rate_limiter(settings)
     if dry_run:
-        public_client = BtcturkHttpClient(base_url=settings.btcturk_base_url)
+        public_client = BtcturkHttpClient(
+            base_url=settings.btcturk_base_url,
+            rate_limiter=limiter,
+            breaker_429_consecutive_threshold=settings.breaker_429_consecutive_threshold,
+            breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
+        )
         orderbooks: dict[str, tuple[float, float]] = {}
         exchange_info = []
         try:
@@ -68,6 +75,9 @@ def build_exchange_stage3(settings: Settings, *, force_dry_run: bool) -> Exchang
         if settings.btcturk_api_secret
         else None,
         base_url=settings.btcturk_base_url,
+        rate_limiter=limiter,
+        breaker_429_consecutive_threshold=settings.breaker_429_consecutive_threshold,
+        breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
     )
 
 
@@ -82,6 +92,9 @@ def build_exchange_stage4(settings: Settings, *, dry_run: bool) -> ExchangeClien
         if settings.btcturk_api_secret
         else None,
         base_url=settings.btcturk_base_url,
+        rate_limiter=_build_rate_limiter(settings),
+        breaker_429_consecutive_threshold=settings.breaker_429_consecutive_threshold,
+        breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
     )
     return BtcturkHttpClientStage4(live_client)
 
@@ -96,3 +109,26 @@ def _close_best_effort(resource: object, label: str) -> None:
         logger.warning(
             "Failed to close resource", extra={"extra": {"resource": label}}, exc_info=True
         )
+
+
+def _build_rate_limiter(settings: Settings) -> TokenBucketRateLimiter:
+    return TokenBucketRateLimiter(
+        EndpointBudget(
+            tokens_per_second=settings.rate_limit_marketdata_tps,
+            burst_capacity=settings.rate_limit_marketdata_burst,
+        ),
+        group_budgets={
+            "market_data": EndpointBudget(
+                tokens_per_second=settings.rate_limit_marketdata_tps,
+                burst_capacity=settings.rate_limit_marketdata_burst,
+            ),
+            "account": EndpointBudget(
+                tokens_per_second=settings.rate_limit_account_tps,
+                burst_capacity=settings.rate_limit_account_burst,
+            ),
+            "orders": EndpointBudget(
+                tokens_per_second=settings.rate_limit_orders_tps,
+                burst_capacity=settings.rate_limit_orders_burst,
+            ),
+        },
+    )

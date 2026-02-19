@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from threading import Lock
 
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.models import SymbolRules, normalize_symbol, pair_info_to_symbol_rules
+from btcbot.observability import get_instrumentation
+
+logger = logging.getLogger(__name__)
 
 
 class SymbolRulesNotFoundError(ValueError):
@@ -31,25 +37,98 @@ class MarketDataFreshness:
     missing_symbols: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _OrderbookCacheEntry:
+    best_bid: float
+    best_ask: float
+    observed_at_ms: int
+
+
 class MarketDataProvider:
     def get_snapshot(self, symbols: list[str]) -> MarketDataSnapshot:
         raise NotImplementedError
 
 
 class RestMarketDataProvider(MarketDataProvider):
-    def __init__(self, *, exchange: ExchangeClient, now_provider: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        *,
+        exchange: ExchangeClient,
+        now_provider: Callable[[], datetime],
+        orderbook_ttl_ms: int = 2_000,
+        orderbook_max_staleness_ms: int = 5_000,
+    ) -> None:
         self.exchange = exchange
         self.now_provider = now_provider
+        self.orderbook_ttl_ms = max(0, orderbook_ttl_ms)
+        self.orderbook_max_staleness_ms = max(self.orderbook_ttl_ms, orderbook_max_staleness_ms)
+        self._cache: dict[str, _OrderbookCacheEntry] = {}
+        self._inflight: dict[str, Future[_OrderbookCacheEntry]] = {}
+        self._lock = Lock()
+
+    def _now_ms(self) -> int:
+        return int(self.now_provider().timestamp() * 1000)
+
+    def _is_fresh(self, entry: _OrderbookCacheEntry, now_ms: int) -> bool:
+        return (now_ms - entry.observed_at_ms) <= self.orderbook_ttl_ms
+
+    def _is_usable_stale(self, entry: _OrderbookCacheEntry, now_ms: int) -> bool:
+        return (now_ms - entry.observed_at_ms) <= self.orderbook_max_staleness_ms
+
+    def _get_or_fetch(self, symbol: str) -> _OrderbookCacheEntry:
+        now_ms = self._now_ms()
+        is_owner = False
+        with self._lock:
+            cached = self._cache.get(symbol)
+            if cached is not None and self._is_fresh(cached, now_ms):
+                get_instrumentation().counter("orderbook_cache_hit_total", 1, attrs={"symbol": symbol})
+                return cached
+            in_flight = self._inflight.get(symbol)
+            if in_flight is not None:
+                get_instrumentation().counter(
+                    "orderbook_inflight_coalesced_total", 1, attrs={"symbol": symbol}
+                )
+                future = in_flight
+            else:
+                future = Future()
+                self._inflight[symbol] = future
+                is_owner = True
+
+        if is_owner:
+            try:
+                bid, ask = self.exchange.get_orderbook(symbol)
+                result = _OrderbookCacheEntry(best_bid=bid, best_ask=ask, observed_at_ms=self._now_ms())
+                with self._lock:
+                    self._cache[symbol] = result
+                    self._inflight.pop(symbol, None)
+                future.set_result(result)
+            except Exception as exc:  # noqa: BLE001
+                with self._lock:
+                    self._inflight.pop(symbol, None)
+                    cached = self._cache.get(symbol)
+                if cached is not None and self._is_usable_stale(cached, now_ms):
+                    logger.warning(
+                        "market_data_degraded_serving_stale_cache",
+                        extra={"extra": {"symbol": symbol, "error_type": type(exc).__name__}},
+                    )
+                    get_instrumentation().counter("market_data_degraded_total", 1)
+                    future.set_result(cached)
+                    return cached
+                future.set_exception(exc)
+                raise
+
+        return future.result()
 
     def get_snapshot(self, symbols: list[str]) -> MarketDataSnapshot:
         bids: dict[str, float] = {}
+        fetched_at = self.now_provider()
         for symbol in symbols:
-            bid, _ask = self.exchange.get_orderbook(symbol)
-            bids[symbol] = bid
+            entry = self._get_or_fetch(symbol)
+            bids[symbol] = entry.best_bid
         return MarketDataSnapshot(
             bids=bids,
             source="rest",
-            fetched_at=self.now_provider(),
+            fetched_at=fetched_at,
             connected=True,
         )
 
@@ -97,6 +176,8 @@ class MarketDataService:
         mode: str = "rest",
         ws_rest_fallback: bool = False,
         now_provider: Callable[[], datetime] | None = None,
+        orderbook_ttl_ms: int = 2_000,
+        orderbook_max_staleness_ms: int = 5_000,
     ) -> None:
         self.exchange = exchange
         self.rules_cache_ttl_seconds = rules_cache_ttl_seconds
@@ -106,7 +187,10 @@ class MarketDataService:
         self.mode = mode.strip().lower()
         self.ws_rest_fallback = ws_rest_fallback
         self._rest_provider = RestMarketDataProvider(
-            exchange=exchange, now_provider=self.now_provider
+            exchange=exchange,
+            now_provider=self.now_provider,
+            orderbook_ttl_ms=orderbook_ttl_ms,
+            orderbook_max_staleness_ms=orderbook_max_staleness_ms,
         )
         self._ws_provider = WsMarketDataProvider()
         self._last_snapshot: MarketDataSnapshot | None = None
@@ -115,7 +199,6 @@ class MarketDataService:
         return self.exchange.get_orderbook(symbol)
 
     def get_best_bids(self, symbols: list[str]) -> dict[str, float]:
-        # Backwards-compatible API for existing callers.
         snapshot = self._resolve_snapshot(symbols)
         self._last_snapshot = snapshot
         return snapshot.bids
@@ -126,11 +209,9 @@ class MarketDataService:
         *,
         max_age_ms: int,
     ) -> tuple[dict[str, float], MarketDataFreshness]:
-        """Deterministic API for Stage3: bids and freshness come from the same snapshot."""
         snapshot = self._resolve_snapshot(symbols)
         freshness = self._freshness_from_snapshot(snapshot=snapshot, max_age_ms=max_age_ms)
 
-        # WS policy: if enabled, fallback to REST when WS snapshot is not usable.
         if self.mode == "ws" and self.ws_rest_fallback and freshness.is_stale:
             fallback_snapshot = self._rest_provider.get_snapshot(symbols)
             fallback_snapshot = MarketDataSnapshot(
@@ -180,8 +261,6 @@ class MarketDataService:
         )
 
     def get_market_data_freshness(self, *, max_age_ms: int) -> MarketDataFreshness:
-        # Backwards-compatible API. Deterministic callers should use
-        # get_best_bids_with_freshness() instead.
         snapshot = self._last_snapshot
         if snapshot is None:
             return MarketDataFreshness(

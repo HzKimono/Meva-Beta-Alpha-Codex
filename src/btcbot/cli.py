@@ -1146,6 +1146,8 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                         exchange,
                         mode=settings.market_data_mode,
                         ws_rest_fallback=settings.ws_market_data_rest_fallback,
+                        orderbook_ttl_ms=settings.orderbook_ttl_ms,
+                        orderbook_max_staleness_ms=settings.orderbook_max_staleness_ms,
                     )
                 except TypeError:
                     market_data_service = MarketDataService(exchange)
