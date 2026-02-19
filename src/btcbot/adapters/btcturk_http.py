@@ -386,13 +386,6 @@ class BtcturkHttpClient(ExchangeClient):
                 )
                 if response.status_code == 429 or response.status_code >= 500:
                     retry_after_header = response.headers.get("Retry-After")
-                    if response.status_code == 429:
-                        self._record_429(group, parse_retry_after_seconds(retry_after_header))
-                        get_instrumentation().counter(
-                            "rest_429_total",
-                            1,
-                            attrs={"group": group, "path": path},
-                        )
                     raise _RetryableRequestError(
                         err,
                         retry_after_header=retry_after_header,
@@ -431,6 +424,12 @@ class BtcturkHttpClient(ExchangeClient):
         def _on_retry(_attempt: object) -> None:
             get_instrumentation().counter("rest_retry_total", 1, attrs={"group": group, "path": path})
 
+        if method.upper() != "GET":
+            try:
+                return _call()
+            except _RetryableRequestError as exc:
+                raise exc.exchange_error
+
         try:
             return retry_with_backoff(
                 _call,
@@ -445,6 +444,9 @@ class BtcturkHttpClient(ExchangeClient):
                 sleep_fn=sleep,
             )
         except _RetryableRequestError as exc:
+            if exc.exchange_error.status_code == 429:
+                get_instrumentation().counter("rest_429_total", 1, attrs={"group": group, "path": path})
+                self._record_429(group, parse_retry_after_seconds(exc.retry_after_header))
             raise exc.exchange_error
 
     def _private_get(self, path: str, params: dict[str, str | int] | None = None) -> dict:

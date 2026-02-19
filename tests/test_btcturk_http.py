@@ -415,7 +415,75 @@ def test_private_get_retries_429_using_retry_after_header_and_penalizes_limiter(
     assert balances == []
     assert calls["count"] == 2
     assert sleeps == [1.5]
-    assert limiter.penalties == [1.5]
+    assert limiter.penalties == []
+    client.close()
+
+
+def test_private_intermediate_429_does_not_record_breaker_or_429_counter(monkeypatch) -> None:
+    class SpyLimiter:
+        def __init__(self) -> None:
+            self.penalties: list[float | None] = []
+
+        def acquire(self, group: str, cost: int = 1) -> float:
+            del group, cost
+            return 0.0
+
+        def penalize_on_429(self, group: str, retry_after_s: float | None) -> None:
+            del group
+            self.penalties.append(retry_after_s)
+
+    class SpyInstrumentation:
+        def __init__(self) -> None:
+            self.counters: list[tuple[str, int, dict[str, object] | None]] = []
+
+        def counter(self, name: str, value: int = 1, *, attrs: dict[str, object] | None = None) -> None:
+            self.counters.append((name, value, attrs))
+
+        def histogram(self, name: str, value: float, *, attrs: dict[str, object] | None = None) -> None:
+            del name, value, attrs
+
+        def trace(self, *_args, **_kwargs):
+            class _Ctx:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, exc_type, exc, tb):
+                    del exc_type, exc, tb
+                    return False
+
+            return _Ctx()
+
+    calls = {"count": 0}
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if request.url.path == "/api/v1/users/balances" and calls["count"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "1.5"}, json={}, request=request)
+        if request.url.path == "/api/v1/users/balances":
+            return httpx.Response(200, json={"success": True, "data": []}, request=request)
+        return httpx.Response(404, request=request)
+
+    spy_instr = SpyInstrumentation()
+    monkeypatch.setattr("btcbot.adapters.btcturk_http.get_instrumentation", lambda: spy_instr)
+    monkeypatch.setattr("btcbot.adapters.btcturk_http.sleep", lambda seconds: sleeps.append(seconds))
+
+    limiter = SpyLimiter()
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c3VwZXItc2VjcmV0LWJ5dGVz",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        rate_limiter=limiter,  # type: ignore[arg-type]
+    )
+
+    balances = client.get_balances()
+
+    assert balances == []
+    assert calls["count"] == 2
+    assert sleeps == [1.5]
+    assert limiter.penalties == []
+    assert not [name for name, _value, _attrs in spy_instr.counters if name == "rest_429_total"]
     client.close()
 
 
