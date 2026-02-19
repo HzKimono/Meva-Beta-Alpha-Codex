@@ -1250,7 +1250,8 @@ class DryRunExchangeClient(ExchangeClient):
         del limit
         if symbol not in self._orderbooks:
             raise ValueError(f"Missing orderbook for {symbol}")
-        return self._orderbooks[symbol]
+        bid, ask = self._orderbooks[symbol]
+        return Decimal(str(bid)), Decimal(str(ask))
 
     def get_exchange_info(self) -> list[PairInfo]:
         return self._exchange_info
