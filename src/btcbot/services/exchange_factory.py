@@ -114,22 +114,26 @@ def _close_best_effort(resource: object, label: str) -> None:
 
 def _build_rate_limiter(settings: Settings) -> TokenBucketRateLimiter:
     return TokenBucketRateLimiter(
-        EndpointBudget(
-            tokens_per_second=settings.rate_limit_marketdata_tps,
-            burst_capacity=settings.rate_limit_marketdata_burst,
-        ),
-        group_budgets={
+        {
+            "default": EndpointBudget(
+                name="default",
+                rps=settings.rate_limit_marketdata_tps,
+                burst=settings.rate_limit_marketdata_burst,
+            ),
             "market_data": EndpointBudget(
-                tokens_per_second=settings.rate_limit_marketdata_tps,
-                burst_capacity=settings.rate_limit_marketdata_burst,
+                name="market_data",
+                rps=settings.rate_limit_marketdata_tps,
+                burst=settings.rate_limit_marketdata_burst,
             ),
             "account": EndpointBudget(
-                tokens_per_second=settings.rate_limit_account_tps,
-                burst_capacity=settings.rate_limit_account_burst,
+                name="account",
+                rps=settings.rate_limit_account_tps,
+                burst=settings.rate_limit_account_burst,
             ),
             "orders": EndpointBudget(
-                tokens_per_second=settings.rate_limit_orders_tps,
-                burst_capacity=settings.rate_limit_orders_burst,
+                name="orders",
+                rps=settings.rate_limit_orders_tps,
+                burst=settings.rate_limit_orders_burst,
             ),
-        },
+        }
     )

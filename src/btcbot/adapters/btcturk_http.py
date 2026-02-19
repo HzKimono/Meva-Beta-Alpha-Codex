@@ -189,12 +189,12 @@ class BtcturkHttpClient(ExchangeClient):
         )
         self._nonce = MonotonicNonceGenerator()
         self._rate_limiter = rate_limiter or TokenBucketRateLimiter(
-            EndpointBudget(tokens_per_second=8.0, burst_capacity=8),
-            group_budgets={
-                "market_data": EndpointBudget(tokens_per_second=8.0, burst_capacity=8),
-                "account": EndpointBudget(tokens_per_second=4.0, burst_capacity=4),
-                "orders": EndpointBudget(tokens_per_second=2.0, burst_capacity=2),
-            },
+            {
+                "default": EndpointBudget(name="default", rps=8.0, burst=8),
+                "market_data": EndpointBudget(name="market_data", rps=8.0, burst=8),
+                "account": EndpointBudget(name="account", rps=4.0, burst=4),
+                "orders": EndpointBudget(name="orders", rps=2.0, burst=2),
+            }
         )
         self._breaker_429_consecutive_threshold = max(1, breaker_429_consecutive_threshold)
         self._breaker_cooldown_seconds = max(0.0, breaker_cooldown_seconds)

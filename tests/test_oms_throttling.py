@@ -36,7 +36,7 @@ def _intent(cid: str) -> OrderIntent:
 def test_burst_then_throttle_then_allowed_with_same_client_order_id(tmp_path) -> None:
     clock = FakeClock()
     limiter = TokenBucketRateLimiter(
-        EndpointBudget(tokens_per_second=1.0, burst_capacity=1),
+        {"default": EndpointBudget(name="default", rps=1.0, burst=1)},
         clock=clock.time,
     )
     store = StateStore(db_path=str(tmp_path / "state.db"))

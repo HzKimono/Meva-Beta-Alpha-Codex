@@ -38,8 +38,8 @@ class ExchangeClient(ABC):
         self,
         symbol: str,
         side: OrderSide,
-        price: float,
-        quantity: float,
+        price: Decimal,
+        quantity: Decimal,
         client_order_id: str | None = None,
     ) -> Order:
         raise NotImplementedError

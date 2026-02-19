@@ -125,10 +125,13 @@ class OMSService:
         cancel_set = set(cancel_requests or [])
 
         limiter = self._rate_limiter or TokenBucketRateLimiter(
-            EndpointBudget(
-                tokens_per_second=float(settings.stage7_rate_limit_rps),
-                burst_capacity=settings.stage7_rate_limit_burst,
-            )
+            {
+                "default": EndpointBudget(
+                    name="default",
+                    rps=float(settings.stage7_rate_limit_rps),
+                    burst=settings.stage7_rate_limit_burst,
+                )
+            }
         )
 
         for intent in sorted(intents, key=lambda item: item.client_order_id):
@@ -199,7 +202,7 @@ class OMSService:
                 applied_orders.append(order)
                 continue
 
-            if not limiter.consume():
+            if not limiter.consume("default"):
                 order, seq = self._append_event(
                     events_to_append=events_to_append,
                     order=order,
@@ -208,7 +211,7 @@ class OMSService:
                     payload={
                         "next_eligible_ts": (
                             now_utc.astimezone(UTC)
-                            + timedelta(seconds=limiter.seconds_until_available())
+                            + timedelta(seconds=limiter.seconds_until_available("default"))
                         ).isoformat()
                     },
                     seq=seq,

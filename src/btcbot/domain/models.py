@@ -113,8 +113,8 @@ class Order(BaseModel):
     client_order_id: str | None = None
     symbol: str
     side: OrderSide
-    price: float
-    quantity: float
+    price: Decimal
+    quantity: Decimal
     status: OrderStatus = OrderStatus.NEW
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -123,10 +123,12 @@ class Order(BaseModel):
 class OrderIntent(BaseModel):
     symbol: str
     side: OrderSide = OrderSide.BUY
-    price: float
-    quantity: float
-    notional: float
+    price: Decimal
+    quantity: Decimal
+    notional: Decimal
     cycle_id: str
+    strategy_id: str = "default"
+    intent_salt: str = ""
 
 
 class ExchangeError(RuntimeError):
@@ -173,16 +175,21 @@ class CancelOrderResult(BaseModel):
     success: bool
 
 
-def make_client_order_id(intent: OrderIntent, *, prefix: str = "meva2") -> str:
-    cycle = re.sub(r"[^A-Za-z0-9_-]", "", intent.cycle_id)[:8] or "cycle"
+def make_intent_id(intent: OrderIntent) -> str:
+    symbol = re.sub(r"[^A-Za-z0-9]", "", intent.symbol).upper()[:12] or "SYMB"
+    raw = (
+        f"{intent.strategy_id}|{symbol}|{intent.side.value}|"
+        f"{intent.price:.8f}|{intent.quantity:.8f}|{intent.notional:.8f}|{intent.intent_salt}"
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def make_client_order_id(intent: OrderIntent, *, prefix: str = "meva2", attempt: int = 0) -> str:
     symbol = re.sub(r"[^A-Za-z0-9]", "", intent.symbol).upper()[:8] or "SYMB"
     side_short = "b" if intent.side == OrderSide.BUY else "s"
-    raw = (
-        f"{symbol}|{intent.side.value}|{intent.price:.8f}|"
-        f"{intent.quantity:.8f}|{intent.notional:.8f}|{intent.cycle_id}"
-    )
-    digest = hashlib.sha256(raw.encode()).hexdigest()[:8]
-    value = f"{prefix}-{cycle}-{symbol}-{side_short}-{digest}"
+    intent_id = make_intent_id(intent)
+    safe_attempt = max(0, int(attempt))
+    value = f"{prefix}-{symbol}-{side_short}-{intent_id}-a{safe_attempt}"
     return value[:40]
 
 
