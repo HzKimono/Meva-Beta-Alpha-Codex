@@ -31,7 +31,8 @@ def test_to_pair_info_parses_real_btcturk_shape() -> None:
         }
     )
 
-    assert pair.pair_symbol == "BTC_TRY"
+    assert pair.pair_symbol == "BTCTRY"
+    assert pair.name_normalized == "BTC_TRY"
     assert pair.min_total_amount == Decimal("99.91")
     assert pair.min_price == Decimal("10")
     assert pair.max_price == Decimal("9999999")
@@ -50,7 +51,8 @@ def test_to_pair_info_supports_pair_symbol_variant() -> None:
         }
     )
 
-    assert pair.pair_symbol == "BTC_TRY"
+    assert pair.pair_symbol == "BTCTRY"
+    assert pair.name_normalized == "BTCTRY"
 
 
 def test_to_pair_info_optional_missing_fields_do_not_raise() -> None:
@@ -65,7 +67,8 @@ def test_to_pair_info_optional_missing_fields_do_not_raise() -> None:
         }
     )
 
-    assert pair.pair_symbol == "SOL_TRY"
+    assert pair.pair_symbol == "SOLTRY"
+    assert pair.name_normalized == "SOLTRY"
     assert pair.min_total_amount is None
 
 
@@ -91,7 +94,7 @@ def test_get_exchange_info_skips_malformed_rows_when_some_are_valid() -> None:
     pairs = client.get_exchange_info()
 
     assert len(pairs) == 1
-    assert pairs[0].pair_symbol == "BTC_TRY"
+    assert pairs[0].pair_symbol == "BTCTRY"
     client.close()
 
 
@@ -131,6 +134,7 @@ def test_to_pair_info_supports_pair_symbol_normalized_and_lot_size_filter_varian
         }
     )
 
-    assert pair.pair_symbol == "BTC_TRY"
+    assert pair.pair_symbol == "BTCTRY"
+    assert pair.name_normalized == "BTCTRY"
     assert pair.min_total_amount == Decimal("99.91")
     assert pair.step_size == Decimal("0.00001")

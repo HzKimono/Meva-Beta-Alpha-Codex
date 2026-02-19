@@ -160,6 +160,10 @@ def _fmt_decimal(value: Decimal) -> str:
     return normalized or "0"
 
 
+def _btcturk_pair_symbol(symbol: str) -> str:
+    return normalize_symbol(symbol).replace("_", "")
+
+
 class BtcturkHttpClient(ExchangeClient):
     BASE_URL = "https://api.btcturk.com"
 
@@ -531,7 +535,7 @@ class BtcturkHttpClient(ExchangeClient):
         return normalized
 
     def _pair_symbol(self, symbol: str) -> str:
-        return normalize_symbol(symbol)
+        return _btcturk_pair_symbol(symbol)
 
     def _extract_list_data(self, payload: dict, *, path: str) -> list[dict[str, object]]:
         data = payload.get("data")
@@ -741,9 +745,9 @@ class BtcturkHttpClient(ExchangeClient):
                     str(item["nameNormalized"])
                     if item.get("nameNormalized") is not None
                     else (
-                        str(item["pairSymbolNormalized"])
+                        normalize_symbol(str(item["pairSymbolNormalized"]))
                         if item.get("pairSymbolNormalized") is not None
-                        else None
+                        else normalize_symbol(str(pair_symbol))
                     )
                 ),
                 status=(str(item["status"]) if item.get("status") is not None else None),
@@ -765,12 +769,9 @@ class BtcturkHttpClient(ExchangeClient):
             raise ValueError(f"Malformed exchange info pair item: {item}") from exc
 
     def _resolve_pair_symbol(self, item: dict[str, object]) -> str:
-        raw_symbol = (
-            item.get("pairSymbol")
-            or item.get("pairSymbolNormalized")
-            or item.get("nameNormalized")
-            or item.get("name")
-        )
+        raw_symbol = item.get("pairSymbol")
+        if raw_symbol is None:
+            raw_symbol = item.get("name") or item.get("pairSymbolNormalized") or item.get("nameNormalized")
         if raw_symbol is None:
             keys = sorted(item.keys())
             raise ValueError(
@@ -779,23 +780,7 @@ class BtcturkHttpClient(ExchangeClient):
                 f"received keys={keys}"
             )
 
-        symbol = str(raw_symbol).strip().replace("/", "_").upper()
-
-        normalized_name = item.get("nameNormalized") or item.get("pairSymbolNormalized")
-        if normalized_name is not None:
-            normalized_name_text = str(normalized_name).strip().replace("/", "_").upper()
-            if "_" in normalized_name_text:
-                symbol = normalized_name_text
-
-        if "_" in symbol:
-            return symbol
-
-        numerator = item.get("numerator")
-        denominator = item.get("denominator")
-        if numerator and denominator:
-            return f"{str(numerator).upper()}_{str(denominator).upper()}"
-
-        return symbol
+        return str(raw_symbol).strip().upper()
 
     def _resolve_scale(
         self,
@@ -955,7 +940,9 @@ class BtcturkHttpClient(ExchangeClient):
         return parsed
 
     def get_open_orders(self, pair_symbol: str) -> OpenOrders:
-        data = self._private_get("/api/v1/openOrders", params={"pairSymbol": pair_symbol})
+        data = self._private_get(
+            "/api/v1/openOrders", params={"pairSymbol": _btcturk_pair_symbol(pair_symbol)}
+        )
         payload = data.get("data")
         if not isinstance(payload, dict):
             raise ValueError("Malformed open orders payload")
@@ -975,7 +962,11 @@ class BtcturkHttpClient(ExchangeClient):
     def get_all_orders(self, pair_symbol: str, start_ms: int, end_ms: int) -> list[OrderSnapshot]:
         data = self._private_get(
             "/api/v1/allOrders",
-            params={"pairSymbol": pair_symbol, "startDate": start_ms, "endDate": end_ms},
+            params={
+                "pairSymbol": _btcturk_pair_symbol(pair_symbol),
+                "startDate": start_ms,
+                "endDate": end_ms,
+            },
         )
         rows = self._extract_order_rows(data, path="/api/v1/allOrders")
         return [self._to_order_snapshot(item) for item in rows]
@@ -995,7 +986,7 @@ class BtcturkHttpClient(ExchangeClient):
 
     def _build_submit_order_payload(self, request: SubmitOrderRequest) -> dict[str, object]:
         return {
-            "pairSymbol": request.pair_symbol,
+            "pairSymbol": _btcturk_pair_symbol(request.pair_symbol),
             "price": _fmt_decimal(request.price),
             "quantity": _fmt_decimal(request.quantity),
             "orderMethod": "limit",
@@ -1033,7 +1024,7 @@ class BtcturkHttpClient(ExchangeClient):
             )
 
         request = SubmitOrderRequest(
-            pair_symbol=self._pair_symbol(symbol_normalized),
+            pair_symbol=_btcturk_pair_symbol(symbol_normalized),
             side=OrderSide(side.lower()),
             price=quantized_price,
             quantity=quantized_qty,
@@ -1074,12 +1065,13 @@ class BtcturkHttpClient(ExchangeClient):
         return OrderAck(exchange_order_id=str(data["id"]), status="submitted", raw=data)
 
     def _resolve_symbol_rules(self, symbol: str):
+        symbol_normalized = normalize_symbol(symbol)
         try:
             exchange_info = self.get_exchange_info()
         except Exception:  # noqa: BLE001
             exchange_info = []
         for pair in exchange_info:
-            if normalize_symbol(pair.pair_symbol) == symbol:
+            if normalize_symbol(pair.pair_symbol) == symbol_normalized:
                 return pair_info_to_symbol_rules(pair)
         return pair_info_to_symbol_rules(
             PairInfo(
@@ -1135,7 +1127,7 @@ class BtcturkHttpClient(ExchangeClient):
             raise ValueError("client_order_id is required for BTCTurk place_limit_order")
 
         request = SubmitOrderRequest(
-            pair_symbol=self._pair_symbol(symbol),
+            pair_symbol=_btcturk_pair_symbol(symbol),
             side=side,
             price=price,
             quantity=quantity,
@@ -1461,7 +1453,7 @@ class BtcturkHttpClientStage4(ExchangeClientStage4):
             )
 
         payload = self.client._private_get(
-            "/api/v1/openOrders", params={"pairSymbol": self.client._pair_symbol(symbol)}
+            "/api/v1/openOrders", params={"pairSymbol": _btcturk_pair_symbol(symbol)}
         )
         data = payload.get("data")
         if not isinstance(data, dict):
@@ -1510,7 +1502,7 @@ class BtcturkHttpClientStage4(ExchangeClientStage4):
             return False
 
     def get_recent_fills(self, symbol: str, since_ms: int | None = None) -> list[TradeFill]:
-        params: dict[str, str | int] = {"pairSymbol": self.client._pair_symbol(symbol)}
+        params: dict[str, str | int] = {"pairSymbol": _btcturk_pair_symbol(symbol)}
         if since_ms is not None:
             params["startDate"] = since_ms
 
