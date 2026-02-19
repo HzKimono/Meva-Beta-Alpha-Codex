@@ -11,8 +11,8 @@ from btcbot.adapters.btcturk_http import (
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
-from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
 from btcbot.domain.models import Balance
+from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
 

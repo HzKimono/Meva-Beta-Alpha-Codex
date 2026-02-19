@@ -44,8 +44,8 @@ from btcbot.domain.models import (
 from btcbot.domain.stage4 import Order as Stage4Order
 from btcbot.observability import get_instrumentation
 from btcbot.security.redaction import sanitize_mapping, sanitize_text
-from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
 from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter, map_endpoint_group
+from btcbot.services.retry import parse_retry_after_seconds, retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +330,8 @@ class BtcturkHttpClient(ExchangeClient):
 
         group = self._request_group(path)
         request_id = uuid4().hex
+        normalized_method = method.upper()
+        is_private_write = normalized_method in {"POST", "PUT", "PATCH", "DELETE"}
 
         def _call() -> dict:
             self._check_breaker(group)
@@ -341,9 +343,11 @@ class BtcturkHttpClient(ExchangeClient):
                 stamp_ms=self._next_stamp_ms(),
             )
             headers["X-Request-ID"] = request_id
-            with get_instrumentation().trace("rest_call", attrs={"method": method, "path": path, "group": group}):
+            with get_instrumentation().trace(
+                "rest_call", attrs={"method": normalized_method, "path": path, "group": group}
+            ):
                 response = self.client.request(
-                    method=method,
+                    method=normalized_method,
                     url=path,
                     params=params,
                     json=json,
@@ -371,7 +375,7 @@ class BtcturkHttpClient(ExchangeClient):
                 )
                 err = ExchangeError(
                     "BTCTurk private endpoint error "
-                    f"status={response.status_code} method={method} path={path} "
+                    f"status={response.status_code} method={normalized_method} path={path} "
                     f"code={payload_code} message={safe_payload_message} response={snippet} "
                     f"request_has_params={params is not None} request_has_json={json is not None} "
                     f"request_id={request_id}",
@@ -379,12 +383,15 @@ class BtcturkHttpClient(ExchangeClient):
                     error_code=payload_code,
                     error_message=safe_payload_message,
                     request_path=path,
-                    request_method=method,
+                    request_method=normalized_method,
                     request_params=_sanitize_request_params(params),
                     request_json=_sanitize_request_json(json),
                     response_body=snippet,
                 )
-                if response.status_code == 429 or response.status_code >= 500:
+                should_retry_status = response.status_code == 429 or (
+                    response.status_code >= 500 and not is_private_write
+                )
+                if should_retry_status:
                     retry_after_header = response.headers.get("Retry-After")
                     if response.status_code == 429:
                         self._record_429(group, parse_retry_after_seconds(retry_after_header))
@@ -411,7 +418,7 @@ class BtcturkHttpClient(ExchangeClient):
                     error_code=payload.get("code"),
                     error_message=safe_message,
                     request_path=path,
-                    request_method=method,
+                    request_method=normalized_method,
                     request_params=_sanitize_request_params(params),
                     request_json=_sanitize_request_json(json),
                 )
@@ -445,7 +452,7 @@ class BtcturkHttpClient(ExchangeClient):
                 sleep_fn=sleep,
             )
         except _RetryableRequestError as exc:
-            raise exc.exchange_error
+            raise exc.exchange_error from exc
 
     def _private_get(self, path: str, params: dict[str, str | int] | None = None) -> dict:
         return self._private_request("GET", path, params=params)
