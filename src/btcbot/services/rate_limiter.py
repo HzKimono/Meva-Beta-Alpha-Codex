@@ -21,16 +21,30 @@ class EndpointBudget:
 class TokenBucketRateLimiter:
     def __init__(
         self,
-        default_budget: EndpointBudget,
+        default_budget: EndpointBudget | None = None,
         *,
+        rate_per_sec: float | None = None,
+        burst: int | None = None,
+        time_source: Callable[[], float] | None = None,
         group_budgets: dict[str, EndpointBudget] | None = None,
         clock: Callable[[], float] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
+        if default_budget is None:
+            if rate_per_sec is None or burst is None:
+                raise TypeError(
+                    "TokenBucketRateLimiter requires either default_budget or both "
+                    "rate_per_sec and burst"
+                )
+            default_budget = EndpointBudget(tokens_per_second=rate_per_sec, burst_capacity=burst)
+
+        if time_source is not None and clock is not None and time_source is not clock:
+            raise TypeError("time_source and clock cannot both be provided with different values")
+
         default_budget.validate(label="default_budget")
         for group, budget in (group_budgets or {}).items():
             budget.validate(label=f"group_budget[{group}]")
-        self._clock = clock or monotonic
+        self._clock = time_source or clock or monotonic
         self._sleep = sleep_fn or sleep
         self._lock = Lock()
         self._group_budgets = {"default": default_budget, **(group_budgets or {})}
@@ -58,6 +72,19 @@ class TokenBucketRateLimiter:
             self._state[group] = state
         return state
 
+    def _wait_seconds_locked(self, group: str, cost: int) -> float:
+        self._refill(group)
+        state = self._state_for(group)
+        budget = self._budget_for(group)
+        now = self._clock()
+        cooldown_wait = max(0.0, state["cooldown_until"] - now)
+        if cooldown_wait > 0:
+            return cooldown_wait
+        if state["tokens"] >= cost:
+            return 0.0
+        deficit = float(cost) - state["tokens"]
+        return deficit / max(budget.tokens_per_second, 1e-9)
+
     def _refill(self, group: str) -> None:
         state = self._state_for(group)
         budget = self._budget_for(group)
@@ -77,22 +104,31 @@ class TokenBucketRateLimiter:
         waited = 0.0
         while True:
             with self._lock:
-                self._refill(group)
-                state = self._state_for(group)
-                budget = self._budget_for(group)
-                now = self._clock()
-                cooldown_wait = max(0.0, state["cooldown_until"] - now)
-                if cooldown_wait > 0:
-                    wait_seconds = cooldown_wait
-                elif state["tokens"] >= cost:
+                wait_seconds = self._wait_seconds_locked(group, cost)
+                if wait_seconds == 0.0:
+                    state = self._state_for(group)
                     state["tokens"] -= cost
                     return waited
-                else:
-                    deficit = float(cost) - state["tokens"]
-                    wait_seconds = deficit / max(budget.tokens_per_second, 1e-9)
             wait_seconds = max(0.0, wait_seconds)
             waited += wait_seconds
             self._sleep(wait_seconds)
+
+    def consume(self, group: str = "default", cost: int = 1) -> bool:
+        if cost < 1:
+            return True
+        with self._lock:
+            wait_seconds = self._wait_seconds_locked(group, cost)
+            if wait_seconds > 0:
+                return False
+            state = self._state_for(group)
+            state["tokens"] -= cost
+            return True
+
+    def seconds_until_available(self, group: str = "default", cost: int = 1) -> float:
+        if cost < 1:
+            return 0.0
+        with self._lock:
+            return max(0.0, self._wait_seconds_locked(group, cost))
 
     def penalize_on_429(self, group: str, retry_after_s: float | None) -> None:
         with self._lock:
