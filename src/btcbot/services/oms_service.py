@@ -16,7 +16,7 @@ from btcbot.domain.order_state import (
     make_intent_hash,
     make_order_id,
 )
-from btcbot.services.rate_limiter import TokenBucketRateLimiter
+from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
 from btcbot.services.retry import RetryAttempt, retry_with_backoff
 from btcbot.services.state_store import IdempotencyConflictError, StateStore
 
@@ -125,8 +125,13 @@ class OMSService:
         cancel_set = set(cancel_requests or [])
 
         limiter = self._rate_limiter or TokenBucketRateLimiter(
-            rate_per_sec=float(settings.stage7_rate_limit_rps),
-            burst=settings.stage7_rate_limit_burst,
+            {
+                "default": EndpointBudget(
+                    name="default",
+                    rps=float(settings.stage7_rate_limit_rps),
+                    burst=settings.stage7_rate_limit_burst,
+                )
+            }
         )
 
         for intent in sorted(intents, key=lambda item: item.client_order_id):
@@ -197,7 +202,7 @@ class OMSService:
                 applied_orders.append(order)
                 continue
 
-            if not limiter.consume():
+            if not limiter.consume("default"):
                 order, seq = self._append_event(
                     events_to_append=events_to_append,
                     order=order,
@@ -206,7 +211,7 @@ class OMSService:
                     payload={
                         "next_eligible_ts": (
                             now_utc.astimezone(UTC)
-                            + timedelta(seconds=limiter.seconds_until_available())
+                            + timedelta(seconds=limiter.seconds_until_available("default"))
                         ).isoformat()
                     },
                     seq=seq,

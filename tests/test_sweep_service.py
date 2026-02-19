@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from btcbot.domain.models import Balance, SymbolInfo
 from btcbot.services.state_store import StateStore
 from btcbot.services.sweep_service import SweepService
@@ -50,8 +52,8 @@ def test_sweep_service_allocates_excess_and_leaves_target(tmp_path):
 
     assert len(intents) > 0
     total = sum(intent.notional for intent in intents)
-    assert total <= 600.0
-    assert 900.0 - total >= 300.0
+    assert total <= Decimal("600")
+    assert Decimal("900") - total >= Decimal("300")
 
 
 def test_sweep_service_idempotent_same_payload_across_restarts(tmp_path):
@@ -214,8 +216,8 @@ def test_sweep_rounding_matches_tick_and_step_sizes(tmp_path):
     )
 
     assert len(intents) == 1
-    assert abs((intents[0].price / 0.05) - round(intents[0].price / 0.05)) < 1e-9
-    assert abs((intents[0].quantity / 0.003) - round(intents[0].quantity / 0.003)) < 1e-9
+    assert abs((intents[0].price / Decimal("0.05")) - round(intents[0].price / Decimal("0.05"))) < Decimal("1e-9")
+    assert abs((intents[0].quantity / Decimal("0.003")) - round(intents[0].quantity / Decimal("0.003"))) < Decimal("1e-9")
 
 
 def test_sweep_offset_reduces_price_before_rounding(tmp_path):
@@ -245,4 +247,4 @@ def test_sweep_offset_reduces_price_before_rounding(tmp_path):
     )
 
     assert len(intents) == 1
-    assert intents[0].price == 99.8
+    assert intents[0].price == Decimal("99.8")

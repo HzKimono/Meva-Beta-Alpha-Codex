@@ -28,8 +28,8 @@ def test_replay_exchange_supports_full_balances() -> None:
 
     balances = {item.asset: item.free for item in client.get_balances()}
 
-    assert balances["TRY"] == 123.46
-    assert balances["BTC"] == 0.12345679
+    assert balances["TRY"] == Decimal("123.46")
+    assert balances["BTC"] == Decimal("0.12345679")
 
 
 def test_replay_exchange_uses_pair_info_snapshot_when_provided() -> None:
