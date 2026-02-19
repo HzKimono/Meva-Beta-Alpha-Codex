@@ -60,8 +60,8 @@ def test_get_orderbook_parses_valid_payload(monkeypatch) -> None:
 
     bid, ask = client.get_orderbook("BTC_TRY")
 
-    assert bid == 100.25
-    assert ask == 100.5
+    assert bid == Decimal("100.25")
+    assert ask == Decimal("100.5")
     client.close()
 
 
@@ -344,7 +344,7 @@ def test_public_get_retries_429_using_retry_after_header(monkeypatch) -> None:
 
     bid, ask = client.get_orderbook("BTC_TRY")
 
-    assert (bid, ask) == (100.0, 101.0)
+    assert (bid, ask) == (Decimal("100"), Decimal("101"))
     assert calls["count"] == 2
     assert sleeps == [1.5]
     client.close()

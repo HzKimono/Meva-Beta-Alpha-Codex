@@ -1211,10 +1211,10 @@ class DryRunExchangeClient(ExchangeClient):
     def __init__(
         self,
         balances: list[Balance] | None = None,
-        orderbooks: dict[str, tuple[float, float]] | None = None,
+        orderbooks: dict[str, tuple[Decimal, Decimal]] | None = None,
         exchange_info: list[PairInfo] | None = None,
     ) -> None:
-        self._balances = balances or [Balance(asset="TRY", free=0.0)]
+        self._balances = balances or [Balance(asset="TRY", free=Decimal("0"))]
         self._orderbooks = orderbooks or {}
         self._open_orders: list[Order] = []
         self._exchange_info = exchange_info or []
@@ -1224,7 +1224,7 @@ class DryRunExchangeClient(ExchangeClient):
     def get_ticker_stats(self) -> list[dict[str, object]]:
         stats: list[dict[str, object]] = []
         for symbol, (bid, ask) in self._orderbooks.items():
-            mid = (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
+            mid = (bid + ask) / Decimal("2")
             stats.append(
                 {
                     "pairSymbol": normalize_symbol(symbol),
@@ -1238,7 +1238,7 @@ class DryRunExchangeClient(ExchangeClient):
 
     def get_candles(self, symbol: str, limit: int) -> list[dict[str, object]]:
         bid, ask = self.get_orderbook(symbol)
-        mid = (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
+        mid = (bid + ask) / Decimal("2")
         if limit <= 0:
             return []
         return [{"close": str(mid)} for _ in range(limit)]
@@ -1308,7 +1308,7 @@ class DryRunExchangeClient(ExchangeClient):
 
     def _maybe_fill(self, order: Order) -> None:
         bid, ask = self.get_orderbook(order.symbol)
-        mark = (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
+        mark = (bid + ask) / Decimal("2")
         should_fill = (order.side == OrderSide.BUY and Decimal(str(order.price)) >= mark) or (
             order.side == OrderSide.SELL and Decimal(str(order.price)) <= mark
         )

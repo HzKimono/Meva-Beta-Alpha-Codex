@@ -96,9 +96,8 @@ def test_async_token_bucket_uses_async_sleep() -> None:
         now["t"] += seconds
 
     limiter = AsyncTokenBucketRateLimiter(
-        rate_per_sec=1.0,
-        burst=1,
-        time_source=lambda: now["t"],
+        EndpointBudget(tokens_per_second=1.0, burst_capacity=1),
+        clock=lambda: now["t"],
         sleep_fn=_sleep,
     )
 

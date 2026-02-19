@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 from btcbot.adapters.btcturk_http import (
     BtcturkHttpClient,
@@ -27,7 +28,7 @@ def build_exchange_stage3(settings: Settings, *, force_dry_run: bool) -> Exchang
             breaker_429_consecutive_threshold=settings.breaker_429_consecutive_threshold,
             breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
         )
-        orderbooks: dict[str, tuple[float, float]] = {}
+        orderbooks: dict[str, tuple[Decimal, Decimal]] = {}
         exchange_info = []
         try:
             try:
@@ -58,11 +59,11 @@ def build_exchange_stage3(settings: Settings, *, force_dry_run: bool) -> Exchang
                             }
                         },
                     )
-                    orderbooks[symbol] = (0.0, 0.0)
+                    orderbooks[symbol] = (Decimal("0"), Decimal("0"))
         finally:
             _close_best_effort(public_client, "public dry-run client")
 
-        balances = [Balance(asset="TRY", free=settings.dry_run_try_balance)]
+        balances = [Balance(asset="TRY", free=Decimal(str(settings.dry_run_try_balance)))]
         return DryRunExchangeClient(
             balances=balances,
             orderbooks=orderbooks,
