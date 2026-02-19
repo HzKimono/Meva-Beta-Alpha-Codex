@@ -1288,6 +1288,9 @@ class DryRunExchangeClient(ExchangeClient):
         quantity: Decimal,
         client_order_id: str | None = None,
     ) -> Order:
+        # Dry-run path must remain Decimal-native end-to-end.
+        if not isinstance(price, Decimal) or not isinstance(quantity, Decimal):
+            raise TypeError("DryRunExchangeClient.place_limit_order expects Decimal price/quantity")
         if side not in {OrderSide.BUY, OrderSide.SELL}:
             raise ValueError(f"Unsupported side: {side}")
 
@@ -1363,11 +1366,13 @@ class DryRunExchangeClient(ExchangeClient):
         qty: Decimal,
         client_order_id: str,
     ) -> OrderAck:
+        if not isinstance(price, Decimal) or not isinstance(qty, Decimal):
+            raise TypeError("DryRunExchangeClient.submit_limit_order expects Decimal price/qty")
         order = self.place_limit_order(
             symbol=symbol,
             side=OrderSide(side.lower()),
-            price=float(price),
-            quantity=float(qty),
+            price=price,
+            quantity=qty,
             client_order_id=client_order_id,
         )
         return OrderAck(exchange_order_id=order.order_id, status="submitted", raw=None)
