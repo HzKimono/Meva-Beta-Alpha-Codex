@@ -60,8 +60,8 @@ def test_get_orderbook_parses_valid_payload(monkeypatch) -> None:
 
     bid, ask = client.get_orderbook("BTC_TRY")
 
-    assert bid == 100.25
-    assert ask == 100.5
+    assert bid == Decimal("100.25")
+    assert ask == Decimal("100.5")
     client.close()
 
 
@@ -344,7 +344,7 @@ def test_public_get_retries_429_using_retry_after_header(monkeypatch) -> None:
 
     bid, ask = client.get_orderbook("BTC_TRY")
 
-    assert (bid, ask) == (100.0, 101.0)
+    assert (bid, ask) == (Decimal("100"), Decimal("101"))
     assert calls["count"] == 2
     assert sleeps == [1.5]
     client.close()
@@ -682,4 +682,74 @@ def test_private_request_non_429_4xx_is_not_retried() -> None:
         client.get_balances()
 
     assert calls["n"] == 1
+    client.close()
+
+
+def test_orderbook_cache_ttl_reuses_response() -> None:
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"bids": [["100", "1"]], "asks": [["101", "1"]]}},
+            request=request,
+        )
+
+    client = BtcturkHttpClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        orderbook_cache_ttl_s=1.0,
+    )
+
+    first = client.get_orderbook("BTC_TRY")
+    second = client.get_orderbook("BTC_TRY")
+
+    assert first == second
+    assert isinstance(first[0], Decimal)
+    assert isinstance(first[1], Decimal)
+    assert calls["count"] == 1
+    client.close()
+
+
+def test_orderbook_inflight_join_coalesces_requests() -> None:
+    import threading
+    from time import sleep as thread_sleep
+
+    calls = {"count": 0}
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        release.wait(timeout=1.0)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"bids": [["100", "1"]], "asks": [["101", "1"]]}},
+            request=request,
+        )
+
+    client = BtcturkHttpClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        orderbook_cache_ttl_s=1.0,
+    )
+
+    results: list[tuple[Decimal, Decimal]] = []
+
+    def _worker() -> None:
+        results.append(client.get_orderbook("BTC_TRY"))
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    thread_sleep(0.05)
+    t2.start()
+    thread_sleep(0.05)
+    release.set()
+    t1.join()
+    t2.join()
+
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert calls["count"] == 1
     client.close()

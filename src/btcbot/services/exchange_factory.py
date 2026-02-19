@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 from btcbot.adapters.btcturk_http import (
     BtcturkHttpClient,
@@ -11,8 +12,8 @@ from btcbot.adapters.btcturk_http import (
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
-from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
 from btcbot.domain.models import Balance
+from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def build_exchange_stage3(settings: Settings, *, force_dry_run: bool) -> Exchang
             breaker_429_consecutive_threshold=settings.breaker_429_consecutive_threshold,
             breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
         )
-        orderbooks: dict[str, tuple[float, float]] = {}
+        orderbooks: dict[str, tuple[Decimal, Decimal]] = {}
         exchange_info = []
         try:
             try:
@@ -58,11 +59,11 @@ def build_exchange_stage3(settings: Settings, *, force_dry_run: bool) -> Exchang
                             }
                         },
                     )
-                    orderbooks[symbol] = (0.0, 0.0)
+                    orderbooks[symbol] = (Decimal("0"), Decimal("0"))
         finally:
             _close_best_effort(public_client, "public dry-run client")
 
-        balances = [Balance(asset="TRY", free=settings.dry_run_try_balance)]
+        balances = [Balance(asset="TRY", free=Decimal(str(settings.dry_run_try_balance)))]
         return DryRunExchangeClient(
             balances=balances,
             orderbooks=orderbooks,
@@ -113,22 +114,26 @@ def _close_best_effort(resource: object, label: str) -> None:
 
 def _build_rate_limiter(settings: Settings) -> TokenBucketRateLimiter:
     return TokenBucketRateLimiter(
-        EndpointBudget(
-            tokens_per_second=settings.rate_limit_marketdata_tps,
-            burst_capacity=settings.rate_limit_marketdata_burst,
-        ),
-        group_budgets={
+        {
+            "default": EndpointBudget(
+                name="default",
+                rps=settings.rate_limit_marketdata_tps,
+                burst=settings.rate_limit_marketdata_burst,
+            ),
             "market_data": EndpointBudget(
-                tokens_per_second=settings.rate_limit_marketdata_tps,
-                burst_capacity=settings.rate_limit_marketdata_burst,
+                name="market_data",
+                rps=settings.rate_limit_marketdata_tps,
+                burst=settings.rate_limit_marketdata_burst,
             ),
             "account": EndpointBudget(
-                tokens_per_second=settings.rate_limit_account_tps,
-                burst_capacity=settings.rate_limit_account_burst,
+                name="account",
+                rps=settings.rate_limit_account_tps,
+                burst=settings.rate_limit_account_burst,
             ),
             "orders": EndpointBudget(
-                tokens_per_second=settings.rate_limit_orders_tps,
-                burst_capacity=settings.rate_limit_orders_burst,
+                name="orders",
+                rps=settings.rate_limit_orders_tps,
+                burst=settings.rate_limit_orders_burst,
             ),
-        },
+        }
     )
