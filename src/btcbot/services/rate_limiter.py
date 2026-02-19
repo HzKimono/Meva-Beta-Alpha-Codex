@@ -1,46 +1,104 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from threading import Lock
+from time import monotonic, sleep
+
+
+@dataclass(frozen=True)
+class EndpointBudget:
+    tokens_per_second: float
+    burst_capacity: int
 
 
 class TokenBucketRateLimiter:
     def __init__(
         self,
-        rate_per_sec: float,
-        burst: int,
+        default_budget: EndpointBudget,
         *,
-        time_source: Callable[[], float] | None = None,
+        group_budgets: dict[str, EndpointBudget] | None = None,
+        clock: Callable[[], float] | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
-        if rate_per_sec <= 0:
-            raise ValueError("rate_per_sec must be > 0")
-        if burst < 1:
-            raise ValueError("burst must be >= 1")
-        self._rate_per_sec = float(rate_per_sec)
-        self._capacity = float(burst)
-        self._time_source = time_source or __import__("time").time
-        now = self._time_source()
-        self._tokens = float(burst)
-        self._last_ts = now
+        self._clock = clock or monotonic
+        self._sleep = sleep_fn or sleep
+        self._lock = Lock()
+        self._group_budgets = {"default": default_budget, **(group_budgets or {})}
+        self._state = {
+            group: {
+                "tokens": float(budget.burst_capacity),
+                "updated_at": self._clock(),
+                "cooldown_until": 0.0,
+            }
+            for group, budget in self._group_budgets.items()
+        }
 
-    def _refill(self) -> None:
-        now = self._time_source()
-        elapsed = max(0.0, now - self._last_ts)
+    def _budget_for(self, group: str) -> EndpointBudget:
+        return self._group_budgets.get(group, self._group_budgets["default"])
+
+    def _state_for(self, group: str) -> dict[str, float]:
+        state = self._state.get(group)
+        if state is None:
+            budget = self._budget_for(group)
+            state = {
+                "tokens": float(budget.burst_capacity),
+                "updated_at": self._clock(),
+                "cooldown_until": 0.0,
+            }
+            self._state[group] = state
+        return state
+
+    def _refill(self, group: str) -> None:
+        state = self._state_for(group)
+        budget = self._budget_for(group)
+        now = self._clock()
+        elapsed = max(0.0, now - state["updated_at"])
         if elapsed > 0:
-            self._tokens = min(self._capacity, self._tokens + (elapsed * self._rate_per_sec))
-            self._last_ts = now
+            state["tokens"] = min(
+                float(budget.burst_capacity),
+                state["tokens"] + elapsed * budget.tokens_per_second,
+            )
+            state["updated_at"] = now
 
-    def allow(self, tokens: float = 1.0) -> bool:
-        self._refill()
-        return self._tokens >= tokens
+    def acquire(self, group: str, cost: int = 1) -> float:
+        if cost < 1:
+            return 0.0
 
-    def consume(self, tokens: float = 1.0) -> bool:
-        self._refill()
-        if self._tokens < tokens:
-            return False
-        self._tokens -= tokens
-        return True
+        waited = 0.0
+        while True:
+            with self._lock:
+                self._refill(group)
+                state = self._state_for(group)
+                budget = self._budget_for(group)
+                now = self._clock()
+                cooldown_wait = max(0.0, state["cooldown_until"] - now)
+                if cooldown_wait > 0:
+                    wait_seconds = cooldown_wait
+                elif state["tokens"] >= cost:
+                    state["tokens"] -= cost
+                    return waited
+                else:
+                    deficit = float(cost) - state["tokens"]
+                    wait_seconds = deficit / budget.tokens_per_second
+            wait_seconds = max(0.0, wait_seconds)
+            waited += wait_seconds
+            self._sleep(wait_seconds)
 
-    def seconds_until_available(self, tokens: float = 1.0) -> float:
-        self._refill()
-        deficit = max(0.0, tokens - self._tokens)
-        return deficit / self._rate_per_sec
+    def penalize_on_429(self, group: str, retry_after_s: float | None) -> None:
+        with self._lock:
+            state = self._state_for(group)
+            state["tokens"] = min(state["tokens"], 0.0)
+            if retry_after_s is not None and retry_after_s > 0:
+                state["cooldown_until"] = max(state["cooldown_until"], self._clock() + retry_after_s)
+
+
+def map_endpoint_group(path: str) -> str:
+    normalized = path.lower()
+    if "/orderbook" in normalized or "/ticker" in normalized or "/ohlc" in normalized:
+        return "market_data"
+    if "/order" in normalized and "/users/transactions" not in normalized:
+        return "orders"
+    if "/users/" in normalized or "/openorders" in normalized:
+        return "account"
+    return "market_data"

@@ -617,3 +617,23 @@ def test_stage4_recent_fills_fallback_id_is_deterministic() -> None:
 
     assert first == second
     assert first is not None
+
+
+def test_private_request_non_429_4xx_is_not_retried() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, json={"success": False, "message": "bad req"})
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c3VwZXItc2VjcmV0LWJ5dGVz",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ExchangeError):
+        client.get_balances()
+
+    assert calls["n"] == 1
+    client.close()
