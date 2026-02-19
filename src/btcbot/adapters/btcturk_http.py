@@ -1111,8 +1111,8 @@ class BtcturkHttpClient(ExchangeClient):
                 symbol=order.symbol,
                 side=order.side.value,
                 type="limit",
-                price=Decimal(str(order.price)),
-                qty=Decimal(str(order.quantity)),
+                price=order.price,
+                qty=order.quantity,
                 status=order.status.value,
                 created_at=order.created_at,
                 updated_at=order.updated_at,
@@ -1127,8 +1127,8 @@ class BtcturkHttpClient(ExchangeClient):
         self,
         symbol: str,
         side: OrderSide,
-        price: float,
-        quantity: float,
+        price: Decimal,
+        quantity: Decimal,
         client_order_id: str | None = None,
     ) -> Order:
         if client_order_id is None:
@@ -1137,8 +1137,8 @@ class BtcturkHttpClient(ExchangeClient):
         request = SubmitOrderRequest(
             pair_symbol=self._pair_symbol(symbol),
             side=side,
-            price=Decimal(str(price)),
-            quantity=Decimal(str(quantity)),
+            price=price,
+            quantity=quantity,
             client_order_id=client_order_id,
         )
         result = self._submit_limit_order_legacy(request)
@@ -1192,8 +1192,8 @@ class BtcturkHttpClient(ExchangeClient):
                     client_order_id=item.order_client_id,
                     symbol=normalize_symbol(symbol),
                     side=side,
-                    price=float(item.price),
-                    quantity=float(item.quantity),
+                    price=item.price,
+                    quantity=item.quantity,
                     status=local_status,
                     created_at=created,
                     updated_at=updated,
@@ -1272,8 +1272,8 @@ class DryRunExchangeClient(ExchangeClient):
                     client_order_id=order.client_order_id,
                     pair_symbol=normalize_symbol(order.symbol),
                     side=order.side,
-                    price=Decimal(str(order.price)),
-                    quantity=Decimal(str(order.quantity)),
+                    price=order.price,
+                    quantity=order.quantity,
                     status=ExchangeOrderStatus.OPEN,
                     timestamp=int(order.created_at.timestamp() * 1000),
                     update_time=int(order.updated_at.timestamp() * 1000),
@@ -1284,8 +1284,8 @@ class DryRunExchangeClient(ExchangeClient):
         self,
         symbol: str,
         side: OrderSide,
-        price: float,
-        quantity: float,
+        price: Decimal,
+        quantity: Decimal,
         client_order_id: str | None = None,
     ) -> Order:
         if side not in {OrderSide.BUY, OrderSide.SELL}:
@@ -1309,19 +1309,19 @@ class DryRunExchangeClient(ExchangeClient):
     def _maybe_fill(self, order: Order) -> None:
         bid, ask = self.get_orderbook(order.symbol)
         mark = (bid + ask) / Decimal("2")
-        should_fill = (order.side == OrderSide.BUY and Decimal(str(order.price)) >= mark) or (
-            order.side == OrderSide.SELL and Decimal(str(order.price)) <= mark
+        should_fill = (order.side == OrderSide.BUY and order.price >= mark) or (
+            order.side == OrderSide.SELL and order.price <= mark
         )
         if not should_fill and self._rng.random() > 0.2:
             return
-        fee = Decimal(str(order.price)) * Decimal(str(order.quantity)) * Decimal("0.001")
+        fee = order.price * order.quantity * Decimal("0.001")
         fill = TradeFill(
             fill_id=f"fill-{order.order_id}",
             order_id=order.order_id,
             symbol=order.symbol,
             side=order.side,
-            price=Decimal(str(order.price)),
-            qty=Decimal(str(order.quantity)),
+            price=order.price,
+            qty=order.quantity,
             fee=fee,
             fee_currency="TRY",
             ts=datetime.now(UTC),
@@ -1387,8 +1387,8 @@ class DryRunExchangeClient(ExchangeClient):
                 symbol=order.symbol,
                 side=order.side.value,
                 type="limit",
-                price=Decimal(str(order.price)),
-                qty=Decimal(str(order.quantity)),
+                price=order.price,
+                qty=order.quantity,
                 status=order.status.value,
                 created_at=order.created_at,
                 updated_at=order.updated_at,
@@ -1558,8 +1558,8 @@ class DryRunExchangeClientStage4(ExchangeClientStage4):
                 symbol=order.symbol,
                 side=order.side.value,
                 type="limit",
-                price=Decimal(str(order.price)),
-                qty=Decimal(str(order.quantity)),
+                price=order.price,
+                qty=order.quantity,
                 status=order.status.value,
                 created_at=order.created_at,
                 updated_at=order.updated_at,
