@@ -71,9 +71,15 @@ class _BreakerState:
 
 
 class _RetryableRequestError(Exception):
-    def __init__(self, exchange_error: ExchangeError) -> None:
+    def __init__(
+        self,
+        exchange_error: ExchangeError,
+        *,
+        retry_after_header: str | None = None,
+    ) -> None:
         super().__init__(str(exchange_error))
         self.exchange_error = exchange_error
+        self.retry_after_header = retry_after_header
 
 
 def _is_permanent_transport_error(exc: httpx.TransportError) -> bool:
@@ -379,7 +385,18 @@ class BtcturkHttpClient(ExchangeClient):
                     response_body=snippet,
                 )
                 if response.status_code == 429 or response.status_code >= 500:
-                    raise _RetryableRequestError(err) from err
+                    retry_after_header = response.headers.get("Retry-After")
+                    if response.status_code == 429:
+                        self._record_429(group, parse_retry_after_seconds(retry_after_header))
+                        get_instrumentation().counter(
+                            "rest_429_total",
+                            1,
+                            attrs={"group": group, "path": path},
+                        )
+                    raise _RetryableRequestError(
+                        err,
+                        retry_after_header=retry_after_header,
+                    ) from err
                 raise err
 
             payload = response.json()
@@ -402,6 +419,8 @@ class BtcturkHttpClient(ExchangeClient):
             return payload
 
         def _retry_after(exc: Exception) -> str | None:
+            if isinstance(exc, _RetryableRequestError):
+                return exc.retry_after_header
             if isinstance(exc, ExchangeError) and exc.response_body is not None:
                 return None
             response = getattr(exc, "response", None)
@@ -426,9 +445,6 @@ class BtcturkHttpClient(ExchangeClient):
                 sleep_fn=sleep,
             )
         except _RetryableRequestError as exc:
-            if exc.exchange_error.status_code == 429:
-                get_instrumentation().counter("rest_429_total", 1, attrs={"group": group, "path": path})
-                self._record_429(group, None)
             raise exc.exchange_error
 
     def _private_get(self, path: str, params: dict[str, str | int] | None = None) -> dict:

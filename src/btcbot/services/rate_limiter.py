@@ -11,6 +11,12 @@ class EndpointBudget:
     tokens_per_second: float
     burst_capacity: int
 
+    def validate(self, *, label: str) -> None:
+        if self.tokens_per_second <= 0:
+            raise ValueError(f"{label} tokens_per_second must be > 0")
+        if self.burst_capacity < 1:
+            raise ValueError(f"{label} burst_capacity must be >= 1")
+
 
 class TokenBucketRateLimiter:
     def __init__(
@@ -21,6 +27,9 @@ class TokenBucketRateLimiter:
         clock: Callable[[], float] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
+        default_budget.validate(label="default_budget")
+        for group, budget in (group_budgets or {}).items():
+            budget.validate(label=f"group_budget[{group}]")
         self._clock = clock or monotonic
         self._sleep = sleep_fn or sleep
         self._lock = Lock()
@@ -80,7 +89,7 @@ class TokenBucketRateLimiter:
                     return waited
                 else:
                     deficit = float(cost) - state["tokens"]
-                    wait_seconds = deficit / budget.tokens_per_second
+                    wait_seconds = deficit / max(budget.tokens_per_second, 1e-9)
             wait_seconds = max(0.0, wait_seconds)
             waited += wait_seconds
             self._sleep(wait_seconds)
@@ -88,9 +97,17 @@ class TokenBucketRateLimiter:
     def penalize_on_429(self, group: str, retry_after_s: float | None) -> None:
         with self._lock:
             state = self._state_for(group)
-            state["tokens"] = min(state["tokens"], 0.0)
+            state["tokens"] = 0.0
+            budget = self._budget_for(group)
             if retry_after_s is not None and retry_after_s > 0:
                 state["cooldown_until"] = max(state["cooldown_until"], self._clock() + retry_after_s)
+                return
+
+            fallback_cooldown = min(1.5, max(0.25, 1.0 / budget.tokens_per_second))
+            state["cooldown_until"] = max(
+                state["cooldown_until"],
+                self._clock() + fallback_cooldown,
+            )
 
 
 def map_endpoint_group(path: str) -> str:

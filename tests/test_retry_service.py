@@ -11,6 +11,10 @@ class _RateError(Exception):
     pass
 
 
+class _ClientError(Exception):
+    pass
+
+
 def test_parse_retry_after_seconds_supports_http_date() -> None:
     dt = datetime.now(UTC) + timedelta(seconds=2)
     value = parse_retry_after_seconds(dt.strftime("%a, %d %b %Y %H:%M:%S GMT"))
@@ -61,3 +65,24 @@ def test_retry_after_header_takes_priority() -> None:
     )
     assert out == "ok"
     assert slept[0] >= 2.0
+
+
+def test_non_429_4xx_style_error_is_not_retried() -> None:
+    calls = {"n": 0}
+
+    def _fn() -> None:
+        calls["n"] += 1
+        raise _ClientError("400")
+
+    with pytest.raises(_ClientError):
+        retry_with_backoff(
+            _fn,
+            max_attempts=4,
+            base_delay_ms=100,
+            max_delay_ms=500,
+            jitter_seed=4,
+            retry_on_exceptions=(_RateError,),
+            sleep_fn=lambda _seconds: None,
+        )
+
+    assert calls["n"] == 1

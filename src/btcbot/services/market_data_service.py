@@ -77,6 +77,7 @@ class RestMarketDataProvider(MarketDataProvider):
 
     def _get_or_fetch(self, symbol: str) -> _OrderbookCacheEntry:
         now_ms = self._now_ms()
+        is_owner = False
         with self._lock:
             cached = self._cache.get(symbol)
             if cached is not None and self._is_fresh(cached, now_ms):
@@ -91,8 +92,9 @@ class RestMarketDataProvider(MarketDataProvider):
             else:
                 future = Future()
                 self._inflight[symbol] = future
+                is_owner = True
 
-        if not future.done():
+        if is_owner:
             try:
                 bid, ask = self.exchange.get_orderbook(symbol)
                 result = _OrderbookCacheEntry(best_bid=bid, best_ask=ask, observed_at_ms=self._now_ms())
@@ -110,6 +112,7 @@ class RestMarketDataProvider(MarketDataProvider):
                         extra={"extra": {"symbol": symbol, "error_type": type(exc).__name__}},
                     )
                     get_instrumentation().counter("market_data_degraded_total", 1)
+                    future.set_result(cached)
                     return cached
                 future.set_exception(exc)
                 raise
