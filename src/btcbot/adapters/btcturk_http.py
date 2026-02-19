@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import ssl
@@ -9,6 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from math import isfinite
 from random import Random
+from threading import Event, Lock
 from time import monotonic, sleep, time
 from uuid import uuid4
 
@@ -115,7 +117,7 @@ def _should_retry(exc: BaseException) -> bool:
     return False
 
 
-def _parse_best_price(levels: object, side: str, symbol: str) -> float:
+def _parse_best_price(levels: object, side: str, symbol: str) -> Decimal:
     if not isinstance(levels, list) or not levels:
         raise ValueError(f"No orderbook {side} depth for {symbol}")
 
@@ -124,11 +126,11 @@ def _parse_best_price(levels: object, side: str, symbol: str) -> float:
         raise ValueError(f"Malformed orderbook {side} level for {symbol}")
 
     try:
-        value = float(top_level[0])
-    except (TypeError, ValueError) as exc:
+        value = parse_decimal(top_level[0])
+    except (TypeError, ValueError, InvalidOperation) as exc:
         raise ValueError(f"Invalid orderbook {side} price for {symbol}") from exc
 
-    if value <= 0 or not isfinite(value):
+    if value <= Decimal("0") or not isfinite(float(value)):
         raise ValueError(f"Non-positive orderbook {side} price for {symbol}")
     return value
 
@@ -149,9 +151,6 @@ def _sanitize_request_json(payload: dict[str, object] | None) -> dict[str, objec
         return None
     return sanitize_mapping(payload)
 
-
-def _sanitize_request_headers(headers: dict[str, str]) -> dict[str, str]:
-    return {key: str(value) for key, value in sanitize_mapping(headers).items()}
 
 
 def _fmt_decimal(value: Decimal) -> str:
@@ -174,6 +173,7 @@ class BtcturkHttpClient(ExchangeClient):
         rate_limiter: TokenBucketRateLimiter | None = None,
         breaker_429_consecutive_threshold: int = _BREAKER_CONSECUTIVE_429_THRESHOLD,
         breaker_cooldown_seconds: float = _BREAKER_COOLDOWN_SECONDS,
+        orderbook_cache_ttl_s: float = 0.2,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -199,6 +199,10 @@ class BtcturkHttpClient(ExchangeClient):
         self._breaker_429_consecutive_threshold = max(1, breaker_429_consecutive_threshold)
         self._breaker_cooldown_seconds = max(0.0, breaker_cooldown_seconds)
         self._breaker_state: dict[str, _BreakerState] = {}
+        self._orderbook_cache_ttl_s = max(0.0, orderbook_cache_ttl_s)
+        self._orderbook_cache: dict[tuple[str, int | None], tuple[float, tuple[Decimal, Decimal]]] = {}
+        self._orderbook_inflight: dict[tuple[str, int | None], Event] = {}
+        self._orderbook_lock = Lock()
 
     def __enter__(self) -> BtcturkHttpClient:
         return self
@@ -303,7 +307,7 @@ class BtcturkHttpClient(ExchangeClient):
                 ),
                 retry_after_getter=_retry_after,
                 on_retry=_on_retry,
-                sleep_fn=sleep,
+                sleep_fn=self._safe_sleep,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
@@ -311,6 +315,14 @@ class BtcturkHttpClient(ExchangeClient):
                 self._record_429(group, retry_after_s)
                 get_instrumentation().counter("rest_429_total", 1, attrs={"group": group, "path": path})
             raise
+
+    def _safe_sleep(self, seconds: float) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            sleep(seconds)
+            return
+        raise RuntimeError("Blocking retry sleep called from an active event loop")
 
     def _next_stamp_ms(self) -> str:
         return str(self._nonce.next_stamp_ms())
@@ -449,7 +461,7 @@ class BtcturkHttpClient(ExchangeClient):
                 retry_on_exceptions=(_RetryableRequestError, httpx.TimeoutException, httpx.TransportError),
                 retry_after_getter=_retry_after,
                 on_retry=_on_retry,
-                sleep_fn=sleep,
+                sleep_fn=self._safe_sleep,
             )
         except _RetryableRequestError as exc:
             raise exc.exchange_error from exc
@@ -598,20 +610,56 @@ class BtcturkHttpClient(ExchangeClient):
         }
         return (mapping.get(normalized, ExchangeOrderStatus.UNKNOWN), raw)
 
-    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
-        params: dict[str, str | int] = {"pairSymbol": self._pair_symbol(symbol)}
-        if limit is not None:
-            params["limit"] = limit
+    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[Decimal, Decimal]:
+        pair_symbol = self._pair_symbol(symbol)
+        key = (pair_symbol, limit)
 
-        path = "/api/v2/orderbook"
-        payload = self._get(path, params=params)
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise ValueError(f"Malformed orderbook payload for {symbol}: data must be an object")
+        with self._orderbook_lock:
+            cached = self._orderbook_cache.get(key)
+            now = monotonic()
+            if cached is not None and cached[0] > now:
+                get_instrumentation().counter("orderbook_cache_hits_total", 1, attrs={"pair_symbol": pair_symbol})
+                return cached[1]
+            get_instrumentation().counter("orderbook_cache_misses_total", 1, attrs={"pair_symbol": pair_symbol})
+            inflight = self._orderbook_inflight.get(key)
+            if inflight is None:
+                inflight = Event()
+                self._orderbook_inflight[key] = inflight
+                leader = True
+            else:
+                leader = False
+                get_instrumentation().counter("orderbook_inflight_joins_total", 1, attrs={"pair_symbol": pair_symbol})
 
-        best_bid = _parse_best_price(data.get("bids"), side="bid", symbol=symbol)
-        best_ask = _parse_best_price(data.get("asks"), side="ask", symbol=symbol)
-        return best_bid, best_ask
+        if not leader:
+            inflight.wait()
+            with self._orderbook_lock:
+                cached = self._orderbook_cache.get(key)
+                if cached is not None and cached[0] > monotonic():
+                    return cached[1]
+            raise ExchangeError(f"Orderbook inflight request failed for {pair_symbol}")
+
+        try:
+            params: dict[str, str | int] = {"pairSymbol": pair_symbol}
+            if limit is not None:
+                params["limit"] = limit
+
+            path = "/api/v2/orderbook"
+            payload = self._get(path, params=params)
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise ValueError(f"Malformed orderbook payload for {symbol}: data must be an object")
+
+            best_bid = _parse_best_price(data.get("bids"), side="bid", symbol=symbol)
+            best_ask = _parse_best_price(data.get("asks"), side="ask", symbol=symbol)
+            result = (best_bid, best_ask)
+            with self._orderbook_lock:
+                self._orderbook_cache[key] = (monotonic() + self._orderbook_cache_ttl_s, result)
+            return result
+        finally:
+            with self._orderbook_lock:
+                event = self._orderbook_inflight.pop(key, None)
+            if event is not None:
+                event.set()
 
     def get_ticker_stats(self) -> list[dict[str, object]]:
         payload = self._get("/api/v2/ticker")
@@ -902,7 +950,7 @@ class BtcturkHttpClient(ExchangeClient):
                 raise ValueError("Malformed balances payload item")
             item = self._to_balance_item(raw)
             parsed.append(
-                Balance(asset=item.asset, free=float(item.free), locked=float(item.locked))
+                Balance(asset=item.asset, free=item.free, locked=item.locked)
             )
         return parsed
 
@@ -1004,7 +1052,6 @@ class BtcturkHttpClient(ExchangeClient):
                         "error_message": exc.error_message,
                         "request_method": exc.request_method,
                         "request_path": exc.request_path,
-                        "request_headers": _sanitize_request_headers(dict(self.client.headers)),
                         "request_json": exc.request_json,
                         "response_body": exc.response_body,
                         "pairSymbol": payload.get("pairSymbol"),
@@ -1199,11 +1246,12 @@ class DryRunExchangeClient(ExchangeClient):
     def get_balances(self) -> list[Balance]:
         return self._balances
 
-    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
+    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[Decimal, Decimal]:
         del limit
         if symbol not in self._orderbooks:
             raise ValueError(f"Missing orderbook for {symbol}")
-        return self._orderbooks[symbol]
+        bid, ask = self._orderbooks[symbol]
+        return Decimal(str(bid)), Decimal(str(ask))
 
     def get_exchange_info(self) -> list[PairInfo]:
         return self._exchange_info
