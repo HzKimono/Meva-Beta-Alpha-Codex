@@ -24,6 +24,10 @@ class TokenBucketRateLimiter:
         self,
         budget: EndpointBudget | None = None,
         *,
+        rate_per_sec: float | None = None,
+        burst: int | None = None,
+        time_source: Callable[[], float] | None = None,
+        rps: float | None = None,
         group_budgets: dict[str, EndpointBudget] | None = None,
         clock: Callable[[], float] = monotonic,
         sleep_fn: Callable[[float], None] = sleep,
@@ -71,6 +75,19 @@ class TokenBucketRateLimiter:
             }
             self._state[group] = state
         return state
+
+    def _wait_seconds_locked(self, group: str, cost: int) -> float:
+        self._refill(group)
+        state = self._state_for(group)
+        budget = self._budget_for(group)
+        now = self._clock()
+        cooldown_wait = max(0.0, state["cooldown_until"] - now)
+        if cooldown_wait > 0:
+            return cooldown_wait
+        if state["tokens"] >= cost:
+            return 0.0
+        deficit = float(cost) - state["tokens"]
+        return deficit / max(budget.tokens_per_second, 1e-9)
 
     def _refill(self, group: str) -> None:
         state = self._state_for(group)
@@ -151,6 +168,35 @@ class AsyncTokenBucketRateLimiter:
         self._sync = TokenBucketRateLimiter(
             budget,
             clock=clock,
+            sleep_fn=lambda _: None,
+        )
+        self._sleep = sleep_fn
+
+    async def acquire(self, group: str = "default", cost: int = 1) -> float:
+        if cost < 1:
+            return 0.0
+        waited = 0.0
+        while True:
+            if self._sync.consume(group, cost):
+                return waited
+            wait_seconds = self._sync.seconds_until_available(group, cost)
+            waited += wait_seconds
+            await self._sleep(wait_seconds)
+
+
+class AsyncTokenBucketRateLimiter:
+    def __init__(
+        self,
+        *,
+        rate_per_sec: float,
+        burst: int,
+        time_source: Callable[[], float] | None = None,
+        sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._sync = TokenBucketRateLimiter(
+            rate_per_sec=rate_per_sec,
+            burst=burst,
+            time_source=time_source,
             sleep_fn=lambda _: None,
         )
         self._sleep = sleep_fn
