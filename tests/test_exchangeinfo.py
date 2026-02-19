@@ -73,11 +73,11 @@ def test_exchange_info_parsing_extracts_pair_rules() -> None:
     pairs = client.get_exchange_info()
 
     assert len(pairs) == 2
-    assert pairs[0].pair_symbol == "BTC_TRY"
+    assert pairs[0].pair_symbol == "BTCTRY"
     assert pairs[0].denominator_scale == 2
     assert pairs[0].min_total_amount == Decimal("100")
     assert pairs[0].min_quantity == Decimal("0.00001")
-    assert pairs[1].pair_symbol == "ETH_TRY"
+    assert pairs[1].pair_symbol == "ETHTRY"
     client.close()
 
 
@@ -137,8 +137,8 @@ def test_market_data_service_rules_cache_calls_once() -> None:
     first = service.get_symbol_rules("BTCTRY")
     second = service.get_symbol_rules("BTCTRY")
 
-    assert first.pair_symbol == "BTC_TRY"
-    assert second.pair_symbol == "BTC_TRY"
+    assert first.pair_symbol == "BTCTRY"
+    assert second.pair_symbol == "BTCTRY"
     assert hit_count["exchangeinfo"] == 1
     client.close()
 
@@ -174,5 +174,5 @@ def test_market_data_service_rules_lookup_accepts_canonical_and_underscore() -> 
     underscore = service.get_symbol_rules("BTC_TRY")
 
     assert canonical == underscore
-    assert canonical.pair_symbol == "BTC_TRY"
+    assert canonical.pair_symbol == "BTCTRY"
     client.close()

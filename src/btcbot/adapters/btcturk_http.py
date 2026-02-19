@@ -747,7 +747,7 @@ class BtcturkHttpClient(ExchangeClient):
                     else (
                         normalize_symbol(str(item["pairSymbolNormalized"]))
                         if item.get("pairSymbolNormalized") is not None
-                        else None
+                        else normalize_symbol(str(pair_symbol))
                     )
                 ),
                 status=(str(item["status"]) if item.get("status") is not None else None),
@@ -771,7 +771,7 @@ class BtcturkHttpClient(ExchangeClient):
     def _resolve_pair_symbol(self, item: dict[str, object]) -> str:
         raw_symbol = item.get("pairSymbol")
         if raw_symbol is None:
-            raw_symbol = item.get("pairSymbolNormalized") or item.get("nameNormalized") or item.get("name")
+            raw_symbol = item.get("name") or item.get("pairSymbolNormalized") or item.get("nameNormalized")
         if raw_symbol is None:
             keys = sorted(item.keys())
             raise ValueError(
@@ -780,7 +780,7 @@ class BtcturkHttpClient(ExchangeClient):
                 f"received keys={keys}"
             )
 
-        return _btcturk_pair_symbol(str(raw_symbol))
+        return str(raw_symbol).strip().upper()
 
     def _resolve_scale(
         self,
@@ -1065,12 +1065,13 @@ class BtcturkHttpClient(ExchangeClient):
         return OrderAck(exchange_order_id=str(data["id"]), status="submitted", raw=data)
 
     def _resolve_symbol_rules(self, symbol: str):
+        symbol_normalized = normalize_symbol(symbol)
         try:
             exchange_info = self.get_exchange_info()
         except Exception:  # noqa: BLE001
             exchange_info = []
         for pair in exchange_info:
-            if normalize_symbol(pair.pair_symbol) == symbol:
+            if normalize_symbol(pair.pair_symbol) == symbol_normalized:
                 return pair_info_to_symbol_rules(pair)
         return pair_info_to_symbol_rules(
             PairInfo(
