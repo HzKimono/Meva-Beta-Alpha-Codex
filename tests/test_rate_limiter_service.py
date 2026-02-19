@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
+import asyncio
+
+from btcbot.services.rate_limiter import (
+    AsyncTokenBucketRateLimiter,
+    EndpointBudget,
+    TokenBucketRateLimiter,
+)
 
 
 def test_token_bucket_respects_burst_and_refill() -> None:
@@ -79,3 +85,26 @@ def test_penalize_without_retry_after_applies_minimum_cooldown() -> None:
 
     assert waited >= 0.25
     assert slept[0] >= 0.25
+
+
+def test_async_token_bucket_uses_async_sleep() -> None:
+    now = {"t": 0.0}
+    slept: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now["t"] += seconds
+
+    limiter = AsyncTokenBucketRateLimiter(
+        EndpointBudget(tokens_per_second=1.0, burst_capacity=1),
+        clock=lambda: now["t"],
+        sleep_fn=_sleep,
+    )
+
+    async def _run() -> None:
+        assert await limiter.acquire("orders") == 0.0
+        waited = await limiter.acquire("orders")
+        assert waited == 1.0
+
+    asyncio.run(_run())
+    assert slept == [1.0]

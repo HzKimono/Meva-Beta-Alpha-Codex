@@ -6,7 +6,7 @@ from decimal import Decimal
 from btcbot.config import Settings
 from btcbot.domain.order_intent import OrderIntent
 from btcbot.services.oms_service import OMSService, Stage7MarketSimulator
-from btcbot.services.rate_limiter import TokenBucketRateLimiter
+from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
 from btcbot.services.state_store import StateStore
 
 
@@ -35,7 +35,10 @@ def _intent(cid: str) -> OrderIntent:
 
 def test_burst_then_throttle_then_allowed_with_same_client_order_id(tmp_path) -> None:
     clock = FakeClock()
-    limiter = TokenBucketRateLimiter(rate_per_sec=1.0, burst=1, time_source=clock.time)
+    limiter = TokenBucketRateLimiter(
+        EndpointBudget(tokens_per_second=1.0, burst_capacity=1),
+        clock=clock.time,
+    )
     store = StateStore(db_path=str(tmp_path / "state.db"))
     settings = Settings(
         DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_RATE_LIMIT_RPS=1, STAGE7_RATE_LIMIT_BURST=1

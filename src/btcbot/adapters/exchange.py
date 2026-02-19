@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from decimal import Decimal
 
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import Balance, OpenOrders, Order, OrderSide, OrderSnapshot, PairInfo
@@ -12,7 +13,7 @@ class ExchangeClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
+    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[Decimal, Decimal]:
         """Return (best_bid, best_ask)."""
         raise NotImplementedError
 

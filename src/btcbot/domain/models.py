@@ -64,8 +64,8 @@ class ReconcileStatus(StrEnum):
 
 class Balance(BaseModel):
     asset: str
-    free: float
-    locked: float = 0.0
+    free: Decimal
+    locked: Decimal = Decimal("0")
 
 
 class SymbolInfo(BaseModel):
