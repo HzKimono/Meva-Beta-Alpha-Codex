@@ -7,7 +7,7 @@ from decimal import Decimal
 from btcbot.domain.intent import Intent
 from btcbot.risk.policy import RiskPolicy, RiskPolicyContext
 from btcbot.services.cycle_account_snapshot import CycleAccountSnapshot
-from btcbot.services.state_store import StateStore
+from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +34,13 @@ class RiskService:
         account_snapshot: CycleAccountSnapshot | None = None,
     ) -> list[Intent]:
         open_orders_by_symbol: dict[str, int] = {}
+        scoped_symbols = sorted({intent.symbol for intent in intents})
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
         if callable(find_open_or_unknown_orders):
             try:
                 existing_orders = find_open_or_unknown_orders(
-                    new_grace_seconds=60,
+                    scoped_symbols or None,
+                    new_grace_seconds=PENDING_GRACE_SECONDS,
                     include_new_after_grace=False,
                     include_escalated_unknown=False,
                 )

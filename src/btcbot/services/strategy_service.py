@@ -7,7 +7,7 @@ from btcbot.config import Settings
 from btcbot.domain.intent import Intent
 from btcbot.domain.symbols import canonical_symbol
 from btcbot.services.market_data_service import MarketDataService
-from btcbot.services.state_store import StateStore
+from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.strategies.base import Strategy
 from btcbot.strategies.context import StrategyContext
 
@@ -53,7 +53,7 @@ class StrategyService:
             try:
                 existing_orders = find_open_or_unknown_orders(
                     symbols,
-                    new_grace_seconds=60,
+                    new_grace_seconds=PENDING_GRACE_SECONDS,
                     include_new_after_grace=False,
                     include_escalated_unknown=False,
                 )

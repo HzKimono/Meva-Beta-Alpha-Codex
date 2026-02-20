@@ -199,7 +199,8 @@ class ExecutionService:
 
                 matched = self._match_existing_order(local.order_id, local.client_order_id, recent)
                 if matched is None:
-                    age_seconds = int((datetime.now(UTC) - max(local.created_at, local.updated_at)).total_seconds())
+                    anchor = local.updated_at or local.created_at
+                    age_seconds = int((datetime.now(UTC) - anchor).total_seconds())
                     if local.status == OrderStatus.NEW and age_seconds > self.pending_grace_seconds:
                         self.state_store.update_order_status(
                             order_id=local.order_id,
@@ -714,7 +715,7 @@ class ExecutionService:
                 )
                 if (
                     reservation.status.upper() == "PENDING"
-                    and reservation_age > PENDING_GRACE_SECONDS
+                    and reservation_age > self.pending_grace_seconds
                     and reservation.client_order_id
                 ):
                     if self._recover_stale_pending_place_order(intent, reservation):

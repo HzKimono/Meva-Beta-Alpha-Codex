@@ -38,6 +38,13 @@ def _stage7_ctx(cycle_id: str, run_id: str | None = None) -> str:
     return f"cycle_id={cycle_id}"
 
 
+def _parse_db_datetime(raw: object) -> datetime:
+    parsed = datetime.fromisoformat(str(raw))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 @dataclass
 class StoredOrder:
     order_id: str
@@ -78,7 +85,7 @@ class IdempotencyConflictError(ValueError):
 
 
 PENDING_GRACE_SECONDS = 60
-UNKNOWN_BLOCKING_ESCALATION_ATTEMPTS = 8
+UNKNOWN_ESCALATION_ATTEMPTS = 8
 
 logger = logging.getLogger(__name__)
 
@@ -1226,7 +1233,7 @@ class StateStore:
             )
 
     def save_stage7_order_intents(self, cycle_id: str, intents: list[OrderIntent]) -> None:
-        now = datetime.now(UTC)
+        resolved_now = now or datetime.now(UTC)
         with self.transaction() as conn:
             self._save_stage7_order_intents(conn=conn, cycle_id=cycle_id, ts=now, intents=intents)
 
@@ -2485,7 +2492,9 @@ class StateStore:
         *,
         new_grace_seconds: int = PENDING_GRACE_SECONDS,
         include_new_after_grace: bool = False,
-        include_escalated_unknown: bool = False,
+        include_escalated_unknown: bool = True,
+        unknown_escalation_attempts: int = UNKNOWN_ESCALATION_ATTEMPTS,
+        now: datetime | None = None,
     ) -> list[StoredOrder]:
         query = """
             SELECT order_id, symbol, client_order_id, side, price, qty, status,
@@ -2505,24 +2514,21 @@ class StateStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
 
-        now = datetime.now(UTC)
+        resolved_now = now or datetime.now(UTC)
         filtered: list[StoredOrder] = []
         for row in rows:
-            created_at = datetime.fromisoformat(str(row["created_at"]))
+            created_at = _parse_db_datetime(row["created_at"])
             updated_at_raw = row["updated_at"] if row["updated_at"] is not None else row["created_at"]
-            updated_at = datetime.fromisoformat(str(updated_at_raw))
+            updated_at = _parse_db_datetime(updated_at_raw)
             status = OrderStatus(str(row["status"]))
             if status == OrderStatus.NEW and not include_new_after_grace:
-                age = (now - max(created_at, updated_at)).total_seconds()
+                age = (resolved_now - max(created_at, updated_at)).total_seconds()
                 if age > max(0, new_grace_seconds):
                     continue
             attempts = int(row["unknown_probe_attempts"] or 0)
-            if (
-                status == OrderStatus.UNKNOWN
-                and not include_escalated_unknown
-                and attempts >= UNKNOWN_BLOCKING_ESCALATION_ATTEMPTS
-            ):
-                continue
+            if status == OrderStatus.UNKNOWN and not include_escalated_unknown:
+                if row["unknown_escalated_at"] is not None or attempts >= unknown_escalation_attempts:
+                    continue
 
             filtered.append(
                 StoredOrder(
