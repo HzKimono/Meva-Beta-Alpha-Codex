@@ -1,7 +1,7 @@
 .PHONY: check
 
 check:
-	python -m compileall -q src tests
+	python -m compileall -q .
 	ruff format --check .
 	ruff check .
 	python -m pytest -q

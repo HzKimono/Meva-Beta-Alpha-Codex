@@ -7,7 +7,7 @@ from btcbot.config import Settings
 from btcbot.domain.intent import Intent
 from btcbot.domain.symbols import canonical_symbol
 from btcbot.services.market_data_service import MarketDataService
-from btcbot.services.state_store import StateStore
+from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.strategies.base import Strategy
 from btcbot.strategies.context import StrategyContext
 
@@ -48,10 +48,20 @@ class StrategyService:
                 orderbooks[canonical] = (bid, bid)
         positions = {p.symbol: p for p in self.accounting_service.get_positions()}
         open_orders: dict[str, int] = {}
+        canonical_symbols = [canonical_symbol(s) for s in symbols]
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
-        existing_orders = (
-            find_open_or_unknown_orders(symbols) if callable(find_open_or_unknown_orders) else []
-        )
+        if callable(find_open_or_unknown_orders):
+            try:
+                existing_orders = find_open_or_unknown_orders(
+                    canonical_symbols,
+                    new_grace_seconds=PENDING_GRACE_SECONDS,
+                    include_new_after_grace=False,
+                    include_escalated_unknown=False,
+                )
+            except TypeError:
+                existing_orders = find_open_or_unknown_orders(canonical_symbols)
+        else:
+            existing_orders = []
         for order in existing_orders:
             open_orders[order.symbol] = open_orders.get(order.symbol, 0) + 1
 

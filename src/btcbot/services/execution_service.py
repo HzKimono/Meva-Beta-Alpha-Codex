@@ -43,6 +43,12 @@ PLACE_ORDER_IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60
 CANCEL_ORDER_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
 
+class NonRetryableSubmitError(Exception):
+    def __init__(self, original: Exception) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
 class LiveTradingNotArmedError(RuntimeError):
     """Raised when a live side-effect is attempted without explicit arming."""
 
@@ -77,6 +83,7 @@ class ExecutionService:
         unknown_reprobe_max_lookback_seconds: int = 24 * 60 * 60,
         pending_recovery_max_attempts: int = 3,
         pending_recovery_backoff_seconds: int = 30,
+        pending_grace_seconds: int = PENDING_GRACE_SECONDS,
         submit_retry_max_attempts: int = 2,
         cancel_retry_max_attempts: int = 2,
         retry_base_delay_ms: int = 250,
@@ -105,6 +112,7 @@ class ExecutionService:
         )
         self.pending_recovery_max_attempts = max(1, pending_recovery_max_attempts)
         self.pending_recovery_backoff_seconds = max(1, pending_recovery_backoff_seconds)
+        self.pending_grace_seconds = max(0, pending_grace_seconds)
         self.submit_retry_max_attempts = max(1, submit_retry_max_attempts)
         self.cancel_retry_max_attempts = max(1, cancel_retry_max_attempts)
         self.retry_base_delay_ms = max(0, retry_base_delay_ms)
@@ -116,7 +124,13 @@ class ExecutionService:
         if not normalized_symbols:
             return
 
-        local_orders = self.state_store.find_open_or_unknown_orders(normalized_symbols)
+        self.state_store.heartbeat_instance_lock()
+        local_orders = self.state_store.find_open_or_unknown_orders(
+            normalized_symbols,
+            new_grace_seconds=self.pending_grace_seconds,
+            include_new_after_grace=True,
+            include_escalated_unknown=True,
+        )
         orders_by_symbol: dict[str, list] = {}
         for local in local_orders:
             orders_by_symbol.setdefault(local.symbol, []).append(local)
@@ -135,7 +149,7 @@ class ExecutionService:
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "Lifecycle refresh failed to load open orders",
-                    extra={"extra": {"symbol": symbol}},
+                    extra={"extra": {"symbol": symbol, "db_path": self.state_store.db_path_abs, "instance_id": self.state_store.instance_id}},
                 )
                 continue
 
@@ -162,38 +176,48 @@ class ExecutionService:
                     else None
                 )
                 if open_match is not None:
-                    if (
-                        local.order_id.startswith("unknown:")
-                        and local.order_id != open_match.order_id
-                    ):
+                    if local.order_id.startswith("unknown:") and local.order_id != open_match.order_id:
                         self._emit_reconcile_confirmed(local, open_match.order_id)
                     continue
-                if local.status == OrderStatus.UNKNOWN and not self._is_unknown_probe_due(
-                    local.unknown_next_probe_at,
-                    now_ms,
-                ):
+
+                if local.status == OrderStatus.UNKNOWN and not self._is_unknown_probe_due(local.unknown_next_probe_at, now_ms):
                     continue
 
                 if recent is None:
                     try:
                         recent = self.exchange.get_all_orders(
                             pair_symbol=symbol,
-                            start_ms=self._compute_all_orders_start_ms(
-                                now_ms=now_ms,
-                                due_unknown_orders=due_unknown_orders,
-                            ),
+                            start_ms=self._compute_all_orders_start_ms(now_ms=now_ms, due_unknown_orders=due_unknown_orders),
                             end_ms=now_ms,
                         )
                     except Exception:  # noqa: BLE001
                         logger.exception(
                             "Lifecycle refresh failed to load all orders",
-                            extra={"extra": {"symbol": symbol}},
+                            extra={"extra": {"symbol": symbol, "db_path": self.state_store.db_path_abs, "instance_id": self.state_store.instance_id}},
                         )
                         continue
 
                 matched = self._match_existing_order(local.order_id, local.client_order_id, recent)
                 if matched is None:
-                    if local.status == OrderStatus.UNKNOWN:
+                    anchor = local.updated_at or local.created_at
+                    age_seconds = int((datetime.now(UTC) - anchor).total_seconds())
+                    if local.status == OrderStatus.NEW and age_seconds > self.pending_grace_seconds:
+                        self.state_store.update_order_status(
+                            order_id=local.order_id,
+                            status=OrderStatus.REJECTED,
+                            exchange_status_raw="missing_on_exchange_after_grace",
+                            reconciled=True,
+                            last_seen_at=now_ms,
+                        )
+                    elif local.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}:
+                        self.state_store.update_order_status(
+                            order_id=local.order_id,
+                            status=OrderStatus.UNKNOWN,
+                            exchange_status_raw="missing_from_open_orders",
+                            reconciled=False,
+                            last_seen_at=now_ms,
+                        )
+                    elif local.status == OrderStatus.UNKNOWN:
                         self._mark_unknown_unresolved(local, now_ms)
                     continue
 
@@ -206,11 +230,7 @@ class ExecutionService:
                     reconciled=True,
                     last_seen_at=matched.update_time or matched.timestamp,
                 )
-                if (
-                    local.order_id.startswith("unknown:")
-                    and local.client_order_id
-                    and local.order_id != matched.order_id
-                ):
+                if local.order_id.startswith("unknown:") and local.client_order_id and local.order_id != matched.order_id:
                     self._emit_reconcile_confirmed(local, matched.order_id)
 
     def _emit_reconcile_confirmed(self, local_order, real_order_id: str) -> None:
@@ -505,6 +525,8 @@ class ExecutionService:
                     attrs={"symbol": order.symbol},
                 )
             except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, NonRetryableSubmitError):
+                    exc = exc.original
                 if not self._is_uncertain_error(exc):
                     logger.exception(
                         "Failed to cancel stale order",
@@ -693,7 +715,7 @@ class ExecutionService:
                 )
                 if (
                     reservation.status.upper() == "PENDING"
-                    and reservation_age > PENDING_GRACE_SECONDS
+                    and reservation_age > self.pending_grace_seconds
                     and reservation.client_order_id
                 ):
                     if self._recover_stale_pending_place_order(intent, reservation):
@@ -829,26 +851,65 @@ class ExecutionService:
                     operation="submit",
                 )
             except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, NonRetryableSubmitError):
+                    exc = exc.original
                 if not self._is_uncertain_error(exc):
+                    response_body = None
+                    status_code = None
+                    error_code = None
+                    error_message = None
+                    request_method = None
+                    request_path = None
+                    request_json = None
                     if isinstance(exc, ExchangeError):
-                        logger.error(
-                            "Failed to place limit order",
-                            extra={
-                                "extra": {
-                                    "error_type": type(exc).__name__,
-                                    "status_code": exc.status_code,
-                                    "error_code": exc.error_code,
-                                    "safe_message": exc.error_message or "exchange submit failed",
-                                    "request_method": exc.request_method,
-                                    "request_path": exc.request_path,
-                                    "request_params": exc.request_params,
-                                    "request_json": exc.request_json,
-                                    "response_body": exc.response_body,
-                                }
-                            },
-                        )
-                    else:
-                        logger.exception("Failed to place limit order")
+                        response_body = (exc.response_body or "")[:2048]
+                        status_code = exc.status_code
+                        error_code = exc.error_code
+                        error_message = exc.error_message
+                        request_method = exc.request_method
+                        request_path = exc.request_path
+                        request_json = exc.request_json
+                    logger.error(
+                        "exchange_submit_failed",
+                        extra={
+                            "extra": {
+                                "cycle_id": intent.cycle_id,
+                                "intent_id": (raw_intent.intent_id if raw_intent else None),
+                                "symbol": symbol_normalized,
+                                "side": intent.side.value,
+                                "type": "limit",
+                                "price": str(price),
+                                "quantity": str(quantity),
+                                "client_order_id": client_order_id,
+                                "idempotency_key": idempotency_key,
+                                "request_method": request_method,
+                                "request_path": request_path,
+                                "request_json": request_json,
+                                "response_body": response_body,
+                                "status_code": status_code,
+                                "error_code": error_code,
+                                "error_message": error_message,
+                            }
+                        },
+                    )
+                    rejected_order_id = f"rejected:{client_order_id}:{idempotency_key[:12]}:{int(datetime.now(UTC).timestamp()*1000)}"
+                    self.state_store.save_order(
+                        Order(
+                            order_id=rejected_order_id,
+                            client_order_id=None,
+                            symbol=symbol_normalized,
+                            side=intent.side,
+                            price=float(price),
+                            quantity=float(quantity),
+                            status=OrderStatus.REJECTED,
+                            created_at=datetime.now(UTC),
+                            updated_at=datetime.now(UTC),
+                        ),
+                        reconciled=True,
+                        exchange_status_raw=(response_body or str(exc))[:2048],
+                        idempotency_key=idempotency_key,
+                        intent_id=(raw_intent.intent_id if raw_intent else None),
+                    )
                     emit_decision(
                         logger,
                         {
@@ -1360,15 +1421,27 @@ class ExecutionService:
                 return True
             if status is not None and status >= 500:
                 return True
-            return "json" in message.lower()
+            if status == 400:
+                return False
+            return "json" in message.lower() and status is None
         return "json" in str(exc).lower()
 
     def _retry_exchange_call(self, fn, *, max_attempts: int, operation: str):
         if max_attempts <= 1:
             return fn()
+
+        def _wrapped_call():
+            try:
+                return fn()
+            except ExchangeError as exc:
+                status = self._extract_status_code(exc)
+                if status == 400:
+                    raise NonRetryableSubmitError(exc) from exc
+                raise
+
         seed = int(hashlib.sha256(operation.encode("utf-8")).hexdigest()[:8], 16)
         return retry_with_backoff(
-            fn,
+            _wrapped_call,
             max_attempts=max_attempts,
             base_delay_ms=self.retry_base_delay_ms,
             max_delay_ms=self.retry_max_delay_ms,
