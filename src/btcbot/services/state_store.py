@@ -2503,6 +2503,56 @@ class StateStore:
                 ),
             )
 
+
+    def get_order(self, order_id: str) -> StoredOrder | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT order_id, symbol, client_order_id, side, price, qty, status,
+                       created_at, updated_at,
+                       last_seen_at, reconciled, exchange_status_raw,
+                       unknown_first_seen_at, unknown_last_probe_at, unknown_next_probe_at,
+                       unknown_probe_attempts, unknown_escalated_at
+                FROM orders
+                WHERE order_id = ?
+                LIMIT 1
+                """,
+                (order_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        created_at = _parse_db_datetime(row["created_at"])
+        updated_at_raw = row["updated_at"] if row["updated_at"] is not None else row["created_at"]
+        updated_at = _parse_db_datetime(updated_at_raw)
+        attempts = int(row["unknown_probe_attempts"] or 0)
+        return StoredOrder(
+            order_id=str(row["order_id"]),
+            symbol=str(row["symbol"]),
+            client_order_id=row["client_order_id"],
+            side=str(row["side"]),
+            price=Decimal(str(row["price"])),
+            quantity=Decimal(str(row["qty"])),
+            status=OrderStatus(str(row["status"])),
+            created_at=created_at,
+            updated_at=updated_at,
+            last_seen_at=(int(row["last_seen_at"]) if row["last_seen_at"] is not None else None),
+            reconciled=bool(row["reconciled"]),
+            exchange_status_raw=row["exchange_status_raw"],
+            unknown_first_seen_at=(
+                int(row["unknown_first_seen_at"]) if row["unknown_first_seen_at"] is not None else None
+            ),
+            unknown_last_probe_at=(
+                int(row["unknown_last_probe_at"]) if row["unknown_last_probe_at"] is not None else None
+            ),
+            unknown_next_probe_at=(
+                int(row["unknown_next_probe_at"]) if row["unknown_next_probe_at"] is not None else None
+            ),
+            unknown_probe_attempts=attempts,
+            unknown_escalated_at=(
+                int(row["unknown_escalated_at"]) if row["unknown_escalated_at"] is not None else None
+            ),
+        )
+
     def find_open_or_unknown_orders(
         self,
         symbols: list[str] | None = None,

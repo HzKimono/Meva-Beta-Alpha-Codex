@@ -10,6 +10,7 @@ from btcbot.domain.intent import Intent, to_order_intent
 from btcbot.domain.models import (
     Balance,
     ExchangeError,
+    ExchangeOrderStatus,
     OpenOrders,
     Order,
     OrderIntent,
@@ -976,3 +977,71 @@ def test_refresh_order_lifecycle_summary_includes_call_and_throttle_counts(tmp_p
     assert "refresh_skipped_due_to_throttle_count" in payload
     assert "open_orders_calls_count" in payload
     assert "all_orders_calls_count" in payload
+
+
+def test_reconcile_snapshot_missing_side_does_not_default_to_buy(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    svc = ExecutionService(exchange=exchange, state_store=store)
+
+    snapshot = OrderSnapshot(
+        order_id="missing-side-1",
+        client_order_id="cid-missing-side-1",
+        pair_symbol="BTCTRY",
+        side=None,
+        status=ExchangeOrderStatus.OPEN,
+        status_raw="Open",
+        price=Decimal("100"),
+        quantity=Decimal("0.1"),
+        update_time=int(datetime.now(UTC).timestamp() * 1000),
+        timestamp=int(datetime.now(UTC).timestamp() * 1000),
+    )
+    svc._save_reconciled_snapshot(snapshot)
+
+    with store._connect() as conn:
+        row = conn.execute("SELECT side FROM orders WHERE order_id='missing-side-1'").fetchone()
+    assert row is None
+
+
+def test_place_order_idempotency_is_stable_across_cycles_but_changes_on_material_intent(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=True,
+        kill_switch=False,
+    )
+
+    intent_a = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=100.0,
+        quantity=0.1,
+        notional=10.0,
+        cycle_id="cycle-a",
+    )
+    intent_b = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=100.0,
+        quantity=0.1,
+        notional=10.0,
+        cycle_id="cycle-b",
+    )
+    intent_c = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=101.0,
+        quantity=0.1,
+        notional=10.1,
+        cycle_id="cycle-c",
+    )
+
+    key_a = service._stable_place_intent_hash(intent_a)
+    key_b = service._stable_place_intent_hash(intent_b)
+    key_c = service._stable_place_intent_hash(intent_c)
+
+    assert key_a == key_b
+    assert key_a != key_c
