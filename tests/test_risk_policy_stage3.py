@@ -488,4 +488,5 @@ def test_policy_block_log_includes_symbol_side_and_open_order_identifiers(caplog
     assert payload["side"] == "buy"
     assert payload["open_orders_for_symbol"] == "1"
     assert payload["open_order_identifiers"] == ["oid-1", "oid-2"]
+    assert payload["open_orders_count_origin"] == "reconciled"
     assert "client_order_id" in payload

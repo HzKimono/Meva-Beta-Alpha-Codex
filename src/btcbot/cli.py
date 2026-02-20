@@ -684,6 +684,13 @@ def run_with_optional_loop(
         return last_rc
 
 
+
+def _build_state_store(db_path: str, *, strict_instance_lock: bool) -> StateStore:
+    try:
+        return StateStore(db_path=db_path, strict_instance_lock=strict_instance_lock)
+    except TypeError:
+        return StateStore(db_path=db_path)
+
 def run_stage3_runtime(
     settings: Settings,
     *,
@@ -701,7 +708,17 @@ def run_stage3_runtime(
                 otlp_endpoint=getattr(settings, "observability_otlp_endpoint", None),
                 prometheus_port=int(getattr(settings, "observability_prometheus_port", 9464)),
             )
-            runtime_state_store = StateStore(db_path=settings.state_db_path)
+            _, runtime_live_policy = _compute_live_policy(
+                settings,
+                force_dry_run=force_dry_run,
+                include_safe_mode=True,
+            )
+            runtime_state_store = _build_state_store(
+                settings.state_db_path,
+                strict_instance_lock=bool(
+                    settings.state_db_strict_lock and force_dry_run is False and runtime_live_policy.allowed
+                ),
+            )
             return run_with_optional_loop(
                 command="run",
                 cycle_fn=lambda: run_cycle(
@@ -929,12 +946,20 @@ def run_canary(
             if doctor_rc != 0:
                 return doctor_rc
 
+            runtime_state_store = _build_state_store(
+                resolved_db_path,
+                strict_instance_lock=bool(canary_settings.state_db_strict_lock),
+            )
             started_at = datetime.now(UTC)
             cycles_run = 0
             rc = 0
             doctor_recheck_every_cycles = 5
             while True:
-                rc = run_cycle(canary_settings, force_dry_run=False)
+                rc = run_cycle(
+                    canary_settings,
+                    force_dry_run=False,
+                    state_store=runtime_state_store,
+                )
                 cycles_run += 1
                 if rc != 0:
                     break
@@ -1136,7 +1161,10 @@ def run_cycle(
         return 2
 
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
-    resolved_state_store = state_store or StateStore(db_path=settings.state_db_path)
+    resolved_state_store = state_store or _build_state_store(
+        settings.state_db_path,
+        strict_instance_lock=bool(settings.state_db_strict_lock and (not dry_run) and live_policy.allowed),
+    )
     try:
         with with_logging_context(run_id=run_id, cycle_id=cycle_id):
             if settings.kill_switch or effective_safe_mode:
@@ -1314,6 +1342,10 @@ def run_cycle(
                 raw_intents = strategy_service.generate(
                     cycle_id=cycle_id, symbols=settings.symbols, balances=balances
                 )
+                refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
+                if callable(refresh_order_lifecycle) and raw_intents:
+                    scoped_symbols = sorted({normalize_symbol(intent.symbol) for intent in raw_intents})
+                    refresh_order_lifecycle(scoped_symbols)
                 approved_intents = risk_service.filter(
                     cycle_id=cycle_id,
                     intents=raw_intents,

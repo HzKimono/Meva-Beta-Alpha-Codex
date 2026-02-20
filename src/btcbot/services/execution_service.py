@@ -118,6 +118,8 @@ class ExecutionService:
         self.retry_base_delay_ms = max(0, retry_base_delay_ms)
         self.retry_max_delay_ms = max(self.retry_base_delay_ms, retry_max_delay_ms)
         self.sleep_fn = sleep_fn or time.sleep
+        self.lifecycle_refresh_min_interval_seconds = 5
+        self._last_lifecycle_refresh_at: dict[str, float] = {}
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -135,12 +137,29 @@ class ExecutionService:
         for local in local_orders:
             orders_by_symbol.setdefault(local.symbol, []).append(local)
 
+        summary = {
+            "symbols": normalized_symbols,
+            "local_open_unknown": len(local_orders),
+            "matched_on_exchange": 0,
+            "marked_missing": 0,
+            "closed": 0,
+        }
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        now_mono = time.monotonic()
         for symbol in normalized_symbols:
+            symbol_orders = orders_by_symbol.get(symbol, [])
+            last_refresh = self._last_lifecycle_refresh_at.get(symbol)
+            if (
+                not symbol_orders
+                and last_refresh is not None
+                and (now_mono - last_refresh) < self.lifecycle_refresh_min_interval_seconds
+            ):
+                continue
+            self._last_lifecycle_refresh_at[symbol] = now_mono
             recent: list[OrderSnapshot] | None = None
             due_unknown_orders = [
                 local
-                for local in orders_by_symbol.get(symbol, [])
+                for local in symbol_orders
                 if local.status == OrderStatus.UNKNOWN
                 and self._is_unknown_probe_due(local.unknown_next_probe_at, now_ms)
             ]
@@ -167,8 +186,9 @@ class ExecutionService:
                     last_seen_at=snapshot.update_time or snapshot.timestamp,
                 )
 
-            for local in orders_by_symbol.get(symbol, []):
+            for local in symbol_orders:
                 if local.order_id in open_ids:
+                    summary["matched_on_exchange"] += 1
                     continue
                 open_match = (
                     match_order_by_client_id(open_snapshots, local.client_order_id)
@@ -176,6 +196,7 @@ class ExecutionService:
                     else None
                 )
                 if open_match is not None:
+                    summary["matched_on_exchange"] += 1
                     if local.order_id.startswith("unknown:") and local.order_id != open_match.order_id:
                         self._emit_reconcile_confirmed(local, open_match.order_id)
                     continue
@@ -209,6 +230,7 @@ class ExecutionService:
                             reconciled=True,
                             last_seen_at=now_ms,
                         )
+                        summary["closed"] += 1
                     elif local.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}:
                         self.state_store.update_order_status(
                             order_id=local.order_id,
@@ -217,6 +239,7 @@ class ExecutionService:
                             reconciled=False,
                             last_seen_at=now_ms,
                         )
+                        summary["marked_missing"] += 1
                     elif local.status == OrderStatus.UNKNOWN:
                         self._mark_unknown_unresolved(local, now_ms)
                     continue
@@ -230,8 +253,13 @@ class ExecutionService:
                     reconciled=True,
                     last_seen_at=matched.update_time or matched.timestamp,
                 )
+                summary["matched_on_exchange"] += 1
+                if mapped in {OrderStatus.CANCELED, OrderStatus.FILLED, OrderStatus.REJECTED}:
+                    summary["closed"] += 1
                 if local.order_id.startswith("unknown:") and local.client_order_id and local.order_id != matched.order_id:
                     self._emit_reconcile_confirmed(local, matched.order_id)
+
+        logger.info("order_reconcile_summary", extra={"extra": summary})
 
     def _emit_reconcile_confirmed(self, local_order, real_order_id: str) -> None:
         emit_decision(

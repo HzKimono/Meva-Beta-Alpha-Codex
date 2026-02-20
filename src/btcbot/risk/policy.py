@@ -22,6 +22,7 @@ class RiskPolicyContext:
     last_intent_ts_by_symbol_side: dict[tuple[str, str], datetime]
     mark_prices: dict[str, Decimal]
     open_order_identifiers_by_symbol: dict[str, list[str]] = field(default_factory=dict)
+    open_order_count_origin_by_symbol: dict[str, str] = field(default_factory=dict)
     cash_try_free: Decimal = Decimal("0")
     try_cash_target: Decimal = Decimal("0")
     investable_try: Decimal = Decimal("0")
@@ -246,6 +247,10 @@ class RiskPolicy:
             )
             open_identifiers = context.open_order_identifiers_by_symbol.get(normalized_symbol, [])
             extra_payload["open_order_identifiers"] = list(open_identifiers[:5])
+            extra_payload["open_orders_count_origin"] = context.open_order_count_origin_by_symbol.get(
+                normalized_symbol,
+                "reconciled",
+            )
 
         if reason == ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET and context is not None:
             extra_payload.update(
