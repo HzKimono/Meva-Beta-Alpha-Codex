@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     )
 
     state_db_path: str = Field(default="btcbot_state.db", alias="STATE_DB_PATH")
+    state_db_strict_lock: bool = Field(default=True, alias="STATE_DB_STRICT_LOCK")
     dry_run_try_balance: float = Field(default=1000.0, alias="DRY_RUN_TRY_BALANCE")
     max_orders_per_cycle: int = Field(default=2, alias="MAX_ORDERS_PER_CYCLE")
     max_open_orders_per_symbol: int = Field(default=1, alias="MAX_OPEN_ORDERS_PER_SYMBOL")

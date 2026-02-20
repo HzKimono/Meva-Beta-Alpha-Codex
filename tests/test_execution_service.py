@@ -928,3 +928,51 @@ def test_submit_rejected_order_id_unique_per_failure(tmp_path) -> None:
     ids = [str(r["order_id"]) for r in rows]
     assert len(ids) >= 2
     assert len(set(ids)) == len(ids)
+
+
+def test_refresh_order_lifecycle_throttles_symbols_without_local_orders(tmp_path) -> None:
+    class CountingExchange(RecordingExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.open_orders_calls = 0
+
+        def get_open_orders(self, pair_symbol: str) -> OpenOrders:
+            del pair_symbol
+            self.open_orders_calls += 1
+            return OpenOrders(bids=[], asks=[])
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = CountingExchange()
+    svc = ExecutionService(exchange=exchange, state_store=store)
+
+    svc.refresh_order_lifecycle(["BTC_TRY"])
+    svc.refresh_order_lifecycle(["BTC_TRY"])
+
+    assert exchange.open_orders_calls == 1
+
+
+def test_refresh_order_lifecycle_summary_includes_call_and_throttle_counts(tmp_path, caplog) -> None:
+    class CountingExchange(RecordingExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.open_orders_calls = 0
+
+        def get_open_orders(self, pair_symbol: str) -> OpenOrders:
+            del pair_symbol
+            self.open_orders_calls += 1
+            return OpenOrders(bids=[], asks=[])
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = CountingExchange()
+    svc = ExecutionService(exchange=exchange, state_store=store)
+
+    caplog.set_level("INFO")
+    svc.refresh_order_lifecycle(["BTC_TRY"])
+    svc.refresh_order_lifecycle(["BTC_TRY"])
+
+    summary_records = [r for r in caplog.records if r.getMessage() == "order_reconcile_summary"]
+    assert summary_records
+    payload = getattr(summary_records[-1], "extra", {})
+    assert "refresh_skipped_due_to_throttle_count" in payload
+    assert "open_orders_calls_count" in payload
+    assert "all_orders_calls_count" in payload

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from btcbot.domain.account_snapshot import AccountSnapshot, Holding
 from btcbot.domain.accounting import Position, TradeFill
@@ -117,10 +117,19 @@ class ReservationResult:
 
 
 class StateStore:
-    def __init__(self, db_path: str = "btcbot_state.db") -> None:
+    """SQLite-backed state with per-process instance registration and optional strict conflict fail-fast."""
+
+    def __init__(
+        self,
+        db_path: str = "btcbot_state.db",
+        *,
+        strict_instance_lock: bool = False,
+    ) -> None:
         self.db_path = db_path
         self.db_path_abs = str(Path(db_path).expanduser().resolve())
-        self.instance_id = f"{os.getpid()}-{uuid4().hex[:8]}"
+        self.strict_instance_lock = strict_instance_lock
+        scope_digest = hashlib.sha256(self.db_path_abs.encode("utf-8")).hexdigest()[:12]
+        self.instance_id = f"{os.getpid()}-{scope_digest}"
         self._transaction_conn: sqlite3.Connection | None = None
         self._init_db()
         with self._connect() as conn:
@@ -1802,6 +1811,7 @@ class StateStore:
         )
 
     def _register_instance_lock(self, conn: sqlite3.Connection) -> None:
+        # Strict mode protects live trading by refusing concurrent writers on same DB scope.
         now_epoch = int(datetime.now(UTC).timestamp())
         recent = conn.execute(
             """
@@ -1816,17 +1826,19 @@ class StateStore:
             (self.db_path_abs, self.instance_id, now_epoch - 120),
         ).fetchone()
         if recent is not None:
-            logger.warning(
-                "db_instance_lock_conflict",
-                extra={
-                    "extra": {
-                        "db_path": self.db_path_abs,
-                        "instance_id": self.instance_id,
-                        "conflict_instance_id": str(recent["instance_id"]),
-                        "conflict_pid": int(recent["pid"]),
-                    }
-                },
-            )
+            conflict_payload = {
+                "db_path": self.db_path_abs,
+                "instance_id": self.instance_id,
+                "conflict_instance_id": str(recent["instance_id"]),
+                "conflict_pid": int(recent["pid"]),
+                "strict_instance_lock": bool(self.strict_instance_lock),
+            }
+            logger.warning("db_instance_lock_conflict", extra={"extra": conflict_payload})
+            if self.strict_instance_lock:
+                raise RuntimeError(
+                    "STATE_DB_LOCK_CONFLICT: active process instance already registered "
+                    f"for db_path={self.db_path_abs} conflict_pid={int(recent['pid'])}"
+                )
         conn.execute(
             """
             INSERT INTO process_instances(instance_id, pid, db_path, started_at_epoch, heartbeat_at_epoch)
