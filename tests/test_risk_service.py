@@ -17,6 +17,7 @@ class _StoredOrder:
     status: OrderStatus
     exchange_status_raw: str | None
     unknown_probe_attempts: int = 0
+    unknown_first_seen_at: int | None = None
 
 
 class _CapturePolicy:
@@ -126,3 +127,35 @@ def test_risk_service_counts_reconciled_open_orders_and_identifiers() -> None:
     assert policy.context.open_orders_by_symbol["BTCTRY"] == 1
     assert policy.context.open_order_identifiers_by_symbol["BTCTRY"] == ["cid-open"]
     assert policy.context.open_order_count_origin_by_symbol["BTCTRY"] == "reconciled"
+
+
+def test_risk_service_phantom_unknown_is_closed_after_time_window() -> None:
+    first_seen_ms = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    store = _Store(
+        [
+            _StoredOrder(
+                "unknown-2",
+                "BTC_TRY",
+                "cid-unknown-2",
+                OrderStatus.UNKNOWN,
+                "missing_from_open_orders",
+                unknown_probe_attempts=0,
+                unknown_first_seen_at=first_seen_ms,
+            )
+        ]
+    )
+    policy = _CapturePolicy()
+    service = RiskService(
+        policy,
+        store,  # type: ignore[arg-type]
+        now_provider=lambda: datetime(2025, 1, 1, 0, 10, tzinfo=UTC),
+    )
+
+    approved = service.filter("c1", [_intent()])
+
+    assert len(approved) == 1
+    assert (
+        "unknown-2",
+        OrderStatus.CANCELED,
+        "reconciled_missing_from_exchange_open_orders",
+    ) in store.updated

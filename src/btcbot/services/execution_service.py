@@ -122,6 +122,7 @@ class ExecutionService:
         self._last_lifecycle_refresh_at: dict[str, float] = {}
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
+        """Reconcile local lifecycle state against exchange open-orders truth for scoped symbols."""
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
         if not normalized_symbols:
             return
@@ -143,6 +144,10 @@ class ExecutionService:
             "matched_on_exchange": 0,
             "marked_missing": 0,
             "closed": 0,
+            "refresh_skipped_due_to_throttle_count": 0,
+            "open_orders_calls_count": 0,
+            "all_orders_calls_count": 0,
+            "backoff_429_count": 0,
         }
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         now_mono = time.monotonic()
@@ -154,6 +159,7 @@ class ExecutionService:
                 and last_refresh is not None
                 and (now_mono - last_refresh) < self.lifecycle_refresh_min_interval_seconds
             ):
+                summary["refresh_skipped_due_to_throttle_count"] += 1
                 continue
             self._last_lifecycle_refresh_at[symbol] = now_mono
             recent: list[OrderSnapshot] | None = None
@@ -164,8 +170,15 @@ class ExecutionService:
                 and self._is_unknown_probe_due(local.unknown_next_probe_at, now_ms)
             ]
             try:
+                summary["open_orders_calls_count"] += 1
                 open_orders = self.exchange.get_open_orders(symbol)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                if self._is_exchange_429_error(exc):
+                    summary["backoff_429_count"] += 1
+                    logger.warning(
+                        "EXCHANGE_429_BACKOFF",
+                        extra={"extra": {"symbol": symbol, "cycle_scope": "order_lifecycle"}},
+                    )
                 logger.exception(
                     "Lifecycle refresh failed to load open orders",
                     extra={"extra": {"symbol": symbol, "db_path": self.state_store.db_path_abs, "instance_id": self.state_store.instance_id}},
@@ -206,12 +219,19 @@ class ExecutionService:
 
                 if recent is None:
                     try:
+                        summary["all_orders_calls_count"] += 1
                         recent = self.exchange.get_all_orders(
                             pair_symbol=symbol,
                             start_ms=self._compute_all_orders_start_ms(now_ms=now_ms, due_unknown_orders=due_unknown_orders),
                             end_ms=now_ms,
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        if self._is_exchange_429_error(exc):
+                            summary["backoff_429_count"] += 1
+                            logger.warning(
+                                "EXCHANGE_429_BACKOFF",
+                                extra={"extra": {"symbol": symbol, "cycle_scope": "order_lifecycle_all_orders"}},
+                            )
                         logger.exception(
                             "Lifecycle refresh failed to load all orders",
                             extra={"extra": {"symbol": symbol, "db_path": self.state_store.db_path_abs, "instance_id": self.state_store.instance_id}},
@@ -259,7 +279,17 @@ class ExecutionService:
                 if local.order_id.startswith("unknown:") and local.client_order_id and local.order_id != matched.order_id:
                     self._emit_reconcile_confirmed(local, matched.order_id)
 
+        summary["error_code"] = "ORDER_LIFECYCLE_DRIFT" if summary["marked_missing"] > 0 else ""
         logger.info("order_reconcile_summary", extra={"extra": summary})
+
+    def _is_exchange_429_error(self, exc: Exception) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response is not None and exc.response.status_code == 429
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 429:
+            return True
+        response = getattr(exc, "response", None)
+        return bool(getattr(response, "status_code", None) == 429)
 
     def _emit_reconcile_confirmed(self, local_order, real_order_id: str) -> None:
         emit_decision(

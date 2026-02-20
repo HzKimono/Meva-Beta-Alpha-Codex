@@ -21,10 +21,12 @@ class RiskService:
         state_store: StateStore,
         *,
         balance_debug_enabled: bool = False,
+        now_provider=None,
     ) -> None:
         self.risk_policy = risk_policy
         self.state_store = state_store
         self.balance_debug_enabled = balance_debug_enabled
+        self.now_provider = now_provider or (lambda: datetime.now(UTC))
 
     def filter(
         self,
@@ -39,6 +41,7 @@ class RiskService:
         open_order_identifiers_by_symbol: dict[str, list[str]] = {}
         open_order_count_origin_by_symbol: dict[str, str] = {}
         scoped_symbols = sorted({normalize_symbol(intent.symbol) for intent in intents})
+        # Invariant: risk open-order gating uses reconciled exchange truth from lifecycle state.
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
         if callable(find_open_or_unknown_orders):
             try:
@@ -55,6 +58,9 @@ class RiskService:
 
         closed_missing = 0
         missing_confirm_threshold = 2
+        missing_confirm_window_seconds = 300
+        now_dt = self.now_provider()
+        now_ms = int(now_dt.timestamp() * 1000)
         for item in existing_orders:
             symbol = normalize_symbol(item.symbol)
             if scoped_symbols and symbol not in scoped_symbols:
@@ -65,8 +71,13 @@ class RiskService:
                 "missing_from_open_orders",
                 "reconciled_missing_from_exchange_open_orders",
             }
-            missing_confirmed = (
-                is_missing_on_exchange and int(getattr(item, "unknown_probe_attempts", 0) or 0) >= missing_confirm_threshold
+            attempts = int(getattr(item, "unknown_probe_attempts", 0) or 0)
+            first_seen_ms = int(getattr(item, "unknown_first_seen_at", 0) or 0)
+            missing_by_window = first_seen_ms > 0 and (now_ms - first_seen_ms) >= (
+                missing_confirm_window_seconds * 1000
+            )
+            missing_confirmed = is_missing_on_exchange and (
+                attempts >= missing_confirm_threshold or missing_by_window
             )
 
             if item.status == OrderStatus.UNKNOWN and missing_confirmed:

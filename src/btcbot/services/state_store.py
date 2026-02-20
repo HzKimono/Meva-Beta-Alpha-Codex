@@ -117,6 +117,8 @@ class ReservationResult:
 
 
 class StateStore:
+    """SQLite-backed state with per-process instance registration and optional strict conflict fail-fast."""
+
     def __init__(
         self,
         db_path: str = "btcbot_state.db",
@@ -1809,6 +1811,7 @@ class StateStore:
         )
 
     def _register_instance_lock(self, conn: sqlite3.Connection) -> None:
+        # Strict mode protects live trading by refusing concurrent writers on same DB scope.
         now_epoch = int(datetime.now(UTC).timestamp())
         recent = conn.execute(
             """

@@ -71,7 +71,7 @@ from btcbot.services.stage4_cycle_runner import (
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.startup_recovery import StartupRecoveryService
-from btcbot.services.state_store import StateStore
+from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.services.strategy_service import StrategyService
 from btcbot.services.sweep_service import SweepService
 from btcbot.services.trading_policy import validate_live_side_effects_policy
@@ -713,11 +713,19 @@ def run_stage3_runtime(
                 force_dry_run=force_dry_run,
                 include_safe_mode=True,
             )
+            strict_lock = bool((force_dry_run is False) and runtime_live_policy.allowed)
             runtime_state_store = _build_state_store(
                 settings.state_db_path,
-                strict_instance_lock=bool(
-                    settings.state_db_strict_lock and force_dry_run is False and runtime_live_policy.allowed
-                ),
+                strict_instance_lock=strict_lock,
+            )
+            logger.info(
+                "state_store_runtime_owner",
+                extra={"extra": {
+                    "db_path": getattr(runtime_state_store, "db_path_abs", settings.state_db_path),
+                    "instance_id": getattr(runtime_state_store, "instance_id", ""),
+                    "strict_lock": strict_lock,
+                    "heartbeat_interval_seconds": max(1, cycle_seconds),
+                }},
             )
             return run_with_optional_loop(
                 command="run",
@@ -948,7 +956,16 @@ def run_canary(
 
             runtime_state_store = _build_state_store(
                 resolved_db_path,
-                strict_instance_lock=bool(canary_settings.state_db_strict_lock),
+                strict_instance_lock=True,
+            )
+            logger.info(
+                "state_store_runtime_owner",
+                extra={"extra": {
+                    "db_path": getattr(runtime_state_store, "db_path_abs", settings.state_db_path),
+                    "instance_id": getattr(runtime_state_store, "instance_id", ""),
+                    "strict_lock": True,
+                    "heartbeat_interval_seconds": max(1, cycle_seconds),
+                }},
             )
             started_at = datetime.now(UTC)
             cycles_run = 0
@@ -1163,10 +1180,26 @@ def run_cycle(
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
     resolved_state_store = state_store or _build_state_store(
         settings.state_db_path,
-        strict_instance_lock=bool(settings.state_db_strict_lock and (not dry_run) and live_policy.allowed),
+        strict_instance_lock=bool((not dry_run) and live_policy.allowed),
     )
     try:
         with with_logging_context(run_id=run_id, cycle_id=cycle_id):
+            heartbeat_instance_lock = getattr(resolved_state_store, "heartbeat_instance_lock", None)
+            if callable(heartbeat_instance_lock):
+                heartbeat_instance_lock()
+            logger.info(
+                "cycle_start",
+                extra={"extra": {
+                    "cycle_id": cycle_id,
+                    "mode": "stage3",
+                    "dry_run": dry_run,
+                    "kill_switch": bool(settings.kill_switch),
+                    "safe_mode": bool(effective_safe_mode),
+                    "live_trading": bool(settings.live_trading),
+                    "armed": bool((not dry_run) and live_policy.allowed),
+                    "db_instance_id": getattr(resolved_state_store, "instance_id", ""),
+                }},
+            )
             if settings.kill_switch or effective_safe_mode:
                 logger.warning(
                     "observe_only_mode_enabled; planning/logging continue "
@@ -1343,9 +1376,28 @@ def run_cycle(
                     cycle_id=cycle_id, symbols=settings.symbols, balances=balances
                 )
                 refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
-                if callable(refresh_order_lifecycle) and raw_intents:
-                    scoped_symbols = sorted({normalize_symbol(intent.symbol) for intent in raw_intents})
-                    refresh_order_lifecycle(scoped_symbols)
+                if callable(refresh_order_lifecycle):
+                    scoped_symbols = {normalize_symbol(intent.symbol) for intent in raw_intents}
+                    find_open_or_unknown_orders = getattr(
+                        resolved_state_store,
+                        "find_open_or_unknown_orders",
+                        None,
+                    )
+                    if callable(find_open_or_unknown_orders):
+                        try:
+                            local_active_orders = find_open_or_unknown_orders(
+                                settings.symbols,
+                                new_grace_seconds=PENDING_GRACE_SECONDS,
+                                include_new_after_grace=False,
+                                include_escalated_unknown=False,
+                            )
+                        except TypeError:
+                            local_active_orders = find_open_or_unknown_orders()
+                        for order in local_active_orders:
+                            scoped_symbols.add(normalize_symbol(getattr(order, "symbol", "")))
+                    scoped_symbols = sorted(symbol for symbol in scoped_symbols if symbol)
+                    if scoped_symbols:
+                        refresh_order_lifecycle(scoped_symbols)
                 approved_intents = risk_service.filter(
                     cycle_id=cycle_id,
                     intents=raw_intents,

@@ -14,6 +14,11 @@ from btcbot.risk.exchange_rules import ExchangeRules, ExchangeRulesProvider
 
 logger = logging.getLogger(__name__)
 
+ERROR_CODE_BY_REASON = {
+    ReasonCode.RISK_BLOCK_MAX_OPEN_ORDERS_PER_SYMBOL: "RISK_BLOCK_MAX_OPEN_ORDERS",
+    ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET: "RISK_BLOCK_CASH_RESERVE_TARGET",
+}
+
 
 @dataclass
 class RiskPolicyContext:
@@ -217,6 +222,7 @@ class RiskPolicy:
             "scope": "per_intent",
             "side": intent.side.value,
             "client_order_id": getattr(intent, "client_order_id", None),
+            "error_code": ERROR_CODE_BY_REASON.get(reason, str(reason).upper().replace(":", "_")),
         }
         if reason == ReasonCode.RISK_BLOCK_NOTIONAL_CAP:
             planned_spend_try = (used_notional_try or Decimal("0")) + (

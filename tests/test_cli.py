@@ -1940,3 +1940,144 @@ def test_stage3_live_loop_acceptance_no_open_orders_submits_and_no_db_conflicts(
     assert any(getattr(r, "extra", {}).get("approved_intents", 0) > 0 for r in cycle_records)
     assert any(getattr(r, "extra", {}).get("orders_submitted", 0) > 0 for r in cycle_records)
     assert not [r for r in caplog.records if r.getMessage() == "db_instance_lock_conflict"]
+
+
+def test_stage3_runtime_enforces_strict_lock_in_armed_mode(monkeypatch) -> None:
+    class DummyLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    strict_values: list[bool] = []
+
+    class FakeStore:
+        db_path_abs = "/tmp/state.db"
+        instance_id = "pid-scope"
+
+    def fake_build_state_store(db_path: str, *, strict_instance_lock: bool):
+        del db_path
+        strict_values.append(strict_instance_lock)
+        return FakeStore()
+
+    monkeypatch.setattr(cli, "single_instance_lock", lambda **kwargs: DummyLock())
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "_build_state_store", fake_build_state_store)
+    monkeypatch.setattr(cli, "run_with_optional_loop", lambda **kwargs: 0)
+
+    settings = Settings(
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        SAFE_MODE=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
+        STATE_DB_STRICT_LOCK=False,
+    )
+
+    rc = cli.run_stage3_runtime(
+        settings,
+        force_dry_run=False,
+        loop_enabled=True,
+        cycle_seconds=1,
+        max_cycles=1,
+        jitter_seconds=0,
+    )
+
+    assert rc == 0
+    assert strict_values == [True]
+
+
+def test_run_cycle_heartbeats_state_store_once_per_cycle(monkeypatch) -> None:
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self) -> None:
+            self.heartbeats = 0
+
+        def heartbeat_instance_lock(self) -> None:
+            self.heartbeats += 1
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
+            del symbols
+            return {"BTC_TRY": 100.0}, _Freshness(max_age_ms=max_age_ms)
+
+    class FakeAccountingService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def refresh(self, symbols, mark_prices):
+            del symbols, mark_prices
+            return 0
+
+        def get_positions(self):
+            return []
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeRiskService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def filter(self, cycle_id: str, intents, **kwargs):
+            del cycle_id, kwargs
+            return intents
+
+    class FakeSweepService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def build_order_intents(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del intents, cycle_id
+            return 0
+
+    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "AccountingService", FakeAccountingService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+    monkeypatch.setattr(cli, "SweepService", FakeSweepService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+
+    store = FakeStateStore()
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=True, SYMBOLS="BTC_TRY")
+    assert cli.run_cycle(settings, force_dry_run=True, state_store=store) == 0
+    assert store.heartbeats == 1
