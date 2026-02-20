@@ -119,7 +119,10 @@ class ExecutionService:
         self.cancel_retry_max_attempts = max(1, cancel_retry_max_attempts)
         self.retry_base_delay_ms = max(0, retry_base_delay_ms)
         self.retry_max_delay_ms = max(self.retry_base_delay_ms, retry_max_delay_ms)
-        self.execution_quote_asset = os.getenv("EXECUTION_QUOTE_ASSET", "TRY").strip().upper() or "TRY"
+        quote_override = os.getenv("EXECUTION_QUOTE_ASSET")
+        self.execution_quote_asset_override = (
+            quote_override.strip().upper() if quote_override and quote_override.strip() else None
+        )
         self.estimated_fee_bps = Decimal(os.getenv("EXECUTION_ESTIMATED_FEE_BPS", "15"))
         self.balance_safety_buffer_ratio = Decimal(
             os.getenv("EXECUTION_BALANCE_SAFETY_BUFFER_RATIO", "0")
@@ -139,6 +142,7 @@ class ExecutionService:
             "symbols": normalized_symbols,
             "local_open_unknown": 0,
             "matched_on_exchange": 0,
+            "imported_external_open": 0,
             "marked_missing": 0,
             "closed": 0,
             "refresh_skipped_due_to_throttle_count": 0,
@@ -221,6 +225,7 @@ class ExecutionService:
                 exchange_status_raw = snapshot.status_raw
                 if is_external_open and mapped in {OrderStatus.NEW, OrderStatus.OPEN, OrderStatus.PARTIAL}:
                     exchange_status_raw = "external_open:exchange_reconcile"
+                    summary["imported_external_open"] += 1
                 self._save_reconciled_snapshot(snapshot, exchange_status_raw=exchange_status_raw)
                 self.state_store.update_order_status(
                     order_id=snapshot.order_id,
@@ -295,6 +300,7 @@ class ExecutionService:
                             reconciled=True,
                             last_seen_at=now_ms,
                         )
+                        summary["marked_missing"] += 1
                         summary["closed"] += 1
                     elif local.status == OrderStatus.UNKNOWN:
                         self._mark_unknown_unresolved(local, now_ms)
@@ -331,14 +337,34 @@ class ExecutionService:
         balances = self.exchange.get_balances()
         return {str(item.asset).upper(): Decimal(str(item.free)) for item in balances}
 
+    def _derive_symbol_assets(self, symbol: str) -> tuple[str, str]:
+        normalized = normalize_symbol(symbol)
+        try:
+            base_asset, quote_asset = split_symbol(normalized)
+            return str(base_asset).upper(), str(quote_asset).upper()
+        except ValueError:
+            if self.execution_quote_asset_override:
+                quote_asset = self.execution_quote_asset_override
+                if normalized.endswith(quote_asset) and len(normalized) > len(quote_asset):
+                    return normalized[: -len(quote_asset)], quote_asset
+                return normalized, quote_asset
+            raise
+
     def _check_balance_precondition(
-        self, *, symbol: str, side: OrderSide, price: Decimal, quantity: Decimal
+        self,
+        *,
+        balances: dict[str, Decimal] | None,
+        symbol: str,
+        side: OrderSide,
+        price: Decimal,
+        quantity: Decimal,
     ) -> tuple[bool, str | None, Decimal | None, Decimal | None]:
-        balances = self._balance_by_asset()
-        if not balances:
+        if balances is None or not balances:
             return True, None, None, None
+
+        base_asset, quote_asset = self._derive_symbol_assets(symbol)
         if side == OrderSide.BUY:
-            asset = self.execution_quote_asset
+            asset = self.execution_quote_asset_override or quote_asset
             notional = price * quantity
             estimated_fee = notional * (self.estimated_fee_bps / Decimal("10000"))
             safety_buffer = notional * self.balance_safety_buffer_ratio
@@ -348,8 +374,7 @@ class ExecutionService:
                 return False, asset, required, available
             return True, None, None, None
 
-        base_asset, _quote_asset = split_symbol(symbol)
-        asset = str(base_asset).upper()
+        asset = base_asset
         required = quantity + (quantity * (self.sell_fee_in_base_bps / Decimal("10000")))
         available = balances.get(asset, Decimal("0"))
         if available < required:
@@ -833,6 +858,14 @@ class ExecutionService:
                 )
             return 0
 
+        cycle_balances: dict[str, Decimal] | None = None
+        if not self.dry_run:
+            try:
+                cycle_balances = self._balance_by_asset()
+            except Exception:  # noqa: BLE001
+                logger.exception("balance_precheck_snapshot_failed")
+                cycle_balances = None
+
         placed = 0
         for intent, raw_intent in normalized_intents:
             if not self.dry_run:
@@ -842,6 +875,62 @@ class ExecutionService:
                     side=intent.side.value,
                     intent_id=(raw_intent.intent_id if raw_intent else None),
                 )
+
+            symbol_normalized = normalize_symbol(intent.symbol)
+            if not self.dry_run:
+                if self.market_data_service is None:
+                    raise LiveTradingNotArmedError(
+                        "MarketDataService is required for live order validation"
+                    )
+                rules = self.market_data_service.get_symbol_rules(symbol_normalized)
+                try:
+                    price = quantize_price(Decimal(str(intent.price)), rules)
+                    quantity = quantize_quantity(Decimal(str(intent.quantity)), rules)
+                    validate_order(price=price, qty=quantity, rules=rules)
+                except ValueError:
+                    logger.exception("Intent failed symbol rule validation")
+                    continue
+
+                is_sufficient, asset, required, available = self._check_balance_precondition(
+                    balances=cycle_balances,
+                    symbol=symbol_normalized,
+                    side=intent.side,
+                    price=price,
+                    quantity=quantity,
+                )
+                if not is_sufficient:
+                    missing = (required or Decimal("0")) - (available or Decimal("0"))
+                    logger.warning(
+                        "execution_reject_insufficient_balance_precheck",
+                        extra={
+                            "extra": {
+                                "cycle_id": intent.cycle_id,
+                                "intent_id": (raw_intent.intent_id if raw_intent else None),
+                                "symbol": symbol_normalized,
+                                "side": intent.side.value,
+                                "asset": asset,
+                                "required": str(required),
+                                "available": str(available),
+                                "missing_amount": str(max(missing, Decimal("0"))),
+                            }
+                        },
+                    )
+                    emit_decision(
+                        logger,
+                        {
+                            "cycle_id": intent.cycle_id,
+                            "decision_layer": "execution",
+                            "reason_code": str(ReasonCode.EXECUTION_REJECT_INSUFFICIENT_BALANCE_PRECHECK),
+                            "action": "REJECT",
+                            "scope": "per_intent",
+                            "intent_id": (raw_intent.intent_id if raw_intent else None),
+                            "symbol": intent.symbol,
+                            "side": intent.side.value,
+                            "asset": asset,
+                            "missing_amount": str(max(missing, Decimal("0"))),
+                        },
+                    )
+                    continue
 
             payload_hash = self._place_hash(intent)
             idempotency_key = self._place_idempotency_key(intent, raw_intent)
@@ -952,77 +1041,6 @@ class ExecutionService:
                     status="SIMULATED",
                 )
                 placed += 1
-                continue
-
-            if self.market_data_service is None:
-                raise LiveTradingNotArmedError(
-                    "MarketDataService is required for live order validation"
-                )
-
-            symbol_normalized = normalize_symbol(intent.symbol)
-            rules = self.market_data_service.get_symbol_rules(symbol_normalized)
-            try:
-                price = quantize_price(Decimal(str(intent.price)), rules)
-                quantity = quantize_quantity(Decimal(str(intent.quantity)), rules)
-                validate_order(price=price, qty=quantity, rules=rules)
-            except ValueError:
-                logger.exception("Intent failed symbol rule validation")
-                self.state_store.finalize_idempotency_key(
-                    "place_order",
-                    idempotency_key,
-                    action_id=action_id,
-                    client_order_id=client_order_id,
-                    order_id=None,
-                    status="FAILED",
-                )
-                self.state_store.clear_action_dedupe_key(action_id)
-                continue
-
-            is_sufficient, asset, required, available = self._check_balance_precondition(
-                symbol=symbol_normalized,
-                side=intent.side,
-                price=price,
-                quantity=quantity,
-            )
-            if not is_sufficient:
-                missing = (required or Decimal("0")) - (available or Decimal("0"))
-                logger.warning(
-                    "execution_reject_insufficient_balance_precheck",
-                    extra={
-                        "extra": {
-                            "cycle_id": intent.cycle_id,
-                            "intent_id": (raw_intent.intent_id if raw_intent else None),
-                            "symbol": symbol_normalized,
-                            "side": intent.side.value,
-                            "asset": asset,
-                            "required": str(required),
-                            "available": str(available),
-                            "missing": str(max(missing, Decimal("0"))),
-                        }
-                    },
-                )
-                emit_decision(
-                    logger,
-                    {
-                        "cycle_id": intent.cycle_id,
-                        "decision_layer": "execution",
-                        "reason_code": str(ReasonCode.EXECUTION_REJECT_INSUFFICIENT_BALANCE_PRECHECK),
-                        "action": "REJECT",
-                        "scope": "per_intent",
-                        "intent_id": (raw_intent.intent_id if raw_intent else None),
-                        "symbol": intent.symbol,
-                        "side": intent.side.value,
-                    },
-                )
-                self.state_store.finalize_idempotency_key(
-                    "place_order",
-                    idempotency_key,
-                    action_id=action_id,
-                    client_order_id=client_order_id,
-                    order_id=None,
-                    status="FAILED",
-                )
-                self.state_store.clear_action_dedupe_key(action_id)
                 continue
 
             try:

@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from btcbot.adapters.exchange import ExchangeClient
+from btcbot.config import Settings
 from btcbot.domain.intent import Intent, to_order_intent
 from btcbot.domain.models import (
     Balance,
@@ -40,8 +41,10 @@ class RecordingExchange(ExchangeClient):
         ]
         self.canceled: list[str] = []
         self.placed: list[tuple[str, OrderSide, float, float, str]] = []
+        self.get_balances_calls = 0
 
     def get_balances(self) -> list[Balance]:
+        self.get_balances_calls += 1
         return list(self.balances)
 
     def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
@@ -104,7 +107,7 @@ class CancelFailExchange(RecordingExchange):
 
 class FakeMarketDataService:
     def get_symbol_rules(self, pair_symbol: str) -> SymbolRules:
-        assert pair_symbol in {"BTCTRY", "ETHTRY", "SOLTRY"}
+        assert pair_symbol in {"BTCTRY", "ETHTRY", "SOLTRY", "BTCUSDT"}
         return SymbolRules(
             pair_symbol=pair_symbol,
             price_scale=2,
@@ -187,7 +190,8 @@ def test_dry_run_cancel_stale_logs_would_cancel_without_side_effects(tmp_path, c
     assert "would cancel stale order" in caplog.text
 
 
-def test_sell_precheck_with_zero_base_balance_skips_exchange_submit(tmp_path) -> None:
+def test_sell_precheck_with_zero_base_balance_skips_exchange_submit(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
     store = StateStore(db_path=str(tmp_path / "state.db"))
     exchange = RecordingExchange(balances=[Balance(asset="TRY", free=1000)])
     service = ExecutionService(
@@ -212,9 +216,26 @@ def test_sell_precheck_with_zero_base_balance_skips_exchange_submit(tmp_path) ->
 
     assert placed == 0
     assert exchange.placed == []
+    assert exchange.get_balances_calls == 1
+    decision_records = [record for record in caplog.records if record.message == "decision_event"]
+    assert decision_records
+    assert any(
+        record.__dict__.get("extra", {}).get("reason_code")
+        == "execution_reject:insufficient_balance_precheck"
+        for record in decision_records
+    )
+    precheck_records = [
+        record
+        for record in caplog.records
+        if record.message == "execution_reject_insufficient_balance_precheck"
+    ]
+    assert precheck_records
+    assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "ETH"
+    assert Decimal(precheck_records[-1].__dict__.get("extra", {}).get("missing_amount", "0")) > 0
 
 
-def test_buy_precheck_with_insufficient_try_skips_exchange_submit(tmp_path) -> None:
+def test_buy_precheck_with_insufficient_try_skips_exchange_submit(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
     store = StateStore(db_path=str(tmp_path / "state.db"))
     exchange = RecordingExchange(balances=[Balance(asset="TRY", free=5)])
     service = ExecutionService(
@@ -231,6 +252,98 @@ def test_buy_precheck_with_insufficient_try_skips_exchange_submit(tmp_path) -> N
 
     assert placed == 0
     assert exchange.placed == []
+    assert exchange.get_balances_calls == 1
+    decision_records = [record for record in caplog.records if record.message == "decision_event"]
+    assert decision_records
+    assert any(
+        record.__dict__.get("extra", {}).get("reason_code")
+        == "execution_reject:insufficient_balance_precheck"
+        for record in decision_records
+    )
+    precheck_records = [
+        record
+        for record in caplog.records
+        if record.message == "execution_reject_insufficient_balance_precheck"
+    ]
+    assert precheck_records
+    assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "TRY"
+    assert Decimal(precheck_records[-1].__dict__.get("extra", {}).get("missing_amount", "0")) > 0
+
+
+def test_buy_precheck_derives_quote_asset_from_symbol(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(
+        balances=[
+            Balance(asset="USDT", free=Decimal("1")),
+            Balance(asset="TRY", free=Decimal("100000")),
+        ]
+    )
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents(
+        [
+            OrderIntent(
+                symbol="BTC_USDT",
+                side=OrderSide.BUY,
+                price=100.0,
+                quantity=0.1,
+                notional=10.0,
+                cycle_id="buy-usdt-precheck",
+            )
+        ]
+    )
+
+    assert placed == 0
+    assert exchange.placed == []
+    precheck_records = [
+        record
+        for record in caplog.records
+        if record.message == "execution_reject_insufficient_balance_precheck"
+    ]
+    assert precheck_records
+    assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "USDT"
+    decision_records = [record for record in caplog.records if record.message == "decision_event"]
+    assert any(
+        record.__dict__.get("extra", {}).get("reason_code")
+        == "execution_reject:insufficient_balance_precheck"
+        for record in decision_records
+    )
+
+
+def test_insufficient_balance_does_not_create_idempotency_or_actions(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(balances=[Balance(asset="TRY", free=1)])
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    intents = [_intent(cycle_id="c-a"), _intent(cycle_id="c-b")]
+    assert service.execute_intents(intents) == 0
+    assert exchange.get_balances_calls == 1
+
+    with store._connect() as conn:
+        action_count = conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"]
+        idem_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM idempotency_keys WHERE action_type='place_order'"
+        ).fetchone()["c"]
+
+    assert action_count == 0
+    assert idem_count == 0
 
 
 def test_live_mode_saves_order_state(tmp_path) -> None:
@@ -1100,3 +1213,17 @@ def test_place_order_idempotency_is_stable_across_cycles_but_changes_on_material
 
     assert key_a == key_b
     assert key_a != key_c
+
+
+def test_settings_env_file_opt_in_only(monkeypatch, tmp_path) -> None:
+    env_file = tmp_path / ".env.custom"
+    env_file.write_text("TARGET_TRY=777\n", encoding="utf-8")
+
+    monkeypatch.delenv("SETTINGS_ENV_FILE", raising=False)
+    default_settings = Settings()
+    assert default_settings.target_try != 777
+
+    monkeypatch.setenv("SETTINGS_ENV_FILE", str(env_file))
+    monkeypatch.setenv("TARGET_TRY", "999")
+    opted_in = Settings()
+    assert opted_in.target_try == 999

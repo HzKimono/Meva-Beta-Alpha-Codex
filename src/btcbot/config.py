@@ -16,10 +16,17 @@ from btcbot.domain.universe_models import UniverseKnobs
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env.live",
+        env_file=None,
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+
+    def __init__(self, **values):
+        if "_env_file" not in values:
+            env_file = os.getenv("SETTINGS_ENV_FILE")
+            values["_env_file"] = env_file if env_file else None
+        super().__init__(**values)
 
     btcturk_api_key: SecretStr | None = Field(default=None, alias="BTCTURK_API_KEY")
     btcturk_api_secret: SecretStr | None = Field(default=None, alias="BTCTURK_API_SECRET")

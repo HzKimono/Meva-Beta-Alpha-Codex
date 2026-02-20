@@ -298,10 +298,25 @@ def test_startup_recovery_imports_exchange_open_and_closes_local_only(tmp_path) 
     assert imported.status == OrderStatus.OPEN
 
     with state_store._connect() as conn:
-        row = conn.execute(
+        imported_row = conn.execute(
             "SELECT exchange_status_raw, reconciled FROM orders WHERE order_id = ?",
             ("1001",),
         ).fetchone()
-    assert row is not None
-    assert row["exchange_status_raw"] == "external_open:exchange_reconcile"
-    assert row["reconciled"] == 1
+        missing_row = conn.execute(
+            "SELECT exchange_status_raw, status, reconciled FROM orders WHERE order_id = ?",
+            ("9001",),
+        ).fetchone()
+
+    assert imported_row is not None
+    assert imported_row["exchange_status_raw"] == "external_open:exchange_reconcile"
+    assert imported_row["reconciled"] == 1
+
+    assert missing_row is not None
+    assert missing_row["status"] == "rejected"
+    assert str(missing_row["exchange_status_raw"]).startswith("missing_on_exchange_")
+    assert missing_row["reconciled"] == 1
+
+    summary = execution_service.last_lifecycle_refresh_summary
+    assert summary["imported_external_open"] == 1
+    assert summary["marked_missing"] == 1
+    assert summary["closed"] == 1
