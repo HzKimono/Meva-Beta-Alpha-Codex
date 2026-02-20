@@ -116,7 +116,10 @@ class ExecutionService:
         if not normalized_symbols:
             return
 
-        local_orders = self.state_store.find_open_or_unknown_orders(normalized_symbols)
+        local_orders = self.state_store.find_open_or_unknown_orders(
+            normalized_symbols,
+            new_grace_seconds=-1,
+        )
         orders_by_symbol: dict[str, list] = {}
         for local in local_orders:
             orders_by_symbol.setdefault(local.symbol, []).append(local)
@@ -193,6 +196,24 @@ class ExecutionService:
 
                 matched = self._match_existing_order(local.order_id, local.client_order_id, recent)
                 if matched is None:
+                    if local.status == OrderStatus.NEW:
+                        self.state_store.update_order_status(
+                            order_id=local.order_id,
+                            status=OrderStatus.REJECTED,
+                            exchange_status_raw="missing_on_exchange_after_grace",
+                            reconciled=True,
+                            last_seen_at=now_ms,
+                        )
+                        continue
+                    if local.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}:
+                        self.state_store.update_order_status(
+                            order_id=local.order_id,
+                            status=OrderStatus.UNKNOWN,
+                            exchange_status_raw="missing_on_exchange_open_probe",
+                            reconciled=True,
+                            last_seen_at=now_ms,
+                        )
+                        continue
                     if local.status == OrderStatus.UNKNOWN:
                         self._mark_unknown_unresolved(local, now_ms)
                     continue
@@ -831,6 +852,20 @@ class ExecutionService:
             except Exception as exc:  # noqa: BLE001
                 if not self._is_uncertain_error(exc):
                     if isinstance(exc, ExchangeError):
+                        if exc.status_code == 400:
+                            logger.error(
+                                "exchange_submit_http_400",
+                                extra={
+                                    "extra": {
+                                        "symbol": symbol_normalized,
+                                        "client_order_id": client_order_id,
+                                        "request_json": exc.request_json,
+                                        "response_body": exc.response_body,
+                                        "error_code": exc.error_code,
+                                        "error_message": exc.error_message,
+                                    }
+                                },
+                            )
                         logger.error(
                             "Failed to place limit order",
                             extra={
@@ -869,6 +904,27 @@ class ExecutionService:
                         client_order_id=client_order_id,
                         order_id=None,
                         status="FAILED",
+                    )
+                    self.state_store.save_order(
+                        Order(
+                            order_id=f"rejected:{client_order_id}",
+                            client_order_id=client_order_id,
+                            symbol=symbol_normalized,
+                            side=intent.side,
+                            price=float(price),
+                            quantity=float(quantity),
+                            status=OrderStatus.REJECTED,
+                            created_at=datetime.now(UTC),
+                            updated_at=datetime.now(UTC),
+                        ),
+                        reconciled=True,
+                        exchange_status_raw=(
+                            str(exc.response_body)
+                            if isinstance(exc, ExchangeError)
+                            else str(exc)
+                        ),
+                        idempotency_key=idempotency_key,
+                        intent_id=(raw_intent.intent_id if raw_intent else None),
                     )
                     self.state_store.clear_action_dedupe_key(action_id)
                     continue

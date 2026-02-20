@@ -248,3 +248,36 @@ def test_sweep_offset_reduces_price_before_rounding(tmp_path):
 
     assert len(intents) == 1
     assert intents[0].price == Decimal("99.8")
+
+
+def test_sweep_normalizes_symbols_rules_and_bids(tmp_path):
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    service = SweepService(
+        state_store=store,
+        target_try=0.0,
+        offset_bps=0,
+        default_min_notional=10.0,
+    )
+
+    balances = [Balance(asset="TRY", free=100.0)]
+    bids = {"BTCTRY": 100.0}
+    rules = {
+        "BTC_TRY": SymbolInfo(
+            symbol="BTC_TRY",
+            base_asset="BTC",
+            min_notional=10,
+            step_size=0.01,
+            tick_size=0.1,
+        )
+    }
+
+    intents = service.build_order_intents(
+        cycle_id="202601010111",
+        balances=balances,
+        symbols=["btc_try"],
+        best_bids=bids,
+        symbol_rules=rules,
+    )
+
+    assert len(intents) == 1
+    assert intents[0].symbol == "BTCTRY"

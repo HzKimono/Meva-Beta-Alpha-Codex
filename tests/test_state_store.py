@@ -937,3 +937,30 @@ def test_stage7_schema_upgrade_from_minimal_legacy_db_supports_parity(tmp_path) 
     )
     assert isinstance(fingerprint, str)
     assert len(fingerprint) == 64
+
+
+def test_find_open_or_unknown_orders_excludes_stale_new_after_grace(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    old = datetime.now(UTC)
+    store.save_order(
+        Order(
+            order_id="oid-stale-new",
+            client_order_id="cid-stale-new",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=100,
+            quantity=0.1,
+            status=OrderStatus.NEW,
+            created_at=old,
+            updated_at=old,
+        )
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE orders SET updated_at = ? WHERE order_id = ?",
+            ("2000-01-01T00:00:00+00:00", "oid-stale-new"),
+        )
+
+    results = store.find_open_or_unknown_orders(["BTC_TRY"], new_grace_seconds=60)
+
+    assert results == []

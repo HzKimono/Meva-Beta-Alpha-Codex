@@ -51,6 +51,7 @@ class StoredOrder:
     unknown_next_probe_at: int | None = None
     unknown_probe_attempts: int = 0
     unknown_escalated_at: int | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass
@@ -2394,9 +2395,15 @@ class StateStore:
                 ),
             )
 
-    def find_open_or_unknown_orders(self, symbols: list[str] | None = None) -> list[StoredOrder]:
+    def find_open_or_unknown_orders(
+        self,
+        symbols: list[str] | None = None,
+        *,
+        new_grace_seconds: int = PENDING_GRACE_SECONDS,
+    ) -> list[StoredOrder]:
         query = """
             SELECT order_id, symbol, client_order_id, side, price, qty, status,
+                   updated_at,
                    last_seen_at, reconciled, exchange_status_raw,
                    unknown_first_seen_at, unknown_last_probe_at, unknown_next_probe_at,
                    unknown_probe_attempts, unknown_escalated_at
@@ -2412,44 +2419,58 @@ class StateStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
 
-        return [
-            StoredOrder(
-                order_id=str(row["order_id"]),
-                symbol=str(row["symbol"]),
-                client_order_id=row["client_order_id"],
-                side=str(row["side"]),
-                price=Decimal(str(row["price"])),
-                quantity=Decimal(str(row["qty"])),
-                status=OrderStatus(str(row["status"])),
-                last_seen_at=(
-                    int(row["last_seen_at"]) if row["last_seen_at"] is not None else None
-                ),
-                reconciled=bool(row["reconciled"]),
-                exchange_status_raw=row["exchange_status_raw"],
-                unknown_first_seen_at=(
-                    int(row["unknown_first_seen_at"])
-                    if row["unknown_first_seen_at"] is not None
-                    else None
-                ),
-                unknown_last_probe_at=(
-                    int(row["unknown_last_probe_at"])
-                    if row["unknown_last_probe_at"] is not None
-                    else None
-                ),
-                unknown_next_probe_at=(
-                    int(row["unknown_next_probe_at"])
-                    if row["unknown_next_probe_at"] is not None
-                    else None
-                ),
-                unknown_probe_attempts=int(row["unknown_probe_attempts"] or 0),
-                unknown_escalated_at=(
-                    int(row["unknown_escalated_at"])
-                    if row["unknown_escalated_at"] is not None
-                    else None
-                ),
+        now = datetime.now(UTC)
+        eligible: list[StoredOrder] = []
+        for row in rows:
+            updated_at_raw = row["updated_at"]
+            updated_at = (
+                datetime.fromisoformat(str(updated_at_raw)) if updated_at_raw is not None else None
             )
-            for row in rows
-        ]
+            status = OrderStatus(str(row["status"]))
+            if status == OrderStatus.NEW and updated_at is not None and new_grace_seconds >= 0:
+                age_seconds = (now - updated_at).total_seconds()
+                if age_seconds > float(new_grace_seconds):
+                    continue
+            eligible.append(
+                StoredOrder(
+                    order_id=str(row["order_id"]),
+                    symbol=str(row["symbol"]),
+                    client_order_id=row["client_order_id"],
+                    side=str(row["side"]),
+                    price=Decimal(str(row["price"])),
+                    quantity=Decimal(str(row["qty"])),
+                    status=status,
+                    updated_at=updated_at,
+                    last_seen_at=(
+                        int(row["last_seen_at"]) if row["last_seen_at"] is not None else None
+                    ),
+                    reconciled=bool(row["reconciled"]),
+                    exchange_status_raw=row["exchange_status_raw"],
+                    unknown_first_seen_at=(
+                        int(row["unknown_first_seen_at"])
+                        if row["unknown_first_seen_at"] is not None
+                        else None
+                    ),
+                    unknown_last_probe_at=(
+                        int(row["unknown_last_probe_at"])
+                        if row["unknown_last_probe_at"] is not None
+                        else None
+                    ),
+                    unknown_next_probe_at=(
+                        int(row["unknown_next_probe_at"])
+                        if row["unknown_next_probe_at"] is not None
+                        else None
+                    ),
+                    unknown_probe_attempts=int(row["unknown_probe_attempts"] or 0),
+                    unknown_escalated_at=(
+                        int(row["unknown_escalated_at"])
+                        if row["unknown_escalated_at"] is not None
+                        else None
+                    ),
+                )
+            )
+
+        return eligible
 
     def mark_order_canceled(self, order_id: str) -> None:
         self.update_order_status(order_id=order_id, status=OrderStatus.CANCELED)
