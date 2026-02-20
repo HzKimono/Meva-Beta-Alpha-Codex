@@ -134,6 +134,8 @@ class ExecutionService:
         self._last_lifecycle_refresh_at: dict[str, float] = {}
         self._lifecycle_backoff_until: float = 0.0
         self.last_lifecycle_refresh_summary: dict[str, object] = {}
+        self.last_execute_summary: dict[str, int] = {}
+        self._cycle_balance_cache: dict[str, dict[str, Decimal]] = {}
 
     def refresh_order_lifecycle(self, symbols: list[str], *, skip_non_essential: bool = False) -> dict[str, object]:
         """Reconcile local lifecycle state against exchange open-orders truth for scoped symbols."""
@@ -332,6 +334,27 @@ class ExecutionService:
         logger.info("order_reconcile_summary", extra={"extra": summary})
         self.last_lifecycle_refresh_summary = dict(summary)
         return summary
+
+    def prime_cycle_balances(self, *, cycle_id: str, balances: list) -> None:
+        if not cycle_id:
+            return
+        self._cycle_balance_cache[str(cycle_id)] = {
+            str(item.asset).upper(): Decimal(str(item.free)) for item in balances
+        }
+
+    def _get_cycle_balances(self, *, cycle_id: str | None) -> dict[str, Decimal] | None:
+        if not cycle_id:
+            return None
+        cached = self._cycle_balance_cache.get(str(cycle_id))
+        if cached is not None:
+            return dict(cached)
+        try:
+            fetched = self._balance_by_asset()
+        except Exception:  # noqa: BLE001
+            logger.exception("balance_precheck_snapshot_failed")
+            return None
+        self._cycle_balance_cache[str(cycle_id)] = dict(fetched)
+        return fetched
 
     def _balance_by_asset(self) -> dict[str, Decimal]:
         balances = self.exchange.get_balances()
@@ -816,6 +839,13 @@ class ExecutionService:
         symbols = [intent.symbol for intent, _ in normalized_intents]
         self.refresh_order_lifecycle(symbols)
         self.state_store.prune_expired_idempotency_keys()
+        self.last_execute_summary = {
+            "orders_submitted": 0,
+            "orders_failed_exchange": 0,
+            "rejected_intents": 0,
+            "intents_rejected_precheck": 0,
+            "attempted_exchange_calls": 0,
+        }
 
         if self.safe_mode:
             logger.warning("safe_mode_blocks_submit_write_calls")
@@ -858,15 +888,16 @@ class ExecutionService:
                 )
             return 0
 
+        execution_cycle_id = normalized_intents[0][0].cycle_id if normalized_intents else None
         cycle_balances: dict[str, Decimal] | None = None
         if not self.dry_run:
-            try:
-                cycle_balances = self._balance_by_asset()
-            except Exception:  # noqa: BLE001
-                logger.exception("balance_precheck_snapshot_failed")
-                cycle_balances = None
+            cycle_balances = self._get_cycle_balances(cycle_id=execution_cycle_id)
 
         placed = 0
+        rejected_intents = 0
+        intents_rejected_precheck = 0
+        orders_failed_exchange = 0
+        attempted_exchange_calls = 0
         for intent, raw_intent in normalized_intents:
             if not self.dry_run:
                 self._ensure_live_side_effects_allowed(
@@ -889,6 +920,7 @@ class ExecutionService:
                     validate_order(price=price, qty=quantity, rules=rules)
                 except ValueError:
                     logger.exception("Intent failed symbol rule validation")
+                    rejected_intents += 1
                     continue
 
                 is_sufficient, asset, required, available = self._check_balance_precondition(
@@ -930,6 +962,8 @@ class ExecutionService:
                             "missing_amount": str(max(missing, Decimal("0"))),
                         },
                     )
+                    intents_rejected_precheck += 1
+                    rejected_intents += 1
                     continue
 
             payload_hash = self._place_hash(intent)
@@ -1043,6 +1077,7 @@ class ExecutionService:
                 placed += 1
                 continue
 
+            attempted_exchange_calls += 1
             try:
                 order = self._retry_exchange_call(
                     lambda symbol=symbol_normalized,
@@ -1060,6 +1095,7 @@ class ExecutionService:
                     operation="submit",
                 )
             except Exception as exc:  # noqa: BLE001
+                orders_failed_exchange += 1
                 if isinstance(exc, NonRetryableSubmitError):
                     exc = exc.original
                 if not self._is_uncertain_error(exc):
@@ -1254,6 +1290,13 @@ class ExecutionService:
                 status="COMMITTED",
             )
             placed += 1
+        self.last_execute_summary = {
+            "orders_submitted": placed,
+            "orders_failed_exchange": orders_failed_exchange,
+            "rejected_intents": rejected_intents,
+            "intents_rejected_precheck": intents_rejected_precheck,
+            "attempted_exchange_calls": attempted_exchange_calls,
+        }
         return placed
 
     def _recover_stale_pending_place_order(

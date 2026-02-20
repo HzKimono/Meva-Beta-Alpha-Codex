@@ -232,6 +232,11 @@ def test_sell_precheck_with_zero_base_balance_skips_exchange_submit(tmp_path, ca
     assert precheck_records
     assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "ETH"
     assert Decimal(precheck_records[-1].__dict__.get("extra", {}).get("missing_amount", "0")) > 0
+    summary = service.last_execute_summary
+    assert summary["intents_rejected_precheck"] == 1
+    assert summary["rejected_intents"] == 1
+    assert summary["orders_failed_exchange"] == 0
+    assert summary["attempted_exchange_calls"] == 0
 
 
 def test_buy_precheck_with_insufficient_try_skips_exchange_submit(tmp_path, caplog) -> None:
@@ -268,6 +273,11 @@ def test_buy_precheck_with_insufficient_try_skips_exchange_submit(tmp_path, capl
     assert precheck_records
     assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "TRY"
     assert Decimal(precheck_records[-1].__dict__.get("extra", {}).get("missing_amount", "0")) > 0
+    summary = service.last_execute_summary
+    assert summary["intents_rejected_precheck"] == 1
+    assert summary["rejected_intents"] == 1
+    assert summary["orders_failed_exchange"] == 0
+    assert summary["attempted_exchange_calls"] == 0
 
 
 def test_buy_precheck_derives_quote_asset_from_symbol(tmp_path, caplog) -> None:
@@ -344,6 +354,11 @@ def test_insufficient_balance_does_not_create_idempotency_or_actions(tmp_path) -
 
     assert action_count == 0
     assert idem_count == 0
+    summary = service.last_execute_summary
+    assert summary["intents_rejected_precheck"] == 2
+    assert summary["rejected_intents"] == 2
+    assert summary["orders_failed_exchange"] == 0
+    assert summary["attempted_exchange_calls"] == 0
 
 
 def test_live_mode_saves_order_state(tmp_path) -> None:
@@ -1227,3 +1242,38 @@ def test_settings_env_file_opt_in_only(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("TARGET_TRY", "999")
     opted_in = Settings()
     assert opted_in.target_try == 999
+
+
+def test_exchange_submit_failure_increments_orders_failed_exchange_only_when_attempted(tmp_path) -> None:
+    class SubmitFailExchange(RecordingExchange):
+        def place_limit_order(
+            self,
+            symbol: str,
+            side: OrderSide,
+            price: float,
+            quantity: float,
+            client_order_id: str | None = None,
+        ) -> Order:
+            del symbol, side, price, quantity, client_order_id
+            raise ExchangeError("submit failed", status_code=400)
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = SubmitFailExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents([_intent(cycle_id="submit-fail")])
+
+    assert placed == 0
+    summary = service.last_execute_summary
+    assert summary["attempted_exchange_calls"] == 1
+    assert summary["orders_failed_exchange"] == 1
+    assert summary["intents_rejected_precheck"] == 0
+    assert summary["rejected_intents"] == 0

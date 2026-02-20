@@ -26,10 +26,16 @@ from btcbot.services.state_store import StateStore
 @dataclass
 class _StubExecutionService:
     calls: int = 0
+    primed: int = 0
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         assert symbols
         self.calls += 1
+
+    def prime_cycle_balances(self, *, cycle_id: str, balances: list[Balance]) -> None:
+        assert cycle_id
+        assert balances
+        self.primed += 1
 
 
 @dataclass
@@ -87,6 +93,7 @@ def test_run_with_prices_calls_refresh_and_runs_invariants() -> None:
     )
 
     assert execution.calls == 1
+    assert execution.primed == 1
     assert accounting.refresh_calls == 1
     assert accounting.seen_mark_prices == {"BTCTRY": Decimal("123.45")}
     assert result.observe_only_required is False
