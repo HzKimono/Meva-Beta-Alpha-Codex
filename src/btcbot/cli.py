@@ -1318,6 +1318,9 @@ def run_cycle(
                     portfolio_service=portfolio_service,
                     mark_prices=startup_mark_prices,
                 )
+                refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
+                if callable(refresh_order_lifecycle):
+                    refresh_order_lifecycle(settings.symbols)
                 if recovery.observe_only_required:
                     logger.error(
                         "startup_recovery_forced_observe_only",
