@@ -9,6 +9,7 @@ from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.intent import Intent, to_order_intent
 from btcbot.domain.models import (
     Balance,
+    ExchangeError,
     OpenOrders,
     Order,
     OrderIntent,
@@ -817,3 +818,113 @@ def test_execute_intents_legacy_order_intent_uses_place_hash(tmp_path) -> None:
     assert first == 1
     assert second == 0
     assert store.action_count("would_place_order", service._place_hash(intent)) == 1
+
+
+class Submit400Exchange(RecordingExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def place_limit_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        price: float,
+        quantity: float,
+        client_order_id: str | None = None,
+    ) -> Order:
+        del symbol, side, price, quantity, client_order_id
+        self.attempts += 1
+        raise ExchangeError(
+            "bad request",
+            status_code=400,
+            error_code="1001",
+            error_message="invalid qty",
+            request_method="POST",
+            request_path="/api/v1/order",
+            request_json={"quantity": "0"},
+            response_body='{"code":1001,"message":"invalid qty"}',
+        )
+
+
+def test_state_store_new_after_grace_not_blocking(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    old = datetime.now(UTC) - timedelta(seconds=130)
+    store.save_order(
+        Order(
+            order_id="o-old-new",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=100.0,
+            quantity=0.1,
+            status=OrderStatus.NEW,
+            created_at=old,
+            updated_at=old,
+        )
+    )
+    active = store.find_open_or_unknown_orders(["BTCTRY"], new_grace_seconds=60)
+    assert active == []
+
+
+def test_refresh_order_lifecycle_missing_transitions(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC)
+    store.save_order(Order(order_id="o-new", client_order_id="cid-new", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.NEW, created_at=now - timedelta(seconds=120), updated_at=now - timedelta(seconds=120)))
+    store.save_order(Order(order_id="o-open", client_order_id="cid-open", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.OPEN, created_at=now, updated_at=now))
+    store.save_order(Order(order_id="o-unk", client_order_id="cid-unk", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.UNKNOWN, created_at=now, updated_at=now))
+
+    exchange = RecordingExchange()
+    svc = ExecutionService(exchange=exchange, state_store=store)
+    svc.refresh_order_lifecycle(["BTC_TRY"])
+
+    rows = {o.order_id: o for o in store.find_open_or_unknown_orders(["BTCTRY"], include_new_after_grace=True, include_escalated_unknown=True)}
+    assert rows["o-open"].status == OrderStatus.UNKNOWN
+    assert rows["o-unk"].unknown_next_probe_at is not None
+    with store._connect() as conn:
+        rej = conn.execute("SELECT status, exchange_status_raw FROM orders WHERE order_id='o-new'").fetchone()
+    assert rej is not None
+    assert rej["status"] == "rejected"
+    assert "missing_on_exchange_after_grace" in str(rej["exchange_status_raw"])
+
+
+def test_submit_400_logs_request_and_response(tmp_path, caplog) -> None:
+    caplog.set_level("ERROR")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    service = ExecutionService(
+        exchange=Submit400Exchange(),
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+    placed = service.execute_intents([_intent(cycle_id="c-400")])
+    assert placed == 0
+    assert "exchange_submit_failed" in caplog.text
+    payloads = [getattr(record, "extra", {}) for record in caplog.records if record.message == "exchange_submit_failed"]
+    assert payloads
+    assert payloads[-1].get("request_json") == {"quantity": "0"}
+    assert "invalid qty" in str(payloads[-1].get("response_body"))
+
+
+def test_submit_rejected_order_id_unique_per_failure(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    service = ExecutionService(
+        exchange=Submit400Exchange(),
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+    i1 = _intent(cycle_id="c-uniq-1")
+    i2 = _intent(cycle_id="c-uniq-2")
+    service.execute_intents([i1])
+    service.execute_intents([i2])
+    with store._connect() as conn:
+        rows = conn.execute("SELECT order_id FROM orders WHERE status='rejected' ORDER BY created_at").fetchall()
+    ids = [str(r["order_id"]) for r in rows]
+    assert len(ids) >= 2
+    assert len(set(ids)) == len(ids)
