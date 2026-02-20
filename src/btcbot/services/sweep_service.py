@@ -5,7 +5,7 @@ import json
 import logging
 from decimal import ROUND_DOWN, Decimal
 
-from btcbot.domain.models import Balance, OrderIntent, SymbolInfo
+from btcbot.domain.models import Balance, OrderIntent, SymbolInfo, normalize_symbol
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -35,13 +35,18 @@ class SweepService:
         best_bids: dict[str, float],
         symbol_rules: dict[str, SymbolInfo] | None = None,
     ) -> list[OrderIntent]:
-        symbol_rules = symbol_rules or {}
+        symbol_rules = {
+            normalize_symbol(symbol): rules for symbol, rules in (symbol_rules or {}).items()
+        }
+        normalized_best_bids = {
+            normalize_symbol(symbol): price for symbol, price in best_bids.items()
+        }
         free_try = self._try_free_balance(balances)
         excess = max(Decimal("0"), free_try - self.target_try)
         if excess <= 0:
             return []
 
-        sorted_symbols = sorted(set(symbols))
+        sorted_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
         if not sorted_symbols:
             return []
 
@@ -62,7 +67,7 @@ class SweepService:
                 cycle_id=cycle_id,
                 symbol=symbol,
                 budget=min(per_symbol_budget, remaining),
-                best_bids=best_bids,
+                best_bids=normalized_best_bids,
                 symbol_rules=symbol_rules,
                 warned_symbols=warned_symbols,
             )
@@ -86,7 +91,7 @@ class SweepService:
                 cycle_id=cycle_id,
                 symbol=symbol,
                 budget=chunk_budget,
-                best_bids=best_bids,
+                best_bids=normalized_best_bids,
                 symbol_rules=symbol_rules,
                 warned_symbols=warned_symbols,
             )

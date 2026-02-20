@@ -592,3 +592,107 @@ def test_submit_uncertain_sets_metadata_unknown(tmp_path) -> None:
     row = service.state_store.get_latest_action("place_order", payload_hash)
     metadata = json.loads(row["metadata_json"])
     assert metadata["reconcile_status"] in {"unknown", "not_found"}
+
+
+def test_refresh_lifecycle_marks_missing_new_as_rejected(tmp_path) -> None:
+    exchange = LifecycleExchange()
+    service = _service(tmp_path, exchange)
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="oid-new-missing",
+            client_order_id="cid-new-missing",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=100,
+            quantity=0.1,
+            status=OrderStatus.NEW,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    with service.state_store._connect() as conn:
+        conn.execute(
+            "UPDATE orders SET updated_at = ? WHERE order_id = ?",
+            ("2000-01-01T00:00:00+00:00", "oid-new-missing"),
+        )
+
+    service.refresh_order_lifecycle(["BTC_TRY"])
+
+    with service.state_store._connect() as conn:
+        row = conn.execute(
+            "SELECT status, exchange_status_raw FROM orders WHERE order_id = ?",
+            ("oid-new-missing",),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "rejected"
+    assert row["exchange_status_raw"] == "missing_on_exchange_after_grace"
+
+
+def test_refresh_lifecycle_marks_missing_open_as_unknown(tmp_path) -> None:
+    exchange = LifecycleExchange()
+    service = _service(tmp_path, exchange)
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="oid-open-missing",
+            client_order_id="cid-open-missing",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=100,
+            quantity=0.1,
+            status=OrderStatus.OPEN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    service.refresh_order_lifecycle(["BTC_TRY"])
+
+    with service.state_store._connect() as conn:
+        row = conn.execute(
+            "SELECT status, exchange_status_raw, unknown_next_probe_at FROM orders WHERE order_id = ?",
+            ("oid-open-missing",),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "unknown"
+    assert row["exchange_status_raw"] == "missing_on_exchange_open_probe"
+    assert row["unknown_next_probe_at"] is not None
+
+
+def test_execute_intents_marks_submit_400_as_rejected(tmp_path, caplog) -> None:
+    exchange = LifecycleExchange()
+    exchange.place_error = ExchangeError(
+        "status=400 code=1126 message=FAILED_INVALID_PRICE_SCALE",
+        status_code=400,
+        error_code=1126,
+        error_message="FAILED_INVALID_PRICE_SCALE",
+        request_json={"pairSymbol": "BTCTRY", "price": "100.12", "quantity": "0.1"},
+        response_body='{"success":false,"code":1126,"message":"FAILED_INVALID_PRICE_SCALE"}',
+    )
+    service = _service(tmp_path, exchange)
+
+    caplog.set_level("ERROR", logger="btcbot.services.execution_service")
+    placed = service.execute_intents([_intent("cycle-400")])
+    assert placed == 0
+
+    with service.state_store._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT status, exchange_status_raw
+            FROM orders
+            WHERE order_id LIKE 'rejected:%'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "rejected"
+    assert "FAILED_INVALID_PRICE_SCALE" in row["exchange_status_raw"]
+
+    log_records = [r for r in caplog.records if r.getMessage() == "exchange_submit_http_400"]
+    assert log_records
+    payload = getattr(log_records[-1], "extra", {})
+    assert payload["error_code"] == 1126
+    assert payload["error_message"] == "FAILED_INVALID_PRICE_SCALE"
+    assert "FAILED_INVALID_PRICE_SCALE" in payload["response_body"]
