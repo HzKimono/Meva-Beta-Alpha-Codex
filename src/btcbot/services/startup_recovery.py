@@ -66,6 +66,9 @@ class StartupRecoveryService:
 
         invariant_errors: list[str] = []
         balances = portfolio_service.get_balances()
+        prime_cycle_balances = getattr(execution_service, "prime_cycle_balances", None)
+        if callable(prime_cycle_balances):
+            prime_cycle_balances(cycle_id=cycle_id, balances=balances)
         for balance in balances:
             free = Decimal(str(balance.free))
             if free < 0:

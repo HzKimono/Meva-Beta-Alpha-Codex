@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import time
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from btcbot.domain.models import (
     quantize_quantity,
     validate_order,
 )
+from btcbot.domain.symbols import split_symbol
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.market_data_service import MarketDataService
@@ -117,12 +119,23 @@ class ExecutionService:
         self.cancel_retry_max_attempts = max(1, cancel_retry_max_attempts)
         self.retry_base_delay_ms = max(0, retry_base_delay_ms)
         self.retry_max_delay_ms = max(self.retry_base_delay_ms, retry_max_delay_ms)
+        quote_override = os.getenv("EXECUTION_QUOTE_ASSET")
+        self.execution_quote_asset_override = (
+            quote_override.strip().upper() if quote_override and quote_override.strip() else None
+        )
+        self.estimated_fee_bps = Decimal(os.getenv("EXECUTION_ESTIMATED_FEE_BPS", "15"))
+        self.balance_safety_buffer_ratio = Decimal(
+            os.getenv("EXECUTION_BALANCE_SAFETY_BUFFER_RATIO", "0")
+        )
+        self.sell_fee_in_base_bps = Decimal(os.getenv("EXECUTION_SELL_FEE_IN_BASE_BPS", "0"))
         self.sleep_fn = sleep_fn or time.sleep
         self.lifecycle_refresh_min_interval_seconds = 5
         self.lifecycle_backoff_cooldown_seconds = 15
         self._last_lifecycle_refresh_at: dict[str, float] = {}
         self._lifecycle_backoff_until: float = 0.0
         self.last_lifecycle_refresh_summary: dict[str, object] = {}
+        self.last_execute_summary: dict[str, int] = {}
+        self._cycle_balance_cache: dict[str, dict[str, Decimal]] = {}
 
     def refresh_order_lifecycle(self, symbols: list[str], *, skip_non_essential: bool = False) -> dict[str, object]:
         """Reconcile local lifecycle state against exchange open-orders truth for scoped symbols."""
@@ -131,6 +144,7 @@ class ExecutionService:
             "symbols": normalized_symbols,
             "local_open_unknown": 0,
             "matched_on_exchange": 0,
+            "imported_external_open": 0,
             "marked_missing": 0,
             "closed": 0,
             "refresh_skipped_due_to_throttle_count": 0,
@@ -209,11 +223,16 @@ class ExecutionService:
 
             for snapshot in open_snapshots:
                 mapped = self._map_exchange_status(snapshot.status)
-                self._save_reconciled_snapshot(snapshot)
+                is_external_open = self.state_store.get_order(snapshot.order_id) is None
+                exchange_status_raw = snapshot.status_raw
+                if is_external_open and mapped in {OrderStatus.NEW, OrderStatus.OPEN, OrderStatus.PARTIAL}:
+                    exchange_status_raw = "external_open:exchange_reconcile"
+                    summary["imported_external_open"] += 1
+                self._save_reconciled_snapshot(snapshot, exchange_status_raw=exchange_status_raw)
                 self.state_store.update_order_status(
                     order_id=snapshot.order_id,
                     status=mapped,
-                    exchange_status_raw=snapshot.status_raw,
+                    exchange_status_raw=exchange_status_raw or snapshot.status_raw,
                     reconciled=True,
                     last_seen_at=snapshot.update_time or snapshot.timestamp,
                 )
@@ -278,12 +297,13 @@ class ExecutionService:
                     elif local.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}:
                         self.state_store.update_order_status(
                             order_id=local.order_id,
-                            status=OrderStatus.UNKNOWN,
-                            exchange_status_raw="missing_from_open_orders",
-                            reconciled=False,
+                            status=OrderStatus.REJECTED,
+                            exchange_status_raw="missing_on_exchange_reconcile",
+                            reconciled=True,
                             last_seen_at=now_ms,
                         )
                         summary["marked_missing"] += 1
+                        summary["closed"] += 1
                     elif local.status == OrderStatus.UNKNOWN:
                         self._mark_unknown_unresolved(local, now_ms)
                     continue
@@ -314,6 +334,75 @@ class ExecutionService:
         logger.info("order_reconcile_summary", extra={"extra": summary})
         self.last_lifecycle_refresh_summary = dict(summary)
         return summary
+
+    def prime_cycle_balances(self, *, cycle_id: str, balances: list) -> None:
+        if not cycle_id:
+            return
+        self._cycle_balance_cache[str(cycle_id)] = {
+            str(item.asset).upper(): Decimal(str(item.free)) for item in balances
+        }
+
+    def _get_cycle_balances(self, *, cycle_id: str | None) -> dict[str, Decimal] | None:
+        if not cycle_id:
+            return None
+        cached = self._cycle_balance_cache.get(str(cycle_id))
+        if cached is not None:
+            return dict(cached)
+        try:
+            fetched = self._balance_by_asset()
+        except Exception:  # noqa: BLE001
+            logger.exception("balance_precheck_snapshot_failed")
+            return None
+        self._cycle_balance_cache[str(cycle_id)] = dict(fetched)
+        return fetched
+
+    def _balance_by_asset(self) -> dict[str, Decimal]:
+        balances = self.exchange.get_balances()
+        return {str(item.asset).upper(): Decimal(str(item.free)) for item in balances}
+
+    def _derive_symbol_assets(self, symbol: str) -> tuple[str, str]:
+        normalized = normalize_symbol(symbol)
+        try:
+            base_asset, quote_asset = split_symbol(normalized)
+            return str(base_asset).upper(), str(quote_asset).upper()
+        except ValueError:
+            if self.execution_quote_asset_override:
+                quote_asset = self.execution_quote_asset_override
+                if normalized.endswith(quote_asset) and len(normalized) > len(quote_asset):
+                    return normalized[: -len(quote_asset)], quote_asset
+                return normalized, quote_asset
+            raise
+
+    def _check_balance_precondition(
+        self,
+        *,
+        balances: dict[str, Decimal] | None,
+        symbol: str,
+        side: OrderSide,
+        price: Decimal,
+        quantity: Decimal,
+    ) -> tuple[bool, str | None, Decimal | None, Decimal | None]:
+        if balances is None or not balances:
+            return True, None, None, None
+
+        base_asset, quote_asset = self._derive_symbol_assets(symbol)
+        if side == OrderSide.BUY:
+            asset = self.execution_quote_asset_override or quote_asset
+            notional = price * quantity
+            estimated_fee = notional * (self.estimated_fee_bps / Decimal("10000"))
+            safety_buffer = notional * self.balance_safety_buffer_ratio
+            required = notional + estimated_fee + safety_buffer
+            available = balances.get(asset, Decimal("0"))
+            if available < required:
+                return False, asset, required, available
+            return True, None, None, None
+
+        asset = base_asset
+        required = quantity + (quantity * (self.sell_fee_in_base_bps / Decimal("10000")))
+        available = balances.get(asset, Decimal("0"))
+        if available < required:
+            return False, asset, required, available
+        return True, None, None, None
 
     def _is_exchange_429_error(self, exc: Exception) -> bool:
         if isinstance(exc, httpx.HTTPStatusError):
@@ -441,7 +530,9 @@ class ExecutionService:
             return str(row["cycle_id"])
         return f"reconcile:{datetime.now(UTC).strftime('%Y%m%d')}"
 
-    def _save_reconciled_snapshot(self, snapshot: OrderSnapshot) -> None:
+    def _save_reconciled_snapshot(
+        self, snapshot: OrderSnapshot, *, exchange_status_raw: str | None = None
+    ) -> None:
         side = snapshot.side
         if side is None:
             local_order = self.state_store.get_order(snapshot.order_id)
@@ -467,7 +558,7 @@ class ExecutionService:
         self.state_store.save_order(
             order,
             reconciled=True,
-            exchange_status_raw=snapshot.status_raw,
+            exchange_status_raw=exchange_status_raw or snapshot.status_raw,
         )
 
     def cancel_stale_orders(self, cycle_id: str) -> int:
@@ -748,6 +839,13 @@ class ExecutionService:
         symbols = [intent.symbol for intent, _ in normalized_intents]
         self.refresh_order_lifecycle(symbols)
         self.state_store.prune_expired_idempotency_keys()
+        self.last_execute_summary = {
+            "orders_submitted": 0,
+            "orders_failed_exchange": 0,
+            "rejected_intents": 0,
+            "intents_rejected_precheck": 0,
+            "attempted_exchange_calls": 0,
+        }
 
         if self.safe_mode:
             logger.warning("safe_mode_blocks_submit_write_calls")
@@ -790,7 +888,16 @@ class ExecutionService:
                 )
             return 0
 
+        execution_cycle_id = normalized_intents[0][0].cycle_id if normalized_intents else None
+        cycle_balances: dict[str, Decimal] | None = None
+        if not self.dry_run:
+            cycle_balances = self._get_cycle_balances(cycle_id=execution_cycle_id)
+
         placed = 0
+        rejected_intents = 0
+        intents_rejected_precheck = 0
+        orders_failed_exchange = 0
+        attempted_exchange_calls = 0
         for intent, raw_intent in normalized_intents:
             if not self.dry_run:
                 self._ensure_live_side_effects_allowed(
@@ -799,6 +906,65 @@ class ExecutionService:
                     side=intent.side.value,
                     intent_id=(raw_intent.intent_id if raw_intent else None),
                 )
+
+            symbol_normalized = normalize_symbol(intent.symbol)
+            if not self.dry_run:
+                if self.market_data_service is None:
+                    raise LiveTradingNotArmedError(
+                        "MarketDataService is required for live order validation"
+                    )
+                rules = self.market_data_service.get_symbol_rules(symbol_normalized)
+                try:
+                    price = quantize_price(Decimal(str(intent.price)), rules)
+                    quantity = quantize_quantity(Decimal(str(intent.quantity)), rules)
+                    validate_order(price=price, qty=quantity, rules=rules)
+                except ValueError:
+                    logger.exception("Intent failed symbol rule validation")
+                    rejected_intents += 1
+                    continue
+
+                is_sufficient, asset, required, available = self._check_balance_precondition(
+                    balances=cycle_balances,
+                    symbol=symbol_normalized,
+                    side=intent.side,
+                    price=price,
+                    quantity=quantity,
+                )
+                if not is_sufficient:
+                    missing = (required or Decimal("0")) - (available or Decimal("0"))
+                    logger.warning(
+                        "execution_reject_insufficient_balance_precheck",
+                        extra={
+                            "extra": {
+                                "cycle_id": intent.cycle_id,
+                                "intent_id": (raw_intent.intent_id if raw_intent else None),
+                                "symbol": symbol_normalized,
+                                "side": intent.side.value,
+                                "asset": asset,
+                                "required": str(required),
+                                "available": str(available),
+                                "missing_amount": str(max(missing, Decimal("0"))),
+                            }
+                        },
+                    )
+                    emit_decision(
+                        logger,
+                        {
+                            "cycle_id": intent.cycle_id,
+                            "decision_layer": "execution",
+                            "reason_code": str(ReasonCode.EXECUTION_REJECT_INSUFFICIENT_BALANCE_PRECHECK),
+                            "action": "REJECT",
+                            "scope": "per_intent",
+                            "intent_id": (raw_intent.intent_id if raw_intent else None),
+                            "symbol": intent.symbol,
+                            "side": intent.side.value,
+                            "asset": asset,
+                            "missing_amount": str(max(missing, Decimal("0"))),
+                        },
+                    )
+                    intents_rejected_precheck += 1
+                    rejected_intents += 1
+                    continue
 
             payload_hash = self._place_hash(intent)
             idempotency_key = self._place_idempotency_key(intent, raw_intent)
@@ -911,30 +1077,7 @@ class ExecutionService:
                 placed += 1
                 continue
 
-            if self.market_data_service is None:
-                raise LiveTradingNotArmedError(
-                    "MarketDataService is required for live order validation"
-                )
-
-            symbol_normalized = normalize_symbol(intent.symbol)
-            rules = self.market_data_service.get_symbol_rules(symbol_normalized)
-            try:
-                price = quantize_price(Decimal(str(intent.price)), rules)
-                quantity = quantize_quantity(Decimal(str(intent.quantity)), rules)
-                validate_order(price=price, qty=quantity, rules=rules)
-            except ValueError:
-                logger.exception("Intent failed symbol rule validation")
-                self.state_store.finalize_idempotency_key(
-                    "place_order",
-                    idempotency_key,
-                    action_id=action_id,
-                    client_order_id=client_order_id,
-                    order_id=None,
-                    status="FAILED",
-                )
-                self.state_store.clear_action_dedupe_key(action_id)
-                continue
-
+            attempted_exchange_calls += 1
             try:
                 order = self._retry_exchange_call(
                     lambda symbol=symbol_normalized,
@@ -952,6 +1095,7 @@ class ExecutionService:
                     operation="submit",
                 )
             except Exception as exc:  # noqa: BLE001
+                orders_failed_exchange += 1
                 if isinstance(exc, NonRetryableSubmitError):
                     exc = exc.original
                 if not self._is_uncertain_error(exc):
@@ -1146,6 +1290,13 @@ class ExecutionService:
                 status="COMMITTED",
             )
             placed += 1
+        self.last_execute_summary = {
+            "orders_submitted": placed,
+            "orders_failed_exchange": orders_failed_exchange,
+            "rejected_intents": rejected_intents,
+            "intents_rejected_precheck": intents_rejected_precheck,
+            "attempted_exchange_calls": attempted_exchange_calls,
+        }
         return placed
 
     def _recover_stale_pending_place_order(
