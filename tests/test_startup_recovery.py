@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 
+from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.accounting import Position
-from btcbot.domain.models import Balance
+from btcbot.domain.models import (
+    Balance,
+    ExchangeOrderStatus,
+    OpenOrderItem,
+    OpenOrders,
+    Order,
+    OrderSide,
+    OrderSnapshot,
+    OrderStatus,
+    PairInfo,
+    SymbolRules,
+)
+from btcbot.services.execution_service import ExecutionService
 from btcbot.services.startup_recovery import StartupRecoveryService
+from btcbot.services.state_store import StateStore
 
 
 @dataclass
@@ -149,3 +164,144 @@ def test_startup_recovery_forces_observe_only_on_invariant_failure() -> None:
     assert result.observe_only_required is True
     assert result.observe_only_reason is None
     assert "negative_balance:TRY" in result.invariant_errors
+
+
+class _StartupRecoveryExchange(ExchangeClient):
+    def __init__(self, snapshots: list[OrderSnapshot]) -> None:
+        self.snapshots = snapshots
+
+    def get_balances(self) -> list[Balance]:
+        return [Balance(asset="TRY", free=1000)]
+
+    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
+        del symbol, limit
+        return (0.0, 0.0)
+
+    def get_exchange_info(self) -> list[PairInfo]:
+        return []
+
+    def get_open_orders(self, pair_symbol: str) -> OpenOrders:
+        bids: list[OpenOrderItem] = []
+        for snapshot in self.snapshots:
+            if snapshot.pair_symbol != pair_symbol:
+                continue
+            bids.append(
+                OpenOrderItem(
+                    id=int(snapshot.order_id),
+                    price=snapshot.price,
+                    amount=snapshot.quantity,
+                    quantity=snapshot.quantity,
+                    pairSymbol=snapshot.pair_symbol,
+                    pairSymbolNormalized=snapshot.pair_symbol,
+                    type="limit",
+                    method="buy",
+                    orderClientId=snapshot.client_order_id,
+                    time=snapshot.timestamp,
+                    updateTime=snapshot.update_time,
+                    status="Untouched",
+                )
+            )
+        return OpenOrders(bids=bids, asks=[])
+
+    def get_all_orders(self, pair_symbol: str, start_ms: int, end_ms: int) -> list[OrderSnapshot]:
+        del start_ms, end_ms
+        return [item for item in self.snapshots if item.pair_symbol == pair_symbol]
+
+    def get_order(self, order_id: str) -> OrderSnapshot:
+        raise ValueError(order_id)
+
+    def place_limit_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        price: float,
+        quantity: float,
+        client_order_id: str | None = None,
+    ) -> Order:
+        del symbol, side, price, quantity, client_order_id
+        raise RuntimeError("not used")
+
+    def cancel_order(self, order_id: str) -> bool:
+        del order_id
+        return False
+
+    def list_open_orders(self, symbol: str | None = None) -> list[Order]:
+        del symbol
+        return []
+
+
+class _StubMarketDataService:
+    def get_symbol_rules(self, pair_symbol: str) -> SymbolRules:
+        return SymbolRules(pair_symbol=pair_symbol, price_scale=2, quantity_scale=4)
+
+
+def test_startup_recovery_imports_exchange_open_and_closes_local_only(tmp_path) -> None:
+    state_store = StateStore(str(tmp_path / "state.db"))
+    now = datetime.now(UTC)
+    state_store.save_order(
+        Order(
+            order_id="9001",
+            client_order_id="cid-local-only",
+            symbol="ADATRY",
+            side=OrderSide.BUY,
+            price=10,
+            quantity=1,
+            status=OrderStatus.OPEN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    exchange = _StartupRecoveryExchange(
+        snapshots=[
+            OrderSnapshot(
+                order_id="1001",
+                client_order_id="cid-external",
+                pair_symbol="ADATRY",
+                side=OrderSide.BUY,
+                price=10,
+                quantity=1,
+                status=ExchangeOrderStatus.OPEN,
+                timestamp=1700000000000,
+                update_time=1700000000100,
+            )
+        ]
+    )
+    execution_service = ExecutionService(
+        exchange=exchange,
+        state_store=state_store,
+        market_data_service=_StubMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+    service = StartupRecoveryService()
+
+    accounting = _StubAccountingService(fills_inserted=0, positions=[_position("ADATRY")])
+    portfolio = _StubPortfolioService(balances=[Balance(asset="TRY", free=1000.0)])
+
+    _ = service.run(
+        cycle_id="cycle-startup",
+        symbols=["ADATRY"],
+        execution_service=execution_service,
+        accounting_service=accounting,
+        portfolio_service=portfolio,
+        mark_prices={"ADATRY": Decimal("10")},
+    )
+
+    closed_local = state_store.get_order("9001")
+    imported = state_store.get_order("1001")
+    assert closed_local is not None
+    assert imported is not None
+    assert closed_local.status == OrderStatus.REJECTED
+    assert imported.status == OrderStatus.OPEN
+
+    with state_store._connect() as conn:
+        row = conn.execute(
+            "SELECT exchange_status_raw, reconciled FROM orders WHERE order_id = ?",
+            ("1001",),
+        ).fetchone()
+    assert row is not None
+    assert row["exchange_status_raw"] == "external_open:exchange_reconcile"
+    assert row["reconciled"] == 1

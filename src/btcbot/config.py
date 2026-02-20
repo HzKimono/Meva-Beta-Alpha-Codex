@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     fills_poll_lookback_minutes: int = Field(default=30, alias="FILLS_POLL_LOOKBACK_MINUTES")
     stage4_bootstrap_intents: bool = Field(default=True, alias="STAGE4_BOOTSTRAP_INTENTS")
     stage4_use_planning_kernel: bool = Field(default=False, alias="STAGE4_USE_PLANNING_KERNEL")
+    spot_sell_requires_inventory: bool = Field(
+        default=True, alias="SPOT_SELL_REQUIRES_INVENTORY"
+    )
 
     stage7_enabled: bool = Field(default=False, alias="STAGE7_ENABLED")
     stage7_slippage_bps: Decimal = Field(default=Decimal("25"), alias="STAGE7_SLIPPAGE_BPS")

@@ -27,13 +27,22 @@ from btcbot.services.state_store import StateStore
 
 
 class RecordingExchange(ExchangeClient):
-    def __init__(self, orders: list[Order] | None = None) -> None:
+    def __init__(
+        self, orders: list[Order] | None = None, balances: list[Balance] | None = None
+    ) -> None:
         self.open_orders = orders or []
+        self.balances = balances or [
+            Balance(asset="TRY", free=Decimal("1000000")),
+            Balance(asset="BTC", free=Decimal("100")),
+            Balance(asset="ETH", free=Decimal("100")),
+            Balance(asset="SOL", free=Decimal("1000")),
+            Balance(asset="ADA", free=Decimal("100000")),
+        ]
         self.canceled: list[str] = []
         self.placed: list[tuple[str, OrderSide, float, float, str]] = []
 
     def get_balances(self) -> list[Balance]:
-        return []
+        return list(self.balances)
 
     def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
         del symbol, limit
@@ -176,6 +185,52 @@ def test_dry_run_cancel_stale_logs_would_cancel_without_side_effects(tmp_path, c
     assert canceled == 1
     assert exchange.canceled == []
     assert "would cancel stale order" in caplog.text
+
+
+def test_sell_precheck_with_zero_base_balance_skips_exchange_submit(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(balances=[Balance(asset="TRY", free=1000)])
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    intent = OrderIntent(
+        symbol="ETH_TRY",
+        side=OrderSide.SELL,
+        price=100.0,
+        quantity=0.1,
+        notional=10.0,
+        cycle_id="sell-precheck",
+    )
+    placed = service.execute_intents([intent])
+
+    assert placed == 0
+    assert exchange.placed == []
+
+
+def test_buy_precheck_with_insufficient_try_skips_exchange_submit(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(balances=[Balance(asset="TRY", free=5)])
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents([_intent(cycle_id="buy-precheck")])
+
+    assert placed == 0
+    assert exchange.placed == []
 
 
 def test_live_mode_saves_order_state(tmp_path) -> None:
@@ -879,7 +934,7 @@ def test_refresh_order_lifecycle_missing_transitions(tmp_path) -> None:
     svc.refresh_order_lifecycle(["BTC_TRY"])
 
     rows = {o.order_id: o for o in store.find_open_or_unknown_orders(["BTCTRY"], include_new_after_grace=True, include_escalated_unknown=True)}
-    assert rows["o-open"].status == OrderStatus.UNKNOWN
+    assert "o-open" not in rows
     assert rows["o-unk"].unknown_next_probe_at is not None
     with store._connect() as conn:
         rej = conn.execute("SELECT status, exchange_status_raw FROM orders WHERE order_id='o-new'").fetchone()
