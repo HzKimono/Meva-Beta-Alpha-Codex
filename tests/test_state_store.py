@@ -76,6 +76,30 @@ def test_record_action_returns_action_id_and_dedupes(tmp_path) -> None:
     assert second.action_count("sweep_plan", "hash-1") == 1
 
 
+
+
+def test_state_store_strict_instance_lock_fails_on_active_conflict(tmp_path) -> None:
+    db_path = str(tmp_path / "strict.db")
+    store = StateStore(db_path=db_path)
+    now_epoch = int(datetime.now(UTC).timestamp())
+    with store._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO process_instances(instance_id, pid, db_path, started_at_epoch, heartbeat_at_epoch)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "99999-conflict",
+                99999,
+                store.db_path_abs,
+                now_epoch,
+                now_epoch,
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="STATE_DB_LOCK_CONFLICT"):
+        StateStore(db_path=db_path, strict_instance_lock=True)
+
 def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     first = store.reserve_idempotency_key("place_order", "k-1", "payload-a", ttl_seconds=60)

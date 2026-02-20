@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 
@@ -21,6 +21,8 @@ class RiskPolicyContext:
     open_orders_by_symbol: dict[str, int]
     last_intent_ts_by_symbol_side: dict[tuple[str, str], datetime]
     mark_prices: dict[str, Decimal]
+    open_order_identifiers_by_symbol: dict[str, list[str]] = field(default_factory=dict)
+    open_order_count_origin_by_symbol: dict[str, str] = field(default_factory=dict)
     cash_try_free: Decimal = Decimal("0")
     try_cash_target: Decimal = Decimal("0")
     investable_try: Decimal = Decimal("0")
@@ -205,7 +207,7 @@ class RiskPolicy:
     ) -> None:
         extra_payload: dict[str, object] = {
             "intent_id": intent.intent_id,
-            "symbol": intent.symbol,
+            "symbol": normalize_symbol(intent.symbol),
             "reason": str(reason),
             "reason_code": str(reason),
             "rule_id": str(reason),
@@ -214,6 +216,7 @@ class RiskPolicy:
             "action": "BLOCK",
             "scope": "per_intent",
             "side": intent.side.value,
+            "client_order_id": getattr(intent, "client_order_id", None),
         }
         if reason == ReasonCode.RISK_BLOCK_NOTIONAL_CAP:
             planned_spend_try = (used_notional_try or Decimal("0")) + (
@@ -241,6 +244,12 @@ class RiskPolicy:
             normalized_symbol = normalize_symbol(intent.symbol)
             extra_payload["open_orders_for_symbol"] = str(
                 context.open_orders_by_symbol.get(normalized_symbol, 0)
+            )
+            open_identifiers = context.open_order_identifiers_by_symbol.get(normalized_symbol, [])
+            extra_payload["open_order_identifiers"] = list(open_identifiers[:5])
+            extra_payload["open_orders_count_origin"] = context.open_order_count_origin_by_symbol.get(
+                normalized_symbol,
+                "reconciled",
             )
 
         if reason == ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET and context is not None:
