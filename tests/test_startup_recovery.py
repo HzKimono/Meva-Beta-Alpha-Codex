@@ -12,6 +12,7 @@ from btcbot.domain.models import (
     OpenOrderItem,
     OpenOrders,
     Order,
+    OrderIntent,
     OrderSide,
     OrderSnapshot,
     OrderStatus,
@@ -117,6 +118,7 @@ def test_run_without_prices_forces_observe_only_and_skips_refresh() -> None:
     )
 
     assert execution.calls == 1
+    assert execution.primed == 1
     assert accounting.refresh_calls == 0
     assert result.observe_only_required is True
     assert result.observe_only_reason == "missing_mark_prices"
@@ -176,8 +178,12 @@ def test_startup_recovery_forces_observe_only_on_invariant_failure() -> None:
 class _StartupRecoveryExchange(ExchangeClient):
     def __init__(self, snapshots: list[OrderSnapshot]) -> None:
         self.snapshots = snapshots
+        self.get_balances_calls = 0
+        self.get_open_orders_calls = 0
+        self.place_calls = 0
 
     def get_balances(self) -> list[Balance]:
+        self.get_balances_calls += 1
         return [Balance(asset="TRY", free=1000)]
 
     def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
@@ -188,6 +194,7 @@ class _StartupRecoveryExchange(ExchangeClient):
         return []
 
     def get_open_orders(self, pair_symbol: str) -> OpenOrders:
+        self.get_open_orders_calls += 1
         bids: list[OpenOrderItem] = []
         for snapshot in self.snapshots:
             if snapshot.pair_symbol != pair_symbol:
@@ -225,8 +232,18 @@ class _StartupRecoveryExchange(ExchangeClient):
         quantity: float,
         client_order_id: str | None = None,
     ) -> Order:
-        del symbol, side, price, quantity, client_order_id
-        raise RuntimeError("not used")
+        self.place_calls += 1
+        return Order(
+            order_id=f"oid-{self.place_calls}",
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            price=price,
+            quantity=quantity,
+            status=OrderStatus.NEW,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
 
     def cancel_order(self, order_id: str) -> bool:
         del order_id
@@ -327,3 +344,47 @@ def test_startup_recovery_imports_exchange_open_and_closes_local_only(tmp_path) 
     assert summary["imported_external_open"] == 1
     assert summary["marked_missing"] == 1
     assert summary["closed"] == 1
+
+
+def test_startup_recovery_and_execute_same_cycle_reuses_refresh_and_balances(tmp_path) -> None:
+    state_store = StateStore(str(tmp_path / "state.db"))
+    exchange = _StartupRecoveryExchange(snapshots=[])
+    execution_service = ExecutionService(
+        exchange=exchange,
+        state_store=state_store,
+        market_data_service=_StubMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+    service = StartupRecoveryService()
+
+    accounting = _StubAccountingService(fills_inserted=0, positions=[_position("BTCTRY")])
+    portfolio = _StubPortfolioService(balances=[Balance(asset="TRY", free=1000.0)])
+
+    service.run(
+        cycle_id="cycle-shared",
+        symbols=["BTCTRY"],
+        execution_service=execution_service,
+        accounting_service=accounting,
+        portfolio_service=portfolio,
+        mark_prices={"BTCTRY": Decimal("100")},
+    )
+
+    placed = execution_service.execute_intents(
+        [
+            OrderIntent(
+                symbol="BTC_TRY",
+                side=OrderSide.BUY,
+                price=100.0,
+                quantity=0.1,
+                notional=10.0,
+                cycle_id="cycle-shared",
+            )
+        ]
+    )
+
+    assert placed == 1
+    assert exchange.get_balances_calls == 0
+    assert exchange.get_open_orders_calls == 1

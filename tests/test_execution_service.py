@@ -42,6 +42,7 @@ class RecordingExchange(ExchangeClient):
         self.canceled: list[str] = []
         self.placed: list[tuple[str, OrderSide, float, float, str]] = []
         self.get_balances_calls = 0
+        self.get_open_orders_calls = 0
 
     def get_balances(self) -> list[Balance]:
         self.get_balances_calls += 1
@@ -56,6 +57,7 @@ class RecordingExchange(ExchangeClient):
 
     def get_open_orders(self, pair_symbol: str) -> OpenOrders:
         del pair_symbol
+        self.get_open_orders_calls += 1
         return OpenOrders(bids=[], asks=[])
 
     def get_all_orders(self, pair_symbol: str, start_ms: int, end_ms: int) -> list[OrderSnapshot]:
@@ -1277,3 +1279,39 @@ def test_exchange_submit_failure_increments_orders_failed_exchange_only_when_att
     assert summary["orders_failed_exchange"] == 1
     assert summary["intents_rejected_precheck"] == 0
     assert summary["rejected_intents"] == 0
+
+
+def test_execute_intents_skips_lifecycle_refresh_when_cycle_marked(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    service.mark_lifecycle_refreshed(cycle_id="cycle-lifecycle")
+    placed = service.execute_intents([_intent(cycle_id="cycle-lifecycle")])
+
+    assert placed == 1
+    assert exchange.get_open_orders_calls == 0
+
+
+def test_cycle_balance_cache_is_bounded(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(exchange=exchange, state_store=store, dry_run=True)
+
+    for idx in range(20):
+        service.prime_cycle_balances(
+            cycle_id=f"cycle-{idx}",
+            balances=[Balance(asset="TRY", free=Decimal(str(100 + idx)))],
+        )
+
+    assert len(service._cycle_balance_cache) == 10
+    assert "cycle-0" not in service._cycle_balance_cache
+    assert "cycle-19" in service._cycle_balance_cache

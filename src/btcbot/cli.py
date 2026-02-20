@@ -103,7 +103,7 @@ def main() -> int:
         default=None,
         help=(
             "Optional dotenv path for settings bootstrap (e.g. .env.live). "
-            "By default Settings uses .env.live when present."
+            "Default is no dotenv load; you can also set SETTINGS_ENV_FILE."
         ),
     )
 

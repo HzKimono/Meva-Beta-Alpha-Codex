@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 PLACE_ORDER_IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60
 CANCEL_ORDER_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
+MAX_CYCLE_BALANCE_SNAPSHOTS = 10
+MAX_CYCLE_LIFECYCLE_MARKERS = 10
 
 
 class NonRetryableSubmitError(Exception):
@@ -136,6 +138,26 @@ class ExecutionService:
         self.last_lifecycle_refresh_summary: dict[str, object] = {}
         self.last_execute_summary: dict[str, int] = {}
         self._cycle_balance_cache: dict[str, dict[str, Decimal]] = {}
+        self._cycle_balance_order: list[str] = []
+        self._lifecycle_refreshed_cycles: set[str] = set()
+        self._lifecycle_refreshed_order: list[str] = []
+
+    def mark_lifecycle_refreshed(self, *, cycle_id: str) -> None:
+        if not cycle_id:
+            return
+        normalized = str(cycle_id)
+        if normalized in self._lifecycle_refreshed_cycles:
+            if normalized in self._lifecycle_refreshed_order:
+                self._lifecycle_refreshed_order.remove(normalized)
+        else:
+            self._lifecycle_refreshed_cycles.add(normalized)
+        self._lifecycle_refreshed_order.append(normalized)
+        while len(self._lifecycle_refreshed_order) > MAX_CYCLE_LIFECYCLE_MARKERS:
+            evicted = self._lifecycle_refreshed_order.pop(0)
+            self._lifecycle_refreshed_cycles.discard(evicted)
+
+    def was_lifecycle_refreshed(self, *, cycle_id: str | None) -> bool:
+        return bool(cycle_id and str(cycle_id) in self._lifecycle_refreshed_cycles)
 
     def refresh_order_lifecycle(self, symbols: list[str], *, skip_non_essential: bool = False) -> dict[str, object]:
         """Reconcile local lifecycle state against exchange open-orders truth for scoped symbols."""
@@ -335,12 +357,23 @@ class ExecutionService:
         self.last_lifecycle_refresh_summary = dict(summary)
         return summary
 
+    def _remember_cycle_balance_snapshot(self, *, cycle_id: str, balances: dict[str, Decimal]) -> None:
+        normalized = str(cycle_id)
+        self._cycle_balance_cache[normalized] = dict(balances)
+        if normalized in self._cycle_balance_order:
+            self._cycle_balance_order.remove(normalized)
+        self._cycle_balance_order.append(normalized)
+        while len(self._cycle_balance_order) > MAX_CYCLE_BALANCE_SNAPSHOTS:
+            evicted = self._cycle_balance_order.pop(0)
+            self._cycle_balance_cache.pop(evicted, None)
+
     def prime_cycle_balances(self, *, cycle_id: str, balances: list) -> None:
         if not cycle_id:
             return
-        self._cycle_balance_cache[str(cycle_id)] = {
+        normalized_balances = {
             str(item.asset).upper(): Decimal(str(item.free)) for item in balances
         }
+        self._remember_cycle_balance_snapshot(cycle_id=str(cycle_id), balances=normalized_balances)
 
     def _get_cycle_balances(self, *, cycle_id: str | None) -> dict[str, Decimal] | None:
         if not cycle_id:
@@ -353,7 +386,7 @@ class ExecutionService:
         except Exception:  # noqa: BLE001
             logger.exception("balance_precheck_snapshot_failed")
             return None
-        self._cycle_balance_cache[str(cycle_id)] = dict(fetched)
+        self._remember_cycle_balance_snapshot(cycle_id=str(cycle_id), balances=fetched)
         return fetched
 
     def _balance_by_asset(self) -> dict[str, Decimal]:
@@ -837,7 +870,11 @@ class ExecutionService:
                 normalized_intents.append((raw, None))
 
         symbols = [intent.symbol for intent, _ in normalized_intents]
-        self.refresh_order_lifecycle(symbols)
+        execution_cycle_id = normalized_intents[0][0].cycle_id if normalized_intents else None
+        if not self.was_lifecycle_refreshed(cycle_id=execution_cycle_id):
+            self.refresh_order_lifecycle(symbols)
+            if execution_cycle_id:
+                self.mark_lifecycle_refreshed(cycle_id=execution_cycle_id)
         self.state_store.prune_expired_idempotency_keys()
         self.last_execute_summary = {
             "orders_submitted": 0,
@@ -888,7 +925,6 @@ class ExecutionService:
                 )
             return 0
 
-        execution_cycle_id = normalized_intents[0][0].cycle_id if normalized_intents else None
         cycle_balances: dict[str, Decimal] | None = None
         if not self.dry_run:
             cycle_balances = self._get_cycle_balances(cycle_id=execution_cycle_id)
