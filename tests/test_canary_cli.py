@@ -93,9 +93,16 @@ def test_canary_proceeds_on_pass_and_forces_caps(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(cli, "doctor_status", lambda report: report._status)
     monkeypatch.setattr(cli, "_check_canary_min_notional", lambda *args, **kwargs: (True, ""))
 
-    def _fake_run_cycle(effective_settings: Settings, force_dry_run: bool = False) -> int:
+    def _fake_run_cycle(
+        effective_settings: Settings,
+        force_dry_run: bool = False,
+        state_store=None,
+        **kwargs,
+    ) -> int:
         captured["settings"] = effective_settings
         captured["force_dry_run"] = force_dry_run
+        captured["state_store"] = state_store
+        captured["kwargs"] = kwargs
         return 0
 
     monkeypatch.setattr(cli, "run_cycle", _fake_run_cycle)
@@ -124,6 +131,7 @@ def test_canary_proceeds_on_pass_and_forces_caps(monkeypatch, tmp_path: Path) ->
     assert effective.notional_cap_try_per_cycle == Decimal("175")
     assert effective.max_notional_per_order_try == Decimal("175")
     assert effective.market_data_mode == "ws"
+    assert captured["state_store"] is not None
 
 
 def test_canary_loop_hard_stops_on_doctor_fail_midway(monkeypatch, tmp_path: Path) -> None:
