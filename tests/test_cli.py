@@ -7,6 +7,8 @@ import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from btcbot import cli
 from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import (
@@ -2434,3 +2436,14 @@ def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_conte
     assert "RISK_BLOCK_MAX_OPEN_ORDERS" in payload["top_reject_reasons"]
     assert payload["open_orders_count_origin"] == "reconciled"
     assert payload["open_order_identifiers"] == ["cid-1", "cid-2"]
+
+
+def test_help_text_env_file_reflects_opt_in_dotenv(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["btcbot", "--help"])
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    output = capsys.readouterr().out
+    assert "Default is no dotenv load" in output
+    assert "SETTINGS_ENV_FILE" in output

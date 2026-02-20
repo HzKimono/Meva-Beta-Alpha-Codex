@@ -206,3 +206,31 @@ def test_mode_gating_observe_and_reduce() -> None:
         intent.side == "SELL" or intent.skip_reason == "mode_reduce_risk_only"
         for intent in reduce_only
     )
+
+
+def test_spot_sell_requires_inventory_skips_zero_est_qty() -> None:
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(_Exchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, SPOT_SELL_REQUIRES_INVENTORY=True)
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_TRY",
+                    side="SELL",
+                    target_notional_try=Decimal("100"),
+                    est_qty=Decimal("0"),
+                    reason="sell",
+                )
+            ]
+        ),
+        mark_prices_try={"BTCTRY": Decimal("100")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert intents[0].skipped is True
+    assert intents[0].skip_reason == "spot_sell_requires_inventory"

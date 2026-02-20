@@ -103,7 +103,7 @@ def main() -> int:
         default=None,
         help=(
             "Optional dotenv path for settings bootstrap (e.g. .env.live). "
-            "By default Settings uses .env.live when present."
+            "Default is no dotenv load; you can also set SETTINGS_ENV_FILE."
         ),
     )
 
@@ -1479,6 +1479,14 @@ def run_cycle(
                 )
                 suppressed_dry_run = len(approved_intents) if dry_run else 0
                 rejected_by_risk = max(0, len(raw_intents) - len(approved_intents))
+                execution_summary = dict(getattr(execution_service, "last_execute_summary", {}) or {})
+                rejected_local = int(execution_summary.get("rejected_intents", 0))
+                rejected_precheck = int(execution_summary.get("intents_rejected_precheck", 0))
+                failed_exchange = int(execution_summary.get("orders_failed_exchange", 0))
+                attempted_exchange_calls = int(execution_summary.get("attempted_exchange_calls", 0))
+                if failed_exchange > attempted_exchange_calls:
+                    failed_exchange = attempted_exchange_calls
+                rejected_total = rejected_by_risk + rejected_local
                 blocked_events = list(getattr(getattr(risk_service, "risk_policy", None), "last_blocked_events", []))
                 reject_counts: dict[str, int] = {}
                 for event in blocked_events:
@@ -1514,15 +1522,11 @@ def run_cycle(
                             "orders_blocked_by_gate": blocked_by_gate,
                             "orders_suppressed_dry_run": suppressed_dry_run,
                             "orders_simulated": suppressed_dry_run,
-                            "rejected_intents": rejected_by_risk,
+                            "rejected_intents": rejected_total,
+                            "intents_rejected_precheck": rejected_precheck,
                             "top_reject_reasons": top_reject_reasons,
-                            "orders_failed_exchange": max(
-                                0,
-                                len(approved_intents)
-                                - placed
-                                - blocked_by_gate
-                                - suppressed_dry_run,
-                            ),
+                            "orders_failed_exchange": failed_exchange,
+                            "attempted_exchange_calls": attempted_exchange_calls,
                             "fills_inserted": fills_inserted,
                             "positions": len(accounting_service.get_positions()),
                             "dry_run": dry_run,
