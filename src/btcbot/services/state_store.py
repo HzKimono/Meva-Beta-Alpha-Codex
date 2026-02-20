@@ -1233,9 +1233,14 @@ class StateStore:
             )
 
     def save_stage7_order_intents(self, cycle_id: str, intents: list[OrderIntent]) -> None:
-        resolved_now = now or datetime.now(UTC)
+        resolved_now = datetime.now(UTC)
         with self.transaction() as conn:
-            self._save_stage7_order_intents(conn=conn, cycle_id=cycle_id, ts=now, intents=intents)
+            self._save_stage7_order_intents(
+                conn=conn,
+                cycle_id=cycle_id,
+                ts=resolved_now,
+                intents=intents,
+            )
 
     def upsert_stage7_orders(self, orders: list[Stage7Order]) -> None:
         if not orders:
