@@ -4,9 +4,8 @@ import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from btcbot.domain.models import OrderStatus, normalize_symbol
-
 from btcbot.domain.intent import Intent
+from btcbot.domain.models import OrderStatus, normalize_symbol
 from btcbot.risk.policy import RiskPolicy, RiskPolicyContext
 from btcbot.services.cycle_account_snapshot import CycleAccountSnapshot
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
