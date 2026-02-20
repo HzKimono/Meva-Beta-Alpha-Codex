@@ -30,7 +30,7 @@ jobs:
       - name: Ruff lint
         run: ruff check .
       - name: Compileall
-        run: python -m compileall src tests
+        run: python -m compileall -q .
       - name: Mypy
         run: python -m mypy src/btcbot --ignore-missing-imports
       - name: Bandit (security lint)
@@ -51,7 +51,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
       - name: Unit tests
-        run: python -m pytest -q tests -k "not soak and not chaos"
+        run: python -m pytest -q
 
   integration-fixtures:
     runs-on: ubuntu-latest
