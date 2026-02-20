@@ -496,9 +496,8 @@ def test_record_action_allows_same_payload_in_different_bucket(monkeypatch, tmp_
             cls.now_epoch = 1_400
             return datetime.fromtimestamp(value, UTC)
 
-    monkeypatch.setattr(state_store_module, "datetime", StepDateTime)
-
     store = StateStore(db_path=str(tmp_path / "state.db"))
+    monkeypatch.setattr(state_store_module, "datetime", StepDateTime)
     first = store.record_action("c1", "place_order", "hash-2", dedupe_window_seconds=300)
     second = store.record_action("c2", "place_order", "hash-2", dedupe_window_seconds=300)
 

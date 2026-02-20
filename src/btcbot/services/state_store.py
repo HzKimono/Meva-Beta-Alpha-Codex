@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from btcbot.domain.account_snapshot import AccountSnapshot, Holding
 from btcbot.domain.accounting import Position, TradeFill
@@ -43,6 +47,8 @@ class StoredOrder:
     price: Decimal
     quantity: Decimal
     status: OrderStatus
+    created_at: datetime
+    updated_at: datetime
     last_seen_at: int | None
     reconciled: bool
     exchange_status_raw: str | None
@@ -72,6 +78,9 @@ class IdempotencyConflictError(ValueError):
 
 
 PENDING_GRACE_SECONDS = 60
+UNKNOWN_BLOCKING_ESCALATION_ATTEMPTS = 8
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,8 @@ class ReservationResult:
 class StateStore:
     def __init__(self, db_path: str = "btcbot_state.db") -> None:
         self.db_path = db_path
+        self.db_path_abs = str(Path(db_path).expanduser().resolve())
+        self.instance_id = f"{os.getpid()}-{uuid4().hex[:8]}"
         self._transaction_conn: sqlite3.Connection | None = None
         self._init_db()
         with self._connect() as conn:
@@ -111,6 +122,18 @@ class StateStore:
             self._ensure_stage7_schema(conn)
             self._ensure_agent_audit_schema(conn)
             self._ensure_idempotency_schema(conn)
+            self._ensure_instance_lock_schema(conn)
+            self._register_instance_lock(conn)
+        logger.info(
+            "state_store_startup",
+            extra={
+                "extra": {
+                    "db_path": self.db_path_abs,
+                    "instance_id": self.instance_id,
+                    "pid": os.getpid(),
+                }
+            },
+        )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1718,6 +1741,9 @@ class StateStore:
 
     def _ensure_orders_columns(self, conn: sqlite3.Connection) -> None:
         columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(orders)")}
+        if "updated_at" not in columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN updated_at TEXT")
+            conn.execute("UPDATE orders SET updated_at = COALESCE(updated_at, created_at)")
         if "client_order_id" not in columns:
             conn.execute("ALTER TABLE orders ADD COLUMN client_order_id TEXT")
         if "last_seen_at" not in columns:
@@ -1749,6 +1775,63 @@ class StateStore:
             WHERE client_order_id IS NOT NULL
             """
         )
+
+    def _ensure_instance_lock_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS process_instances (
+                instance_id TEXT PRIMARY KEY,
+                pid INTEGER NOT NULL,
+                db_path TEXT NOT NULL,
+                started_at_epoch INTEGER NOT NULL,
+                heartbeat_at_epoch INTEGER NOT NULL
+            )
+            """
+        )
+
+    def _register_instance_lock(self, conn: sqlite3.Connection) -> None:
+        now_epoch = int(datetime.now(UTC).timestamp())
+        recent = conn.execute(
+            """
+            SELECT instance_id, pid, heartbeat_at_epoch
+            FROM process_instances
+            WHERE db_path = ?
+              AND instance_id != ?
+              AND heartbeat_at_epoch >= ?
+            ORDER BY heartbeat_at_epoch DESC
+            LIMIT 1
+            """,
+            (self.db_path_abs, self.instance_id, now_epoch - 120),
+        ).fetchone()
+        if recent is not None:
+            logger.warning(
+                "db_instance_lock_conflict",
+                extra={
+                    "extra": {
+                        "db_path": self.db_path_abs,
+                        "instance_id": self.instance_id,
+                        "conflict_instance_id": str(recent["instance_id"]),
+                        "conflict_pid": int(recent["pid"]),
+                    }
+                },
+            )
+        conn.execute(
+            """
+            INSERT INTO process_instances(instance_id, pid, db_path, started_at_epoch, heartbeat_at_epoch)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(instance_id) DO UPDATE SET
+                heartbeat_at_epoch=excluded.heartbeat_at_epoch
+            """,
+            (self.instance_id, os.getpid(), self.db_path_abs, now_epoch, now_epoch),
+        )
+
+    def heartbeat_instance_lock(self) -> None:
+        now_epoch = int(datetime.now(UTC).timestamp())
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE process_instances SET heartbeat_at_epoch = ? WHERE instance_id = ?",
+                (now_epoch, self.instance_id),
+            )
 
     def _ensure_idempotency_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -2375,6 +2458,7 @@ class StateStore:
                 """
                 UPDATE orders
                 SET unknown_first_seen_at = COALESCE(unknown_first_seen_at, ?),
+                    updated_at = ?,
                     unknown_last_probe_at = ?,
                     unknown_next_probe_at = ?,
                     unknown_probe_attempts = COALESCE(unknown_probe_attempts, 0) + 1,
@@ -2386,6 +2470,7 @@ class StateStore:
                 """,
                 (
                     last_probe_at,
+                    datetime.fromtimestamp(last_probe_at / 1000, tz=UTC).isoformat(),
                     last_probe_at,
                     next_probe_at,
                     1 if escalate else 0,
@@ -2394,9 +2479,17 @@ class StateStore:
                 ),
             )
 
-    def find_open_or_unknown_orders(self, symbols: list[str] | None = None) -> list[StoredOrder]:
+    def find_open_or_unknown_orders(
+        self,
+        symbols: list[str] | None = None,
+        *,
+        new_grace_seconds: int = PENDING_GRACE_SECONDS,
+        include_new_after_grace: bool = False,
+        include_escalated_unknown: bool = False,
+    ) -> list[StoredOrder]:
         query = """
             SELECT order_id, symbol, client_order_id, side, price, qty, status,
+                   created_at, updated_at,
                    last_seen_at, reconciled, exchange_status_raw,
                    unknown_first_seen_at, unknown_last_probe_at, unknown_next_probe_at,
                    unknown_probe_attempts, unknown_escalated_at
@@ -2412,44 +2505,65 @@ class StateStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
 
-        return [
-            StoredOrder(
-                order_id=str(row["order_id"]),
-                symbol=str(row["symbol"]),
-                client_order_id=row["client_order_id"],
-                side=str(row["side"]),
-                price=Decimal(str(row["price"])),
-                quantity=Decimal(str(row["qty"])),
-                status=OrderStatus(str(row["status"])),
-                last_seen_at=(
-                    int(row["last_seen_at"]) if row["last_seen_at"] is not None else None
-                ),
-                reconciled=bool(row["reconciled"]),
-                exchange_status_raw=row["exchange_status_raw"],
-                unknown_first_seen_at=(
-                    int(row["unknown_first_seen_at"])
-                    if row["unknown_first_seen_at"] is not None
-                    else None
-                ),
-                unknown_last_probe_at=(
-                    int(row["unknown_last_probe_at"])
-                    if row["unknown_last_probe_at"] is not None
-                    else None
-                ),
-                unknown_next_probe_at=(
-                    int(row["unknown_next_probe_at"])
-                    if row["unknown_next_probe_at"] is not None
-                    else None
-                ),
-                unknown_probe_attempts=int(row["unknown_probe_attempts"] or 0),
-                unknown_escalated_at=(
-                    int(row["unknown_escalated_at"])
-                    if row["unknown_escalated_at"] is not None
-                    else None
-                ),
+        now = datetime.now(UTC)
+        filtered: list[StoredOrder] = []
+        for row in rows:
+            created_at = datetime.fromisoformat(str(row["created_at"]))
+            updated_at_raw = row["updated_at"] if row["updated_at"] is not None else row["created_at"]
+            updated_at = datetime.fromisoformat(str(updated_at_raw))
+            status = OrderStatus(str(row["status"]))
+            if status == OrderStatus.NEW and not include_new_after_grace:
+                age = (now - max(created_at, updated_at)).total_seconds()
+                if age > max(0, new_grace_seconds):
+                    continue
+            attempts = int(row["unknown_probe_attempts"] or 0)
+            if (
+                status == OrderStatus.UNKNOWN
+                and not include_escalated_unknown
+                and attempts >= UNKNOWN_BLOCKING_ESCALATION_ATTEMPTS
+            ):
+                continue
+
+            filtered.append(
+                StoredOrder(
+                    order_id=str(row["order_id"]),
+                    symbol=str(row["symbol"]),
+                    client_order_id=row["client_order_id"],
+                    side=str(row["side"]),
+                    price=Decimal(str(row["price"])),
+                    quantity=Decimal(str(row["qty"])),
+                    status=status,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    last_seen_at=(
+                        int(row["last_seen_at"]) if row["last_seen_at"] is not None else None
+                    ),
+                    reconciled=bool(row["reconciled"]),
+                    exchange_status_raw=row["exchange_status_raw"],
+                    unknown_first_seen_at=(
+                        int(row["unknown_first_seen_at"])
+                        if row["unknown_first_seen_at"] is not None
+                        else None
+                    ),
+                    unknown_last_probe_at=(
+                        int(row["unknown_last_probe_at"])
+                        if row["unknown_last_probe_at"] is not None
+                        else None
+                    ),
+                    unknown_next_probe_at=(
+                        int(row["unknown_next_probe_at"])
+                        if row["unknown_next_probe_at"] is not None
+                        else None
+                    ),
+                    unknown_probe_attempts=attempts,
+                    unknown_escalated_at=(
+                        int(row["unknown_escalated_at"])
+                        if row["unknown_escalated_at"] is not None
+                        else None
+                    ),
+                )
             )
-            for row in rows
-        ]
+        return filtered
 
     def mark_order_canceled(self, order_id: str) -> None:
         self.update_order_status(order_id=order_id, status=OrderStatus.CANCELED)

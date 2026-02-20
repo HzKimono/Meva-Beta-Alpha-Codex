@@ -35,9 +35,17 @@ class RiskService:
     ) -> list[Intent]:
         open_orders_by_symbol: dict[str, int] = {}
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
-        existing_orders = (
-            find_open_or_unknown_orders() if callable(find_open_or_unknown_orders) else []
-        )
+        if callable(find_open_or_unknown_orders):
+            try:
+                existing_orders = find_open_or_unknown_orders(
+                    new_grace_seconds=60,
+                    include_new_after_grace=False,
+                    include_escalated_unknown=False,
+                )
+            except TypeError:
+                existing_orders = find_open_or_unknown_orders()
+        else:
+            existing_orders = []
         for item in existing_orders:
             open_orders_by_symbol[item.symbol] = open_orders_by_symbol.get(item.symbol, 0) + 1
 

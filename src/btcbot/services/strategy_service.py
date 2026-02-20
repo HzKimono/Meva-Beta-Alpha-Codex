@@ -49,9 +49,18 @@ class StrategyService:
         positions = {p.symbol: p for p in self.accounting_service.get_positions()}
         open_orders: dict[str, int] = {}
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
-        existing_orders = (
-            find_open_or_unknown_orders(symbols) if callable(find_open_or_unknown_orders) else []
-        )
+        if callable(find_open_or_unknown_orders):
+            try:
+                existing_orders = find_open_or_unknown_orders(
+                    symbols,
+                    new_grace_seconds=60,
+                    include_new_after_grace=False,
+                    include_escalated_unknown=False,
+                )
+            except TypeError:
+                existing_orders = find_open_or_unknown_orders(symbols)
+        else:
+            existing_orders = []
         for order in existing_orders:
             open_orders[order.symbol] = open_orders.get(order.symbol, 0) + 1
 
