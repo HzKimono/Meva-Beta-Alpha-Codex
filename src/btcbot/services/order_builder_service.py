@@ -40,6 +40,22 @@ class OrderBuilderService:
             if final_mode == Mode.REDUCE_RISK_ONLY and action.side == "BUY":
                 continue
             symbol = normalize_symbol(action.symbol)
+            if (
+                settings.spot_sell_requires_inventory
+                and action.side == "SELL"
+                and Decimal(str(action.est_qty)) <= 0
+            ):
+                intents.append(
+                    self._skipped(
+                        cycle_id=cycle_id,
+                        symbol=symbol,
+                        side=action.side,
+                        reason=action.reason,
+                        skip_reason="spot_sell_requires_inventory",
+                        now_utc=now_utc,
+                    )
+                )
+                continue
             if symbol in unavailable:
                 intents.append(
                     self._skipped(
