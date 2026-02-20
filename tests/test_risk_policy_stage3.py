@@ -459,3 +459,33 @@ def test_cash_reserve_target_blocks_buy_but_not_sell() -> None:
     approved = policy.evaluate(context, [buy_intent, sell_intent])
 
     assert [intent.side for intent in approved] == [OrderSide.SELL]
+
+def test_policy_block_log_includes_symbol_side_and_open_order_identifiers(caplog) -> None:
+    clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+    policy = RiskPolicy(
+        rules_provider=StaticRules(),
+        max_orders_per_cycle=1,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=0,
+        notional_cap_try_per_cycle=Decimal("100"),
+        max_notional_per_order_try=Decimal("0"),
+        now_provider=clock.now,
+    )
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={"BTCTRY": 1},
+        open_order_identifiers_by_symbol={"BTCTRY": ["oid-1", "oid-2"]},
+        last_intent_ts_by_symbol_side={},
+        mark_prices={},
+    )
+
+    caplog.set_level(logging.INFO)
+    assert policy.evaluate(context, [_intent("max-open")]) == []
+
+    rec = next(r for r in caplog.records if r.getMessage() == "Intent blocked by risk policy")
+    payload = getattr(rec, "extra", {})
+    assert payload["symbol"] == "BTCTRY"
+    assert payload["side"] == "buy"
+    assert payload["open_orders_for_symbol"] == "1"
+    assert payload["open_order_identifiers"] == ["oid-1", "oid-2"]
+    assert "client_order_id" in payload
