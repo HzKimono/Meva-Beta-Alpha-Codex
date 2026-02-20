@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import threading
 from datetime import UTC, datetime
@@ -1838,3 +1839,104 @@ def test_run_cycle_uses_single_cash_snapshot_for_risk_and_summary(monkeypatch, c
     assert reserve_payload["investable_try"] == cycle_payload["investable_try"]
     assert cycle_payload["cash_try_free"] == "1306.0"
     assert cycle_payload["investable_try"] == "1006.0"
+
+
+def test_stage3_runtime_reuses_single_state_store_across_loop_cycles(monkeypatch) -> None:
+    class DummyLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    created: list[object] = []
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+            created.append(self)
+
+    seen_ids: list[int] = []
+
+    def fake_run_cycle(settings, force_dry_run=False, state_store=None):
+        del settings, force_dry_run
+        seen_ids.append(id(state_store))
+        return 0
+
+    monkeypatch.setattr(cli, "single_instance_lock", lambda **kwargs: DummyLock())
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "run_cycle", fake_run_cycle)
+
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=True, MAX_CYCLES=3)
+    rc = cli.run_stage3_runtime(
+        settings,
+        force_dry_run=True,
+        loop_enabled=True,
+        cycle_seconds=0,
+        max_cycles=3,
+        jitter_seconds=0,
+    )
+
+    assert rc == 0
+    assert len(created) == 1
+    assert len(set(seen_ids)) == 1
+
+
+def test_stage3_live_loop_acceptance_no_open_orders_submits_and_no_db_conflicts(monkeypatch, caplog) -> None:
+    class DummyLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+    cycle_count = {"n": 0}
+
+    def fake_run_cycle(settings, force_dry_run=False, state_store=None):
+        del settings, force_dry_run, state_store
+        cycle_count["n"] += 1
+        logger = logging.getLogger("btcbot.cli")
+        logger.info(
+            "Cycle completed",
+            extra={"extra": {"approved_intents": 1, "orders_submitted": 1}},
+        )
+        return 0
+
+    monkeypatch.setattr(cli, "single_instance_lock", lambda **kwargs: DummyLock())
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "run_cycle", fake_run_cycle)
+
+    caplog.set_level("INFO")
+    settings = Settings(
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        SAFE_MODE=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
+    )
+
+    rc = cli.run_stage3_runtime(
+        settings,
+        force_dry_run=False,
+        loop_enabled=True,
+        cycle_seconds=0,
+        max_cycles=15,
+        jitter_seconds=0,
+    )
+
+    assert rc == 0
+    assert cycle_count["n"] == 15
+    cycle_records = [r for r in caplog.records if r.getMessage() == "Cycle completed"]
+    assert any(getattr(r, "extra", {}).get("approved_intents", 0) > 0 for r in cycle_records)
+    assert any(getattr(r, "extra", {}).get("orders_submitted", 0) > 0 for r in cycle_records)
+    assert not [r for r in caplog.records if r.getMessage() == "db_instance_lock_conflict"]

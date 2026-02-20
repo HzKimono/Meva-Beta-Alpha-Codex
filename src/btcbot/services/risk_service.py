@@ -4,6 +4,8 @@ import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from btcbot.domain.models import OrderStatus, normalize_symbol
+
 from btcbot.domain.intent import Intent
 from btcbot.risk.policy import RiskPolicy, RiskPolicyContext
 from btcbot.services.cycle_account_snapshot import CycleAccountSnapshot
@@ -34,7 +36,8 @@ class RiskService:
         account_snapshot: CycleAccountSnapshot | None = None,
     ) -> list[Intent]:
         open_orders_by_symbol: dict[str, int] = {}
-        scoped_symbols = sorted({intent.symbol for intent in intents})
+        open_order_identifiers_by_symbol: dict[str, list[str]] = {}
+        scoped_symbols = sorted({normalize_symbol(intent.symbol) for intent in intents})
         find_open_or_unknown_orders = getattr(self.state_store, "find_open_or_unknown_orders", None)
         if callable(find_open_or_unknown_orders):
             try:
@@ -48,8 +51,31 @@ class RiskService:
                 existing_orders = find_open_or_unknown_orders()
         else:
             existing_orders = []
+
         for item in existing_orders:
-            open_orders_by_symbol[item.symbol] = open_orders_by_symbol.get(item.symbol, 0) + 1
+            symbol = normalize_symbol(item.symbol)
+            if scoped_symbols and symbol not in scoped_symbols:
+                continue
+            exchange_status = str(item.exchange_status_raw or "").lower()
+            missing_on_exchange = exchange_status in {
+                "missing_from_open_orders",
+                "reconciled_missing_from_exchange_open_orders",
+            }
+            if item.status == OrderStatus.UNKNOWN or (
+                item.status in {OrderStatus.OPEN, OrderStatus.PARTIAL} and missing_on_exchange
+            ):
+                self.state_store.update_order_status(
+                    order_id=item.order_id,
+                    status=OrderStatus.CANCELED,
+                    exchange_status_raw="reconciled_missing_from_exchange_open_orders",
+                    reconciled=True,
+                )
+                continue
+            if item.status not in {OrderStatus.OPEN, OrderStatus.PARTIAL}:
+                continue
+            open_orders_by_symbol[symbol] = open_orders_by_symbol.get(symbol, 0) + 1
+            identifier = item.client_order_id or item.order_id
+            open_order_identifiers_by_symbol.setdefault(symbol, []).append(str(identifier))
 
         get_last_intent_ts_by_symbol_side = getattr(
             self.state_store, "get_last_intent_ts_by_symbol_side", None
@@ -98,6 +124,7 @@ class RiskService:
             open_orders_by_symbol=open_orders_by_symbol,
             last_intent_ts_by_symbol_side=last_intent_ts,
             mark_prices={},
+            open_order_identifiers_by_symbol=open_order_identifiers_by_symbol,
             cash_try_free=resolved_cash_try_free,
             try_cash_target=resolved_try_cash_target,
             investable_try=resolved_investable_try,

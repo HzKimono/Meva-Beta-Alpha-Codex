@@ -701,9 +701,14 @@ def run_stage3_runtime(
                 otlp_endpoint=getattr(settings, "observability_otlp_endpoint", None),
                 prometheus_port=int(getattr(settings, "observability_prometheus_port", 9464)),
             )
+            runtime_state_store = StateStore(db_path=settings.state_db_path)
             return run_with_optional_loop(
                 command="run",
-                cycle_fn=lambda: run_cycle(settings, force_dry_run=force_dry_run),
+                cycle_fn=lambda: run_cycle(
+                    settings,
+                    force_dry_run=force_dry_run,
+                    state_store=runtime_state_store,
+                ),
                 loop_enabled=loop_enabled,
                 cycle_seconds=cycle_seconds,
                 max_cycles=max_cycles,
@@ -1100,7 +1105,11 @@ def _print_effective_side_effects_state(
     print(banner)
 
 
-def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
+def run_cycle(
+    settings: Settings,
+    force_dry_run: bool = False,
+    state_store: StateStore | None = None,
+) -> int:
     run_id = uuid4().hex
     cycle_id = uuid4().hex
     inputs, live_policy = _compute_live_policy(
@@ -1127,7 +1136,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
         return 2
 
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
-    state_store = StateStore(db_path=settings.state_db_path)
+    resolved_state_store = state_store or StateStore(db_path=settings.state_db_path)
     try:
         with with_logging_context(run_id=run_id, cycle_id=cycle_id):
             if settings.kill_switch or effective_safe_mode:
@@ -1152,14 +1161,14 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                 except TypeError:
                     market_data_service = MarketDataService(exchange)
                 sweep_service = SweepService(
-                    state_store=state_store,
+                    state_store=resolved_state_store,
                     target_try=settings.target_try,
                     offset_bps=settings.offset_bps,
                     default_min_notional=settings.min_order_notional_try,
                 )
                 execution_service = ExecutionService(
                     exchange=exchange,
-                    state_store=state_store,
+                    state_store=resolved_state_store,
                     market_data_service=market_data_service,
                     dry_run=dry_run,
                     ttl_seconds=settings.ttl_seconds,
@@ -1168,13 +1177,13 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     live_trading_ack=settings.live_trading_ack == "I_UNDERSTAND",
                     safe_mode=effective_safe_mode,
                 )
-                accounting_service = AccountingService(exchange=exchange, state_store=state_store)
+                accounting_service = AccountingService(exchange=exchange, state_store=resolved_state_store)
                 strategy_service = StrategyService(
                     strategy=ProfitAwareStrategyV1(),
                     settings=settings,
                     market_data_service=market_data_service,
                     accounting_service=accounting_service,
-                    state_store=state_store,
+                    state_store=resolved_state_store,
                 )
                 risk_service = RiskService(
                     risk_policy=RiskPolicy(
@@ -1189,7 +1198,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                             str(settings.max_notional_per_order_try)
                         ),
                     ),
-                    state_store=state_store,
+                    state_store=resolved_state_store,
                     balance_debug_enabled=settings.risk_balance_debug,
                 )
 
@@ -1221,7 +1230,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                         "missing_symbols": missing_symbols,
                     }
                     emit_decision(logger, envelope)
-                    state_store.record_cycle_audit(
+                    resolved_state_store.record_cycle_audit(
                         cycle_id=cycle_id,
                         counts={"blocked_by_market_data": 1},
                         decisions=["market_data:stale"],
@@ -1231,7 +1240,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                         "market_data_stale_fail_closed",
                         extra={"extra": envelope},
                     )
-                    state_store.set_last_cycle_id(cycle_id)
+                    resolved_state_store.set_last_cycle_id(cycle_id)
                     return 0
 
                 startup_mark_prices = {
@@ -1248,6 +1257,9 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     portfolio_service=portfolio_service,
                     mark_prices=startup_mark_prices,
                 )
+                refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
+                if callable(refresh_order_lifecycle):
+                    refresh_order_lifecycle(settings.symbols)
                 if recovery.observe_only_required:
                     logger.error(
                         "startup_recovery_forced_observe_only",
@@ -1336,7 +1348,7 @@ def run_cycle(settings: Settings, force_dry_run: bool = False) -> int:
                     limit_price = getattr(intent, "limit_price", None)
                     if qty is not None and limit_price is not None:
                         planned_spend_try += Decimal(str(qty)) * Decimal(str(limit_price))
-                state_store.set_last_cycle_id(cycle_id)
+                resolved_state_store.set_last_cycle_id(cycle_id)
                 blocked_by_gate = (
                     len(approved_intents) if (settings.kill_switch or effective_safe_mode) else 0
                 )
