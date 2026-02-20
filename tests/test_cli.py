@@ -1221,8 +1221,8 @@ def test_run_stage3_runtime_blocks_second_instance(monkeypatch, tmp_path, capsys
     release = threading.Event()
     first_result: dict[str, int] = {}
 
-    def _fake_run_cycle(_settings, force_dry_run: bool = False) -> int:
-        del _settings, force_dry_run
+    def _fake_run_cycle(_settings, force_dry_run: bool = False, state_store=None) -> int:
+        del _settings, force_dry_run, state_store
         started.set()
         assert release.wait(timeout=5)
         return 0
@@ -1385,7 +1385,7 @@ def test_main_supports_env_file_override(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "Settings", _fake_settings)
     monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
-    monkeypatch.setattr(cli, "run_cycle", lambda settings, force_dry_run=False: 0)
+    monkeypatch.setattr(cli, "run_cycle", lambda settings, force_dry_run=False, state_store=None: 0)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -2081,3 +2081,356 @@ def test_run_cycle_heartbeats_state_store_once_per_cycle(monkeypatch) -> None:
     settings = Settings(DRY_RUN=True, KILL_SWITCH=True, SYMBOLS="BTC_TRY")
     assert cli.run_cycle(settings, force_dry_run=True, state_store=store) == 0
     assert store.heartbeats == 1
+
+
+def test_run_cycle_calls_refresh_order_lifecycle_once_with_union_symbols(monkeypatch) -> None:
+    refresh_calls: list[list[str]] = []
+
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def heartbeat_instance_lock(self) -> None:
+            return None
+
+        def find_open_or_unknown_orders(self, *args, **kwargs):
+            del args, kwargs
+
+            class _O:
+                symbol = "ETH_TRY"
+
+            return [_O()]
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self, exchange, **kwargs) -> None:
+            del exchange, kwargs
+
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
+            del symbols
+            return {}, _Freshness(max_age_ms=max_age_ms)
+
+    class FakeAccountingService:
+        def __init__(self, exchange, state_store) -> None:
+            del exchange, state_store
+
+        def refresh(self, symbols, mark_prices):
+            del symbols, mark_prices
+            return 0
+
+        def get_positions(self):
+            return []
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, cycle_id: str, symbols, balances):
+            del cycle_id, symbols, balances
+            return [
+                Intent.create(
+                    cycle_id="c1",
+                    symbol="BTC_TRY",
+                    side=OrderSide.BUY,
+                    qty=Decimal("0.1"),
+                    limit_price=Decimal("100"),
+                    reason="test",
+                )
+            ]
+
+    class FakeRiskService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.risk_policy = type("Policy", (), {"last_blocked_events": []})()
+
+        def filter(self, cycle_id: str, intents, **kwargs):
+            del cycle_id, kwargs
+            return intents
+
+    class FakeSweepService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def build_order_intents(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.kill_switch = False
+
+        def refresh_order_lifecycle(self, symbols):
+            refresh_calls.append(list(symbols))
+            return {"backoff_429_count": 0, "error_code": "", "backoff_endpoints": []}
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del intents, cycle_id
+            return 0
+
+    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "AccountingService", FakeAccountingService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+    monkeypatch.setattr(cli, "SweepService", FakeSweepService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="BTC_TRY")
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+    assert len(refresh_calls) == 1
+    assert set(refresh_calls[0]) == {"BTCTRY", "ETHTRY"}
+
+
+def test_run_cycle_degrades_to_observe_only_on_429_backoff(monkeypatch, caplog) -> None:
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def heartbeat_instance_lock(self) -> None:
+            return None
+
+        def find_open_or_unknown_orders(self, *args, **kwargs):
+            del args, kwargs
+            return []
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self, exchange, **kwargs) -> None:
+            del exchange, kwargs
+
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
+            del symbols
+            return {}, _Freshness(max_age_ms=max_age_ms)
+
+    class FakeAccountingService:
+        def __init__(self, exchange, state_store) -> None:
+            del exchange, state_store
+
+        def refresh(self, symbols, mark_prices):
+            del symbols, mark_prices
+            return 0
+
+        def get_positions(self):
+            return []
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, cycle_id: str, symbols, balances):
+            del cycle_id, symbols, balances
+            return [Intent.create(cycle_id="c1", symbol="BTC_TRY", side=OrderSide.BUY, qty=Decimal("0.1"), limit_price=Decimal("100"), reason="test")]
+
+    class FakeRiskService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.risk_policy = type("Policy", (), {"last_blocked_events": []})()
+
+        def filter(self, cycle_id: str, intents, **kwargs):
+            del cycle_id, kwargs
+            return intents
+
+    class FakeSweepService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def build_order_intents(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.kill_switch = False
+
+        def refresh_order_lifecycle(self, symbols):
+            del symbols
+            return {"backoff_429_count": 3, "error_code": "EXCHANGE_429_BACKOFF", "backoff_endpoints": ["open_orders"]}
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del intents, cycle_id
+            raise AssertionError("execute_intents should be skipped under 429 backoff")
+
+    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "AccountingService", FakeAccountingService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+    monkeypatch.setattr(cli, "SweepService", FakeSweepService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+
+    caplog.set_level("INFO")
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="BTC_TRY")
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+
+    cycle_records = [r for r in caplog.records if r.getMessage() == "Cycle completed"]
+    assert cycle_records
+    payload = getattr(cycle_records[-1], "extra", {})
+    assert payload["mode_final"] == "OBSERVE_ONLY"
+    assert payload["orders_submitted"] == 0
+    assert "EXCHANGE_429_BACKOFF" in payload["top_reject_reasons"]
+
+
+def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_context(monkeypatch, caplog) -> None:
+    class FakeExchange:
+        def close(self) -> None:
+            return None
+
+    class FakeStateStore:
+        def __init__(self, db_path: str) -> None:
+            del db_path
+
+        def heartbeat_instance_lock(self) -> None:
+            return None
+
+        def find_open_or_unknown_orders(self, *args, **kwargs):
+            del args, kwargs
+            return []
+
+        def set_last_cycle_id(self, cycle_id: str) -> None:
+            del cycle_id
+
+    class FakePortfolioService:
+        def __init__(self, exchange) -> None:
+            del exchange
+
+        def get_balances(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self, exchange, **kwargs) -> None:
+            del exchange, kwargs
+
+        def get_best_bids_with_freshness(self, symbols, *, max_age_ms: int):
+            del symbols
+            return {}, _Freshness(max_age_ms=max_age_ms)
+
+    class FakeAccountingService:
+        def __init__(self, exchange, state_store) -> None:
+            del exchange, state_store
+
+        def refresh(self, symbols, mark_prices):
+            del symbols, mark_prices
+            return 0
+
+        def get_positions(self):
+            return []
+
+    class FakeStrategyService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def generate(self, cycle_id: str, symbols, balances):
+            del cycle_id, symbols, balances
+            return [Intent.create(cycle_id="c1", symbol="BTC_TRY", side=OrderSide.BUY, qty=Decimal("0.1"), limit_price=Decimal("100"), reason="test")]
+
+    class FakeRiskService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.risk_policy = type(
+                "Policy",
+                (),
+                {
+                    "last_blocked_events": [
+                        {
+                            "error_code": "RISK_BLOCK_MAX_OPEN_ORDERS",
+                            "open_order_identifiers": ["cid-1", "cid-2"],
+                            "open_orders_count_origin": "reconciled",
+                        }
+                    ]
+                },
+            )()
+
+        def filter(self, cycle_id: str, intents, **kwargs):
+            del cycle_id, intents, kwargs
+            return []
+
+    class FakeSweepService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def build_order_intents(self, **kwargs):
+            del kwargs
+            return []
+
+    class FakeExecutionService:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.kill_switch = False
+
+        def refresh_order_lifecycle(self, symbols):
+            del symbols
+            return {"backoff_429_count": 0, "error_code": "", "backoff_endpoints": []}
+
+        def cancel_stale_orders(self, cycle_id: str) -> int:
+            del cycle_id
+            return 0
+
+        def execute_intents(self, intents, cycle_id: str | None = None) -> int:
+            del intents, cycle_id
+            return 0
+
+    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(cli, "StateStore", FakeStateStore)
+    monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
+    monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
+    monkeypatch.setattr(cli, "AccountingService", FakeAccountingService)
+    monkeypatch.setattr(cli, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(cli, "RiskService", FakeRiskService)
+    monkeypatch.setattr(cli, "SweepService", FakeSweepService)
+    monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+
+    caplog.set_level("INFO")
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="BTC_TRY")
+    assert cli.run_cycle(settings, force_dry_run=True) == 0
+
+    cycle_records = [r for r in caplog.records if r.getMessage() == "Cycle completed"]
+    assert cycle_records
+    payload = getattr(cycle_records[-1], "extra", {})
+    assert payload["cycle_event"] == "cycle_end"
+    assert "approved_intents" in payload
+    assert "rejected_intents" in payload
+    assert "orders_submitted" in payload
+    assert "top_reject_reasons" in payload
+    assert "RISK_BLOCK_MAX_OPEN_ORDERS" in payload["top_reject_reasons"]
+    assert payload["open_orders_count_origin"] == "reconciled"
+    assert payload["open_order_identifiers"] == ["cid-1", "cid-2"]

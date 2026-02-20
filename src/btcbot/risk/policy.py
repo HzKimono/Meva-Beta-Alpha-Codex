@@ -52,11 +52,14 @@ class RiskPolicy:
         self.notional_cap_try_per_cycle = notional_cap_try_per_cycle
         self.max_notional_per_order_try = max_notional_per_order_try
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
+        self.last_blocked_events: list[dict[str, object]] = []
 
     def evaluate(self, context: RiskPolicyContext, intents: list[Intent]) -> list[Intent]:
         if not intents:
+            self.last_blocked_events = []
             return []
 
+        self.last_blocked_events = []
         approved: list[Intent] = []
         used_notional = Decimal("0")
 
@@ -273,6 +276,7 @@ class RiskPolicy:
             "Intent blocked by risk policy",
             extra={"extra": extra_payload},
         )
+        self.last_blocked_events.append(dict(extra_payload))
         emit_decision(logger, extra_payload)
 
 

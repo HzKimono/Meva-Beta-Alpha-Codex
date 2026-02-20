@@ -1178,10 +1178,17 @@ def run_cycle(
         return 2
 
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
-    resolved_state_store = state_store or _build_state_store(
-        settings.state_db_path,
-        strict_instance_lock=bool((not dry_run) and live_policy.allowed),
-    )
+    try:
+        resolved_state_store = state_store or _build_state_store(
+            settings.state_db_path,
+            strict_instance_lock=bool((not dry_run) and live_policy.allowed),
+        )
+    except RuntimeError as exc:
+        if "STATE_DB_LOCK_CONFLICT" in str(exc):
+            logger.error("db_instance_lock_conflict", extra={"extra": {"error": str(exc)}})
+            print(str(exc))
+            return 2
+        raise
     try:
         with with_logging_context(run_id=run_id, cycle_id=cycle_id):
             heartbeat_instance_lock = getattr(resolved_state_store, "heartbeat_instance_lock", None)
@@ -1310,17 +1317,23 @@ def run_cycle(
                     if price > 0
                 }
 
+                class _StartupRecoveryExecutionView:
+                    def __init__(self, wrapped):
+                        self._wrapped = wrapped
+
+                    def __getattr__(self, name):
+                        if name == "refresh_order_lifecycle":
+                            return None
+                        return getattr(self._wrapped, name)
+
                 recovery = StartupRecoveryService().run(
                     cycle_id=cycle_id,
                     symbols=settings.symbols,
-                    execution_service=execution_service,
+                    execution_service=_StartupRecoveryExecutionView(execution_service),
                     accounting_service=accounting_service,
                     portfolio_service=portfolio_service,
                     mark_prices=startup_mark_prices,
                 )
-                refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
-                if callable(refresh_order_lifecycle):
-                    refresh_order_lifecycle(settings.symbols)
                 if recovery.observe_only_required:
                     logger.error(
                         "startup_recovery_forced_observe_only",
@@ -1332,6 +1345,10 @@ def run_cycle(
                         },
                     )
                     execution_service.kill_switch = True
+
+                lifecycle_summary: dict[str, object] = {}
+                lifecycle_backoff_threshold = 3
+                backoff_degraded_observe_only = False
 
                 reconcile_started = time.monotonic()
                 execution_service.cancel_stale_orders(cycle_id=cycle_id)
@@ -1376,28 +1393,52 @@ def run_cycle(
                     cycle_id=cycle_id, symbols=settings.symbols, balances=balances
                 )
                 refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
-                if callable(refresh_order_lifecycle):
-                    scoped_symbols = {normalize_symbol(intent.symbol) for intent in raw_intents}
-                    find_open_or_unknown_orders = getattr(
-                        resolved_state_store,
-                        "find_open_or_unknown_orders",
-                        None,
+                scoped_symbols = {
+                    normalize_symbol(getattr(intent, "symbol", ""))
+                    for intent in raw_intents
+                    if getattr(intent, "symbol", "")
+                }
+                local_active_orders = []
+                find_open_or_unknown_orders = getattr(
+                    resolved_state_store,
+                    "find_open_or_unknown_orders",
+                    None,
+                )
+                if callable(find_open_or_unknown_orders):
+                    try:
+                        local_active_orders = find_open_or_unknown_orders(
+                            settings.symbols,
+                            new_grace_seconds=PENDING_GRACE_SECONDS,
+                            include_new_after_grace=False,
+                            include_escalated_unknown=False,
+                        )
+                    except TypeError:
+                        local_active_orders = find_open_or_unknown_orders()
+                    for order in local_active_orders:
+                        scoped_symbols.add(normalize_symbol(getattr(order, "symbol", "")))
+                scoped_symbols = sorted(symbol for symbol in scoped_symbols if symbol)
+                if callable(refresh_order_lifecycle) and scoped_symbols:
+                    lifecycle_summary = refresh_order_lifecycle(scoped_symbols)
+
+                backoff_count = int(lifecycle_summary.get("backoff_429_count", 0) or 0)
+                breaker_open = bool(lifecycle_summary.get("error_code") == "EXCHANGE_429_BACKOFF")
+                if backoff_count >= lifecycle_backoff_threshold or breaker_open:
+                    backoff_degraded_observe_only = True
+                    if hasattr(execution_service, "kill_switch"):
+                        execution_service.kill_switch = True
+                    emit_decision(
+                        logger,
+                        {
+                            "cycle_id": cycle_id,
+                            "decision_layer": "execution",
+                            "reason_code": "EXCHANGE_429_BACKOFF",
+                            "action": "SUPPRESS",
+                            "scope": "global",
+                            "backoff_429_count": backoff_count,
+                            "impacted_endpoints": list(lifecycle_summary.get("backoff_endpoints", [])),
+                        },
                     )
-                    if callable(find_open_or_unknown_orders):
-                        try:
-                            local_active_orders = find_open_or_unknown_orders(
-                                settings.symbols,
-                                new_grace_seconds=PENDING_GRACE_SECONDS,
-                                include_new_after_grace=False,
-                                include_escalated_unknown=False,
-                            )
-                        except TypeError:
-                            local_active_orders = find_open_or_unknown_orders()
-                        for order in local_active_orders:
-                            scoped_symbols.add(normalize_symbol(getattr(order, "symbol", "")))
-                    scoped_symbols = sorted(symbol for symbol in scoped_symbols if symbol)
-                    if scoped_symbols:
-                        refresh_order_lifecycle(scoped_symbols)
+
                 approved_intents = risk_service.filter(
                     cycle_id=cycle_id,
                     intents=raw_intents,
@@ -1414,7 +1455,7 @@ def run_cycle(
                 )
 
                 submit_started = time.monotonic()
-                placed = execution_service.execute_intents(approved_intents, cycle_id=cycle_id)
+                placed = 0 if backoff_degraded_observe_only else execution_service.execute_intents(approved_intents, cycle_id=cycle_id)
                 instrumentation.histogram(
                     "order_submit_latency_ms",
                     (time.monotonic() - submit_started) * 1000,
@@ -1434,15 +1475,33 @@ def run_cycle(
                         planned_spend_try += Decimal(str(qty)) * Decimal(str(limit_price))
                 resolved_state_store.set_last_cycle_id(cycle_id)
                 blocked_by_gate = (
-                    len(approved_intents) if (settings.kill_switch or effective_safe_mode) else 0
+                    len(approved_intents) if (settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only) else 0
                 )
                 suppressed_dry_run = len(approved_intents) if dry_run else 0
                 rejected_by_risk = max(0, len(raw_intents) - len(approved_intents))
-                top_reject_reasons = ["risk_policy:blocked"] if rejected_by_risk else []
+                blocked_events = list(getattr(getattr(risk_service, "risk_policy", None), "last_blocked_events", []))
+                reject_counts: dict[str, int] = {}
+                for event in blocked_events:
+                    code = str(event.get("error_code") or event.get("reason_code") or "")
+                    if not code:
+                        continue
+                    reject_counts[code] = reject_counts.get(code, 0) + 1
+                lifecycle_error_code = str(lifecycle_summary.get("error_code") or "")
+                if lifecycle_error_code:
+                    reject_counts[lifecycle_error_code] = reject_counts.get(lifecycle_error_code, 0) + 1
+                top_reject_reasons = [
+                    code for code, _ in sorted(reject_counts.items(), key=lambda item: item[1], reverse=True)
+                ][:3]
+                max_open_block = next(
+                    (event for event in blocked_events if str(event.get("error_code")) == "RISK_BLOCK_MAX_OPEN_ORDERS"),
+                    None,
+                )
+                mode_final = "OBSERVE_ONLY" if (settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only) else "ARMED"
                 logger.info(
                     "Cycle completed",
                     extra={
                         "extra": {
+                            "cycle_event": "cycle_end",
                             "cycle_id": cycle_id,
                             "cash_try_free": str(cash_try_free),
                             "try_cash_target": str(try_cash_target),
@@ -1467,8 +1526,13 @@ def run_cycle(
                             "fills_inserted": fills_inserted,
                             "positions": len(accounting_service.get_positions()),
                             "dry_run": dry_run,
-                            "kill_switch": bool(settings.kill_switch or effective_safe_mode),
+                            "kill_switch": bool(settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only),
                             "safe_mode": effective_safe_mode,
+                            "mode_final": mode_final,
+                            "lifecycle_backoff_429_count": backoff_count,
+                            "lifecycle_impacted_endpoints": list(lifecycle_summary.get("backoff_endpoints", [])),
+                            "open_orders_count_origin": (max_open_block or {}).get("open_orders_count_origin"),
+                            "open_order_identifiers": (max_open_block or {}).get("open_order_identifiers", []),
                         }
                     },
                 )

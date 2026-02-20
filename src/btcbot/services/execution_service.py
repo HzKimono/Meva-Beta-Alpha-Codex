@@ -119,13 +119,32 @@ class ExecutionService:
         self.retry_max_delay_ms = max(self.retry_base_delay_ms, retry_max_delay_ms)
         self.sleep_fn = sleep_fn or time.sleep
         self.lifecycle_refresh_min_interval_seconds = 5
+        self.lifecycle_backoff_cooldown_seconds = 15
         self._last_lifecycle_refresh_at: dict[str, float] = {}
+        self._lifecycle_backoff_until: float = 0.0
+        self.last_lifecycle_refresh_summary: dict[str, object] = {}
 
-    def refresh_order_lifecycle(self, symbols: list[str]) -> None:
+    def refresh_order_lifecycle(self, symbols: list[str], *, skip_non_essential: bool = False) -> dict[str, object]:
         """Reconcile local lifecycle state against exchange open-orders truth for scoped symbols."""
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
+        summary: dict[str, object] = {
+            "symbols": normalized_symbols,
+            "local_open_unknown": 0,
+            "matched_on_exchange": 0,
+            "marked_missing": 0,
+            "closed": 0,
+            "refresh_skipped_due_to_throttle_count": 0,
+            "open_orders_calls_count": 0,
+            "all_orders_calls_count": 0,
+            "backoff_429_count": 0,
+            "skipped_due_to_backoff_cooldown": False,
+            "skip_non_essential": bool(skip_non_essential),
+            "error_code": "",
+            "backoff_endpoints": [],
+        }
         if not normalized_symbols:
-            return
+            self.last_lifecycle_refresh_summary = dict(summary)
+            return summary
 
         self.state_store.heartbeat_instance_lock()
         local_orders = self.state_store.find_open_or_unknown_orders(
@@ -138,19 +157,16 @@ class ExecutionService:
         for local in local_orders:
             orders_by_symbol.setdefault(local.symbol, []).append(local)
 
-        summary = {
-            "symbols": normalized_symbols,
-            "local_open_unknown": len(local_orders),
-            "matched_on_exchange": 0,
-            "marked_missing": 0,
-            "closed": 0,
-            "refresh_skipped_due_to_throttle_count": 0,
-            "open_orders_calls_count": 0,
-            "all_orders_calls_count": 0,
-            "backoff_429_count": 0,
-        }
+        summary["local_open_unknown"] = len(local_orders)
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         now_mono = time.monotonic()
+        if now_mono < self._lifecycle_backoff_until:
+            summary["skipped_due_to_backoff_cooldown"] = True
+            summary["error_code"] = "EXCHANGE_429_BACKOFF"
+            summary["backoff_remaining_seconds"] = max(0.0, self._lifecycle_backoff_until - now_mono)
+            logger.warning("order_reconcile_summary", extra={"extra": summary})
+            self.last_lifecycle_refresh_summary = dict(summary)
+            return summary
         for symbol in normalized_symbols:
             symbol_orders = orders_by_symbol.get(symbol, [])
             last_refresh = self._last_lifecycle_refresh_at.get(symbol)
@@ -175,6 +191,9 @@ class ExecutionService:
             except Exception as exc:  # noqa: BLE001
                 if self._is_exchange_429_error(exc):
                     summary["backoff_429_count"] += 1
+                    endpoints = summary.setdefault("backoff_endpoints", [])
+                    if "open_orders" not in endpoints:
+                        endpoints.append("open_orders")
                     logger.warning(
                         "EXCHANGE_429_BACKOFF",
                         extra={"extra": {"symbol": symbol, "cycle_scope": "order_lifecycle"}},
@@ -218,6 +237,8 @@ class ExecutionService:
                     continue
 
                 if recent is None:
+                    if skip_non_essential:
+                        continue
                     try:
                         summary["all_orders_calls_count"] += 1
                         recent = self.exchange.get_all_orders(
@@ -228,6 +249,9 @@ class ExecutionService:
                     except Exception as exc:  # noqa: BLE001
                         if self._is_exchange_429_error(exc):
                             summary["backoff_429_count"] += 1
+                            endpoints = summary.setdefault("backoff_endpoints", [])
+                            if "all_orders" not in endpoints:
+                                endpoints.append("all_orders")
                             logger.warning(
                                 "EXCHANGE_429_BACKOFF",
                                 extra={"extra": {"symbol": symbol, "cycle_scope": "order_lifecycle_all_orders"}},
@@ -279,8 +303,17 @@ class ExecutionService:
                 if local.order_id.startswith("unknown:") and local.client_order_id and local.order_id != matched.order_id:
                     self._emit_reconcile_confirmed(local, matched.order_id)
 
-        summary["error_code"] = "ORDER_LIFECYCLE_DRIFT" if summary["marked_missing"] > 0 else ""
+        if summary["backoff_429_count"] > 0:
+            summary["error_code"] = "EXCHANGE_429_BACKOFF"
+            self._lifecycle_backoff_until = max(
+                self._lifecycle_backoff_until,
+                now_mono + self.lifecycle_backoff_cooldown_seconds,
+            )
+        elif summary["marked_missing"] > 0:
+            summary["error_code"] = "ORDER_LIFECYCLE_DRIFT"
         logger.info("order_reconcile_summary", extra={"extra": summary})
+        self.last_lifecycle_refresh_summary = dict(summary)
+        return summary
 
     def _is_exchange_429_error(self, exc: Exception) -> bool:
         if isinstance(exc, httpx.HTTPStatusError):
@@ -409,7 +442,17 @@ class ExecutionService:
         return f"reconcile:{datetime.now(UTC).strftime('%Y%m%d')}"
 
     def _save_reconciled_snapshot(self, snapshot: OrderSnapshot) -> None:
-        side = snapshot.side if snapshot.side is not None else OrderSide.BUY
+        side = snapshot.side
+        if side is None:
+            local_order = self.state_store.get_order(snapshot.order_id)
+            if local_order is not None:
+                side = OrderSide(local_order.side)
+        if side is None:
+            logger.warning(
+                "reconcile_snapshot_missing_side",
+                extra={"extra": {"order_id": snapshot.order_id, "symbol": snapshot.pair_symbol}},
+            )
+            return
         order = Order(
             order_id=snapshot.order_id,
             client_order_id=snapshot.client_order_id,
@@ -1226,17 +1269,15 @@ class ExecutionService:
 
     def _stable_place_intent_hash(self, intent: OrderIntent) -> str:
         digest = hashlib.sha256()
-        digest.update(
-            "|".join(
-                [
-                    normalize_symbol(intent.symbol),
-                    intent.side.value,
-                    format(Decimal(str(intent.price)), "f"),
-                    format(Decimal(str(intent.quantity)), "f"),
-                    str(intent.cycle_id),
-                ]
-            ).encode("utf-8")
+        intent_fingerprint = "|".join(
+            [
+                normalize_symbol(intent.symbol),
+                intent.side.value,
+                format(Decimal(str(intent.price)), "f"),
+                format(Decimal(str(intent.quantity)), "f"),
+            ]
         )
+        digest.update(intent_fingerprint.encode("utf-8"))
         return f"place:{digest.hexdigest()}"
 
     def _handle_reservation_without_new_action(
@@ -1585,7 +1626,7 @@ class ExecutionService:
     def _place_hash(self, intent: OrderIntent) -> str:
         raw = (
             f"{intent.symbol}|{intent.side.value}|{intent.price:.8f}|"
-            f"{intent.quantity:.8f}|{intent.cycle_id}"
+            f"{intent.quantity:.8f}"
         )
         return hashlib.sha256(raw.encode()).hexdigest()
 
