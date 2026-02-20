@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import time
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from btcbot.domain.models import (
     quantize_quantity,
     validate_order,
 )
+from btcbot.domain.symbols import split_symbol
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.market_data_service import MarketDataService
@@ -117,6 +119,12 @@ class ExecutionService:
         self.cancel_retry_max_attempts = max(1, cancel_retry_max_attempts)
         self.retry_base_delay_ms = max(0, retry_base_delay_ms)
         self.retry_max_delay_ms = max(self.retry_base_delay_ms, retry_max_delay_ms)
+        self.execution_quote_asset = os.getenv("EXECUTION_QUOTE_ASSET", "TRY").strip().upper() or "TRY"
+        self.estimated_fee_bps = Decimal(os.getenv("EXECUTION_ESTIMATED_FEE_BPS", "15"))
+        self.balance_safety_buffer_ratio = Decimal(
+            os.getenv("EXECUTION_BALANCE_SAFETY_BUFFER_RATIO", "0")
+        )
+        self.sell_fee_in_base_bps = Decimal(os.getenv("EXECUTION_SELL_FEE_IN_BASE_BPS", "0"))
         self.sleep_fn = sleep_fn or time.sleep
         self.lifecycle_refresh_min_interval_seconds = 5
         self.lifecycle_backoff_cooldown_seconds = 15
@@ -209,11 +217,15 @@ class ExecutionService:
 
             for snapshot in open_snapshots:
                 mapped = self._map_exchange_status(snapshot.status)
-                self._save_reconciled_snapshot(snapshot)
+                is_external_open = self.state_store.get_order(snapshot.order_id) is None
+                exchange_status_raw = snapshot.status_raw
+                if is_external_open and mapped in {OrderStatus.NEW, OrderStatus.OPEN, OrderStatus.PARTIAL}:
+                    exchange_status_raw = "external_open:exchange_reconcile"
+                self._save_reconciled_snapshot(snapshot, exchange_status_raw=exchange_status_raw)
                 self.state_store.update_order_status(
                     order_id=snapshot.order_id,
                     status=mapped,
-                    exchange_status_raw=snapshot.status_raw,
+                    exchange_status_raw=exchange_status_raw or snapshot.status_raw,
                     reconciled=True,
                     last_seen_at=snapshot.update_time or snapshot.timestamp,
                 )
@@ -278,12 +290,12 @@ class ExecutionService:
                     elif local.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}:
                         self.state_store.update_order_status(
                             order_id=local.order_id,
-                            status=OrderStatus.UNKNOWN,
-                            exchange_status_raw="missing_from_open_orders",
-                            reconciled=False,
+                            status=OrderStatus.REJECTED,
+                            exchange_status_raw="missing_on_exchange_reconcile",
+                            reconciled=True,
                             last_seen_at=now_ms,
                         )
-                        summary["marked_missing"] += 1
+                        summary["closed"] += 1
                     elif local.status == OrderStatus.UNKNOWN:
                         self._mark_unknown_unresolved(local, now_ms)
                     continue
@@ -314,6 +326,35 @@ class ExecutionService:
         logger.info("order_reconcile_summary", extra={"extra": summary})
         self.last_lifecycle_refresh_summary = dict(summary)
         return summary
+
+    def _balance_by_asset(self) -> dict[str, Decimal]:
+        balances = self.exchange.get_balances()
+        return {str(item.asset).upper(): Decimal(str(item.free)) for item in balances}
+
+    def _check_balance_precondition(
+        self, *, symbol: str, side: OrderSide, price: Decimal, quantity: Decimal
+    ) -> tuple[bool, str | None, Decimal | None, Decimal | None]:
+        balances = self._balance_by_asset()
+        if not balances:
+            return True, None, None, None
+        if side == OrderSide.BUY:
+            asset = self.execution_quote_asset
+            notional = price * quantity
+            estimated_fee = notional * (self.estimated_fee_bps / Decimal("10000"))
+            safety_buffer = notional * self.balance_safety_buffer_ratio
+            required = notional + estimated_fee + safety_buffer
+            available = balances.get(asset, Decimal("0"))
+            if available < required:
+                return False, asset, required, available
+            return True, None, None, None
+
+        base_asset, _quote_asset = split_symbol(symbol)
+        asset = str(base_asset).upper()
+        required = quantity + (quantity * (self.sell_fee_in_base_bps / Decimal("10000")))
+        available = balances.get(asset, Decimal("0"))
+        if available < required:
+            return False, asset, required, available
+        return True, None, None, None
 
     def _is_exchange_429_error(self, exc: Exception) -> bool:
         if isinstance(exc, httpx.HTTPStatusError):
@@ -441,7 +482,9 @@ class ExecutionService:
             return str(row["cycle_id"])
         return f"reconcile:{datetime.now(UTC).strftime('%Y%m%d')}"
 
-    def _save_reconciled_snapshot(self, snapshot: OrderSnapshot) -> None:
+    def _save_reconciled_snapshot(
+        self, snapshot: OrderSnapshot, *, exchange_status_raw: str | None = None
+    ) -> None:
         side = snapshot.side
         if side is None:
             local_order = self.state_store.get_order(snapshot.order_id)
@@ -467,7 +510,7 @@ class ExecutionService:
         self.state_store.save_order(
             order,
             reconciled=True,
-            exchange_status_raw=snapshot.status_raw,
+            exchange_status_raw=exchange_status_raw or snapshot.status_raw,
         )
 
     def cancel_stale_orders(self, cycle_id: str) -> int:
@@ -924,6 +967,53 @@ class ExecutionService:
                 validate_order(price=price, qty=quantity, rules=rules)
             except ValueError:
                 logger.exception("Intent failed symbol rule validation")
+                self.state_store.finalize_idempotency_key(
+                    "place_order",
+                    idempotency_key,
+                    action_id=action_id,
+                    client_order_id=client_order_id,
+                    order_id=None,
+                    status="FAILED",
+                )
+                self.state_store.clear_action_dedupe_key(action_id)
+                continue
+
+            is_sufficient, asset, required, available = self._check_balance_precondition(
+                symbol=symbol_normalized,
+                side=intent.side,
+                price=price,
+                quantity=quantity,
+            )
+            if not is_sufficient:
+                missing = (required or Decimal("0")) - (available or Decimal("0"))
+                logger.warning(
+                    "execution_reject_insufficient_balance_precheck",
+                    extra={
+                        "extra": {
+                            "cycle_id": intent.cycle_id,
+                            "intent_id": (raw_intent.intent_id if raw_intent else None),
+                            "symbol": symbol_normalized,
+                            "side": intent.side.value,
+                            "asset": asset,
+                            "required": str(required),
+                            "available": str(available),
+                            "missing": str(max(missing, Decimal("0"))),
+                        }
+                    },
+                )
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": intent.cycle_id,
+                        "decision_layer": "execution",
+                        "reason_code": str(ReasonCode.EXECUTION_REJECT_INSUFFICIENT_BALANCE_PRECHECK),
+                        "action": "REJECT",
+                        "scope": "per_intent",
+                        "intent_id": (raw_intent.intent_id if raw_intent else None),
+                        "symbol": intent.symbol,
+                        "side": intent.side.value,
+                    },
+                )
                 self.state_store.finalize_idempotency_key(
                     "place_order",
                     idempotency_key,
