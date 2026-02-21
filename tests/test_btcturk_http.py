@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import ssl
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
@@ -12,6 +13,7 @@ import pytest
 from btcbot.adapters.btcturk_http import (
     BtcturkHttpClient,
     BtcturkHttpClientStage4,
+    DryRunExchangeClient,
     ConfigurationError,
     _parse_stage4_open_order_item,
     _should_retry,
@@ -753,3 +755,112 @@ def test_orderbook_inflight_join_coalesces_requests() -> None:
     assert results[0] == results[1]
     assert calls["count"] == 1
     client.close()
+
+
+def test_get_orderbook_with_timestamp_cache_hit_reuses_fetched_at() -> None:
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"bids": [["100", "1"]], "asks": [["101", "1"]]}},
+            request=request,
+        )
+
+    client = BtcturkHttpClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        orderbook_cache_ttl_s=1.0,
+    )
+
+    first_bid, first_ask, first_ts = client.get_orderbook_with_timestamp("BTC_TRY")
+    second_bid, second_ask, second_ts = client.get_orderbook_with_timestamp("BTC_TRY")
+
+    assert (first_bid, first_ask) == (second_bid, second_ask)
+    assert first_ts is not None
+    assert second_ts == first_ts
+    assert calls["count"] == 1
+    client.close()
+
+
+def test_get_orderbook_with_timestamp_inflight_join_reuses_leader_fetched_at() -> None:
+    import threading
+    from time import sleep as thread_sleep
+
+    calls = {"count": 0}
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        release.wait(timeout=1.0)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"bids": [["100", "1"]], "asks": [["101", "1"]]}},
+            request=request,
+        )
+
+    client = BtcturkHttpClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        orderbook_cache_ttl_s=1.0,
+    )
+
+    results: list[tuple[Decimal, Decimal, datetime | None]] = []
+
+    def _worker() -> None:
+        results.append(client.get_orderbook_with_timestamp("BTC_TRY"))
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    thread_sleep(0.05)
+    t2.start()
+    thread_sleep(0.05)
+    release.set()
+    t1.join()
+    t2.join()
+
+    assert len(results) == 2
+    assert results[0][0:2] == results[1][0:2]
+    assert results[0][2] is not None
+    assert results[1][2] == results[0][2]
+    assert calls["count"] == 1
+    client.close()
+
+
+def test_get_orderbook_with_timestamp_inflight_missing_cache_raises_exchange_error() -> None:
+    import threading
+
+    client = BtcturkHttpClient(orderbook_cache_ttl_s=1.0)
+    key = ("BTCTRY", None)
+    gate = threading.Event()
+    gate.set()
+    client._orderbook_inflight[key] = gate
+
+    with pytest.raises(ExchangeError, match="Orderbook inflight request failed"):
+        client.get_orderbook_with_timestamp("BTC_TRY")
+    client.close()
+
+
+def test_dry_run_get_orderbook_with_timestamp_uses_stored_observed_at() -> None:
+    symbol = "BTCTRY"
+    client = DryRunExchangeClient(orderbooks={symbol: (Decimal("100"), Decimal("101"))})
+    observed_at = datetime(2026, 1, 1, tzinfo=UTC)
+    client._orderbook_observed_at[symbol] = observed_at
+
+    bid, ask, ts = client.get_orderbook_with_timestamp(symbol)
+
+    assert (bid, ask) == (Decimal("100"), Decimal("101"))
+    assert ts == observed_at
+
+
+def test_dry_run_get_orderbook_with_timestamp_returns_none_when_observed_at_missing() -> None:
+    symbol = "BTCTRY"
+    client = DryRunExchangeClient(orderbooks={symbol: (Decimal("100"), Decimal("101"))})
+    client._orderbook_observed_at.pop(symbol, None)
+
+    bid, ask, ts = client.get_orderbook_with_timestamp(symbol)
+
+    assert (bid, ask) == (Decimal("100"), Decimal("101"))
+    assert ts is None

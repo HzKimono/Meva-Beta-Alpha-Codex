@@ -6,6 +6,7 @@ from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
+from btcbot.domain.stage4 import ExchangeRules as Stage4ExchangeRules, Quantizer
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 
 
@@ -370,3 +371,19 @@ def test_non_try_pair_without_min_notional_remains_invalid() -> None:
 
     assert resolution.status == "invalid_metadata"
     assert resolution.rules is None
+
+
+def test_rounding_policy_round_down_is_consistent_with_stage4_quantizer() -> None:
+    service = ExchangeRulesService(FakeExchangeClient())
+    price = service.quantize_price("BTC_TRY", Decimal("100.19"))
+    qty = service.quantize_qty("BTC_TRY", Decimal("0.12349"))
+
+    stage4_rules = Stage4ExchangeRules(
+        tick_size=Decimal("0.1"),
+        step_size=Decimal("0.0001"),
+        min_notional_try=Decimal("100"),
+        price_precision=2,
+        qty_precision=6,
+    )
+    assert price == Quantizer.quantize_price(Decimal("100.19"), stage4_rules)
+    assert qty == Quantizer.quantize_qty(Decimal("0.12349"), stage4_rules)

@@ -15,6 +15,10 @@ from btcbot.services.market_data_service import MarketDataService
 logger = logging.getLogger(__name__)
 
 
+class ExchangeRulesUnavailableError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ExchangeRules:
     min_notional: Decimal
@@ -33,11 +37,13 @@ class MarketDataExchangeRulesProvider:
         *,
         cache_ttl_seconds: int = 600,
         now_provider: Callable[[], datetime] | None = None,
+        allow_default_fallback: bool = True,
     ) -> None:
         self.market_data_service = market_data_service
         self.cache_ttl_seconds = cache_ttl_seconds
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
         self._rules_cache: dict[str, tuple[datetime, ExchangeRules]] = {}
+        self.allow_default_fallback = allow_default_fallback
 
     def get_rules(self, symbol: str) -> ExchangeRules:
         normalized = canonical_symbol(symbol)
@@ -65,6 +71,15 @@ class MarketDataExchangeRulesProvider:
             }
             if isinstance(exc, HTTPStatusError) and exc.response is not None:
                 extra["status_code"] = exc.response.status_code
+            if not self.allow_default_fallback:
+                logger.error(
+                    "exchange_rules_missing_fail_closed",
+                    extra={"extra": extra},
+                    exc_info=True,
+                )
+                raise ExchangeRulesUnavailableError(
+                    f"exchange_rules_missing_fail_closed:{normalized}"
+                ) from exc
             logger.warning(
                 "Exchange rules unavailable; using defaults",
                 extra={"extra": extra},
