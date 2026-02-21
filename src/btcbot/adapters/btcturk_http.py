@@ -1280,6 +1280,13 @@ class DryRunExchangeClient(ExchangeClient):
         bid, ask = self.get_orderbook(symbol)
         return bid, ask, self._orderbook_observed_at.get(symbol)
 
+    def get_orderbook_with_timestamp(
+        self, symbol: str, limit: int | None = None
+    ) -> tuple[Decimal, Decimal, datetime | None]:
+        del limit
+        bid, ask = self.get_orderbook(symbol)
+        return bid, ask, datetime.now(UTC)
+
     def get_ticker_stats(self) -> list[dict[str, object]]:
         stats: list[dict[str, object]] = []
         for symbol, (bid, ask) in self._orderbooks.items():
