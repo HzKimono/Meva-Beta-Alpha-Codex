@@ -1317,22 +1317,14 @@ def run_cycle(
                     if price > 0
                 }
 
-                class _StartupRecoveryExecutionView:
-                    def __init__(self, wrapped):
-                        self._wrapped = wrapped
-
-                    def __getattr__(self, name):
-                        if name == "refresh_order_lifecycle":
-                            return None
-                        return getattr(self._wrapped, name)
-
                 recovery = StartupRecoveryService().run(
                     cycle_id=cycle_id,
                     symbols=settings.symbols,
-                    execution_service=_StartupRecoveryExecutionView(execution_service),
+                    execution_service=execution_service,
                     accounting_service=accounting_service,
                     portfolio_service=portfolio_service,
                     mark_prices=startup_mark_prices,
+                    do_refresh_lifecycle=False,
                 )
                 if recovery.observe_only_required:
                     logger.error(
@@ -1419,6 +1411,9 @@ def run_cycle(
                 scoped_symbols = sorted(symbol for symbol in scoped_symbols if symbol)
                 if callable(refresh_order_lifecycle) and scoped_symbols:
                     lifecycle_summary = refresh_order_lifecycle(scoped_symbols)
+                    mark_lifecycle_refreshed = getattr(execution_service, "mark_lifecycle_refreshed", None)
+                    if callable(mark_lifecycle_refreshed):
+                        mark_lifecycle_refreshed(cycle_id=cycle_id)
 
                 backoff_count = int(lifecycle_summary.get("backoff_429_count", 0) or 0)
                 breaker_open = bool(lifecycle_summary.get("error_code") == "EXCHANGE_429_BACKOFF")

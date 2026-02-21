@@ -31,12 +31,13 @@ class StartupRecoveryService:
         accounting_service: AccountingService,
         portfolio_service: PortfolioService,
         mark_prices: Mapping[str, Decimal] | None = None,
+        do_refresh_lifecycle: bool = False,
     ) -> StartupRecoveryResult:
         logger.info("startup_recovery_started", extra={"extra": {"cycle_id": cycle_id}})
 
         normalized_symbols = [str(symbol) for symbol in symbols]
         refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
-        if callable(refresh_order_lifecycle):
+        if do_refresh_lifecycle and callable(refresh_order_lifecycle):
             refresh_order_lifecycle(normalized_symbols)
             mark_lifecycle_refreshed = getattr(execution_service, "mark_lifecycle_refreshed", None)
             if callable(mark_lifecycle_refreshed):

@@ -28,10 +28,15 @@ from btcbot.services.state_store import StateStore
 class _StubExecutionService:
     calls: int = 0
     primed: int = 0
+    marked: int = 0
 
     def refresh_order_lifecycle(self, symbols: list[str]) -> None:
         assert symbols
         self.calls += 1
+
+    def mark_lifecycle_refreshed(self, *, cycle_id: str) -> None:
+        assert cycle_id
+        self.marked += 1
 
     def prime_cycle_balances(self, *, cycle_id: str, balances: list[Balance]) -> None:
         assert cycle_id
@@ -93,7 +98,8 @@ def test_run_with_prices_calls_refresh_and_runs_invariants() -> None:
         mark_prices={"BTCTRY": Decimal("123.45")},
     )
 
-    assert execution.calls == 1
+    assert execution.calls == 0
+    assert execution.marked == 0
     assert execution.primed == 1
     assert accounting.refresh_calls == 1
     assert accounting.seen_mark_prices == {"BTCTRY": Decimal("123.45")}
@@ -101,6 +107,31 @@ def test_run_with_prices_calls_refresh_and_runs_invariants() -> None:
     assert result.observe_only_reason is None
     assert result.fills_inserted == 2
 
+
+
+
+def test_run_with_do_refresh_lifecycle_true_calls_refresh_and_marks() -> None:
+    service = StartupRecoveryService()
+    execution = _StubExecutionService()
+    accounting = _StubAccountingService(
+        fills_inserted=0,
+        positions=[_position("BTCTRY")],
+    )
+    portfolio = _StubPortfolioService(balances=[Balance(asset="TRY", free=1000.0)])
+
+    _ = service.run(
+        cycle_id="cycle-refresh",
+        symbols=["BTCTRY"],
+        execution_service=execution,
+        accounting_service=accounting,
+        portfolio_service=portfolio,
+        mark_prices={"BTCTRY": Decimal("123.45")},
+        do_refresh_lifecycle=True,
+    )
+
+    assert execution.calls == 1
+    assert execution.marked == 1
+    assert execution.primed == 1
 
 def test_run_without_prices_forces_observe_only_and_skips_refresh() -> None:
     service = StartupRecoveryService()
@@ -117,7 +148,8 @@ def test_run_without_prices_forces_observe_only_and_skips_refresh() -> None:
         mark_prices=None,
     )
 
-    assert execution.calls == 1
+    assert execution.calls == 0
+    assert execution.marked == 0
     assert execution.primed == 1
     assert accounting.refresh_calls == 0
     assert result.observe_only_required is True
@@ -312,6 +344,7 @@ def test_startup_recovery_imports_exchange_open_and_closes_local_only(tmp_path) 
         accounting_service=accounting,
         portfolio_service=portfolio,
         mark_prices={"ADATRY": Decimal("10")},
+        do_refresh_lifecycle=True,
     )
 
     closed_local = state_store.get_order("9001")
