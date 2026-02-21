@@ -1956,12 +1956,29 @@ class ExecutionService:
                 reason_codes=[str(policy_reason_to_code(reason)) for reason in policy.reasons],
             )
 
-    def _place_hash(self, intent: OrderIntent) -> str:
-        raw = (
-            f"{intent.symbol}|{intent.side.value}|{intent.price:.8f}|"
-            f"{intent.quantity:.8f}"
-        )
+    def _canonical_place_fields(self, intent: OrderIntent) -> tuple[str, str, str, str]:
+        symbol = normalize_symbol(intent.symbol)
+        price = Decimal(intent.price)
+        quantity = Decimal(intent.quantity)
+        if self.market_data_service is not None:
+            try:
+                rules = self.market_data_service.get_symbol_rules(symbol)
+                price = quantize_price(price, rules)
+                quantity = quantize_quantity(quantity, rules)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "place_hash_quantization_skipped",
+                    extra={"extra": {"symbol": symbol}},
+                )
+        return symbol, intent.side.value, format(price, "f"), format(quantity, "f")
+
+    def _stable_place_hash(self, intent: OrderIntent) -> str:
+        symbol, side, price, quantity = self._canonical_place_fields(intent)
+        raw = "|".join([symbol, side, price, quantity])
         return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _place_hash(self, intent: OrderIntent) -> str:
+        return self._stable_place_hash(intent)
 
     def _cancel_hash(self, order_id: str) -> str:
         return hashlib.sha256(order_id.encode()).hexdigest()

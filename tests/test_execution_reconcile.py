@@ -851,3 +851,28 @@ def test_submit_gate_enforced_metric_emitted_on_block_and_allow(tmp_path, monkey
 
     assert fake_metrics.counters.count("submit_gate_enforced_total") >= 2
 
+
+
+def test_place_hash_is_stable_for_equivalent_quantized_decimals(tmp_path) -> None:
+    exchange = LifecycleExchange()
+    service = _service(tmp_path, exchange)
+
+    intent_a = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=Decimal("100.000"),
+        quantity=Decimal("0.10000"),
+        notional=Decimal("10.0"),
+        cycle_id="hash-a",
+    )
+    intent_b = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=Decimal("100.00"),
+        quantity=Decimal("0.1"),
+        notional=Decimal("10.00"),
+        cycle_id="hash-b",
+    )
+
+    assert service._place_hash(intent_a) == service._place_hash(intent_b)
+
