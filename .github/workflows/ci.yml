@@ -30,7 +30,7 @@ jobs:
       - name: Ruff lint
         run: ruff check .
       - name: Compileall
-        run: python -m compileall -q .
+        run: python -m compileall src tests
       - name: Mypy
         run: python -m mypy src/btcbot --ignore-missing-imports
       - name: Bandit (security lint)

@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from btcbot.adapters.exchange import ExchangeClient
+from btcbot.config import Settings
 from btcbot.domain.intent import Intent, to_order_intent
 from btcbot.domain.models import (
     Balance,
@@ -27,13 +28,25 @@ from btcbot.services.state_store import StateStore
 
 
 class RecordingExchange(ExchangeClient):
-    def __init__(self, orders: list[Order] | None = None) -> None:
+    def __init__(
+        self, orders: list[Order] | None = None, balances: list[Balance] | None = None
+    ) -> None:
         self.open_orders = orders or []
+        self.balances = balances or [
+            Balance(asset="TRY", free=Decimal("1000000")),
+            Balance(asset="BTC", free=Decimal("100")),
+            Balance(asset="ETH", free=Decimal("100")),
+            Balance(asset="SOL", free=Decimal("1000")),
+            Balance(asset="ADA", free=Decimal("100000")),
+        ]
         self.canceled: list[str] = []
         self.placed: list[tuple[str, OrderSide, float, float, str]] = []
+        self.get_balances_calls = 0
+        self.get_open_orders_calls = 0
 
     def get_balances(self) -> list[Balance]:
-        return []
+        self.get_balances_calls += 1
+        return list(self.balances)
 
     def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
         del symbol, limit
@@ -44,6 +57,7 @@ class RecordingExchange(ExchangeClient):
 
     def get_open_orders(self, pair_symbol: str) -> OpenOrders:
         del pair_symbol
+        self.get_open_orders_calls += 1
         return OpenOrders(bids=[], asks=[])
 
     def get_all_orders(self, pair_symbol: str, start_ms: int, end_ms: int) -> list[OrderSnapshot]:
@@ -95,7 +109,7 @@ class CancelFailExchange(RecordingExchange):
 
 class FakeMarketDataService:
     def get_symbol_rules(self, pair_symbol: str) -> SymbolRules:
-        assert pair_symbol in {"BTCTRY", "ETHTRY", "SOLTRY"}
+        assert pair_symbol in {"BTCTRY", "ETHTRY", "SOLTRY", "BTCUSDT"}
         return SymbolRules(
             pair_symbol=pair_symbol,
             price_scale=2,
@@ -176,6 +190,177 @@ def test_dry_run_cancel_stale_logs_would_cancel_without_side_effects(tmp_path, c
     assert canceled == 1
     assert exchange.canceled == []
     assert "would cancel stale order" in caplog.text
+
+
+def test_sell_precheck_with_zero_base_balance_skips_exchange_submit(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(balances=[Balance(asset="TRY", free=1000)])
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    intent = OrderIntent(
+        symbol="ETH_TRY",
+        side=OrderSide.SELL,
+        price=100.0,
+        quantity=0.1,
+        notional=10.0,
+        cycle_id="sell-precheck",
+    )
+    placed = service.execute_intents([intent])
+
+    assert placed == 0
+    assert exchange.placed == []
+    assert exchange.get_balances_calls == 1
+    decision_records = [record for record in caplog.records if record.message == "decision_event"]
+    assert decision_records
+    assert any(
+        record.__dict__.get("extra", {}).get("reason_code")
+        == "execution_reject:insufficient_balance_precheck"
+        for record in decision_records
+    )
+    precheck_records = [
+        record
+        for record in caplog.records
+        if record.message == "execution_reject_insufficient_balance_precheck"
+    ]
+    assert precheck_records
+    assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "ETH"
+    assert Decimal(precheck_records[-1].__dict__.get("extra", {}).get("missing_amount", "0")) > 0
+    summary = service.last_execute_summary
+    assert summary["intents_rejected_precheck"] == 1
+    assert summary["rejected_intents"] == 1
+    assert summary["orders_failed_exchange"] == 0
+    assert summary["attempted_exchange_calls"] == 0
+
+
+def test_buy_precheck_with_insufficient_try_skips_exchange_submit(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(balances=[Balance(asset="TRY", free=5)])
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents([_intent(cycle_id="buy-precheck")])
+
+    assert placed == 0
+    assert exchange.placed == []
+    assert exchange.get_balances_calls == 1
+    decision_records = [record for record in caplog.records if record.message == "decision_event"]
+    assert decision_records
+    assert any(
+        record.__dict__.get("extra", {}).get("reason_code")
+        == "execution_reject:insufficient_balance_precheck"
+        for record in decision_records
+    )
+    precheck_records = [
+        record
+        for record in caplog.records
+        if record.message == "execution_reject_insufficient_balance_precheck"
+    ]
+    assert precheck_records
+    assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "TRY"
+    assert Decimal(precheck_records[-1].__dict__.get("extra", {}).get("missing_amount", "0")) > 0
+    summary = service.last_execute_summary
+    assert summary["intents_rejected_precheck"] == 1
+    assert summary["rejected_intents"] == 1
+    assert summary["orders_failed_exchange"] == 0
+    assert summary["attempted_exchange_calls"] == 0
+
+
+def test_buy_precheck_derives_quote_asset_from_symbol(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(
+        balances=[
+            Balance(asset="USDT", free=Decimal("1")),
+            Balance(asset="TRY", free=Decimal("100000")),
+        ]
+    )
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents(
+        [
+            OrderIntent(
+                symbol="BTC_USDT",
+                side=OrderSide.BUY,
+                price=100.0,
+                quantity=0.1,
+                notional=10.0,
+                cycle_id="buy-usdt-precheck",
+            )
+        ]
+    )
+
+    assert placed == 0
+    assert exchange.placed == []
+    precheck_records = [
+        record
+        for record in caplog.records
+        if record.message == "execution_reject_insufficient_balance_precheck"
+    ]
+    assert precheck_records
+    assert precheck_records[-1].__dict__.get("extra", {}).get("asset") == "USDT"
+    decision_records = [record for record in caplog.records if record.message == "decision_event"]
+    assert any(
+        record.__dict__.get("extra", {}).get("reason_code")
+        == "execution_reject:insufficient_balance_precheck"
+        for record in decision_records
+    )
+
+
+def test_insufficient_balance_does_not_create_idempotency_or_actions(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange(balances=[Balance(asset="TRY", free=1)])
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    intents = [_intent(cycle_id="c-a"), _intent(cycle_id="c-b")]
+    assert service.execute_intents(intents) == 0
+    assert exchange.get_balances_calls == 1
+
+    with store._connect() as conn:
+        action_count = conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"]
+        idem_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM idempotency_keys WHERE action_type='place_order'"
+        ).fetchone()["c"]
+
+    assert action_count == 0
+    assert idem_count == 0
+    summary = service.last_execute_summary
+    assert summary["intents_rejected_precheck"] == 2
+    assert summary["rejected_intents"] == 2
+    assert summary["orders_failed_exchange"] == 0
+    assert summary["attempted_exchange_calls"] == 0
 
 
 def test_live_mode_saves_order_state(tmp_path) -> None:
@@ -870,7 +1055,19 @@ def test_state_store_new_after_grace_not_blocking(tmp_path) -> None:
 def test_refresh_order_lifecycle_missing_transitions(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     now = datetime.now(UTC)
-    store.save_order(Order(order_id="o-new", client_order_id="cid-new", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.NEW, created_at=now - timedelta(seconds=120), updated_at=now - timedelta(seconds=120)))
+    store.save_order(
+        Order(
+            order_id="o-new",
+            client_order_id="cid-new",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=100.0,
+            quantity=0.1,
+            status=OrderStatus.NEW,
+            created_at=now - timedelta(seconds=120),
+            updated_at=now - timedelta(seconds=120),
+        )
+    )
     store.save_order(Order(order_id="o-open", client_order_id="cid-open", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.OPEN, created_at=now, updated_at=now))
     store.save_order(Order(order_id="o-unk", client_order_id="cid-unk", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.UNKNOWN, created_at=now, updated_at=now))
 
@@ -879,7 +1076,7 @@ def test_refresh_order_lifecycle_missing_transitions(tmp_path) -> None:
     svc.refresh_order_lifecycle(["BTC_TRY"])
 
     rows = {o.order_id: o for o in store.find_open_or_unknown_orders(["BTCTRY"], include_new_after_grace=True, include_escalated_unknown=True)}
-    assert rows["o-open"].status == OrderStatus.UNKNOWN
+    assert "o-open" not in rows
     assert rows["o-unk"].unknown_next_probe_at is not None
     with store._connect() as conn:
         rej = conn.execute("SELECT status, exchange_status_raw FROM orders WHERE order_id='o-new'").fetchone()
@@ -1045,3 +1242,88 @@ def test_place_order_idempotency_is_stable_across_cycles_but_changes_on_material
 
     assert key_a == key_b
     assert key_a != key_c
+
+
+def test_settings_env_file_opt_in_only(monkeypatch, tmp_path) -> None:
+    env_file = tmp_path / ".env.custom"
+    env_file.write_text("TARGET_TRY=777\n", encoding="utf-8")
+
+    monkeypatch.delenv("SETTINGS_ENV_FILE", raising=False)
+    default_settings = Settings()
+    assert default_settings.target_try != 777
+
+    monkeypatch.setenv("SETTINGS_ENV_FILE", str(env_file))
+    monkeypatch.setenv("TARGET_TRY", "999")
+    opted_in = Settings()
+    assert opted_in.target_try == 999
+
+
+def test_exchange_submit_failure_increments_orders_failed_exchange_only_when_attempted(tmp_path) -> None:
+    class SubmitFailExchange(RecordingExchange):
+        def place_limit_order(
+            self,
+            symbol: str,
+            side: OrderSide,
+            price: float,
+            quantity: float,
+            client_order_id: str | None = None,
+        ) -> Order:
+            del symbol, side, price, quantity, client_order_id
+            raise ExchangeError("submit failed", status_code=400)
+
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = SubmitFailExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents([_intent(cycle_id="submit-fail")])
+
+    assert placed == 0
+    summary = service.last_execute_summary
+    assert summary["attempted_exchange_calls"] == 1
+    assert summary["orders_failed_exchange"] == 1
+    assert summary["intents_rejected_precheck"] == 0
+    assert summary["rejected_intents"] == 0
+
+
+def test_execute_intents_skips_lifecycle_refresh_when_cycle_marked(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    service.mark_lifecycle_refreshed(cycle_id="cycle-lifecycle")
+    placed = service.execute_intents([_intent(cycle_id="cycle-lifecycle")])
+
+    assert placed == 1
+    assert exchange.get_open_orders_calls == 0
+
+
+def test_cycle_balance_cache_is_bounded(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(exchange=exchange, state_store=store, dry_run=True)
+
+    for idx in range(20):
+        service.prime_cycle_balances(
+            cycle_id=f"cycle-{idx}",
+            balances=[Balance(asset="TRY", free=Decimal(str(100 + idx)))],
+        )
+
+    assert len(service._cycle_balance_cache) == 10
+    assert "cycle-0" not in service._cycle_balance_cache
+    assert "cycle-19" in service._cycle_balance_cache
