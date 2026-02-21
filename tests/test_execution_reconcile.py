@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
 
 import pytest
 
@@ -667,8 +671,16 @@ def test_freeze_clears_only_after_reconcile_confirms_zero_unknown(tmp_path) -> N
     exchange.place_error = ExchangeError("status=500")
 
     assert service.execute_intents([_intent("uncertain-path")]) == 0
+    blocked_intent = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=Decimal("100.5"),
+        quantity=Decimal("0.15"),
+        notional=Decimal("15.075"),
+        cycle_id="blocked-after-uncertain",
+    )
     with pytest.raises(SubmitBlockedDueToUnknownError):
-        service.execute_intents([_intent("blocked-after-uncertain")])
+        service.execute_intents([blocked_intent])
 
     exchange.place_error = None
     unknown_orders = service.state_store.list_unknown_orders()
@@ -702,4 +714,138 @@ def test_freeze_clears_only_after_reconcile_confirms_zero_unknown(tmp_path) -> N
         cycle_id="allowed-after-reconcile",
     )
     assert service.execute_intents([allowed_intent]) == 1
+
+
+
+def test_submit_uses_single_chokepoint_callsite() -> None:
+    source = Path("src/btcbot/services/execution_service.py").read_text()
+    assert source.count("self.exchange.place_limit_order(") == 1
+    assert "def _submit_limit_order(" in source
+
+
+def test_state_store_persists_decimal_strings_without_float_coercion(tmp_path) -> None:
+    store = StateStore(str(tmp_path / "state.db"))
+    now = datetime.now(UTC)
+    store.save_order(
+        Order(
+            order_id="decimal-1",
+            client_order_id="cid-decimal",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=Decimal("100.0100"),
+            quantity=Decimal("0.1000"),
+            status=OrderStatus.NEW,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    with store._connect() as conn:
+        row = conn.execute("SELECT price, qty FROM orders WHERE order_id = ?", ("decimal-1",)).fetchone()
+    assert row is not None
+    assert row["price"] == "100.0100"
+    assert row["qty"] == "0.1000"
+
+
+def test_save_order_rejects_float_values(tmp_path) -> None:
+    store = StateStore(str(tmp_path / "state.db"))
+    now = datetime.now(UTC)
+    with pytest.raises(TypeError):
+        store.save_order(
+            Order(
+                order_id="bad-float",
+                client_order_id="cid-bad",
+                symbol="BTCTRY",
+                side=OrderSide.BUY,
+                price=Decimal("1"),
+                quantity=Decimal("1"),
+                status=OrderStatus.NEW,
+                created_at=now,
+                updated_at=now,
+            ).model_copy(update={"price": 1.23})
+        )
+
+
+def test_reconcile_handles_decimal_precision_without_false_unknown(tmp_path) -> None:
+    exchange = LifecycleExchange()
+    service = _service(tmp_path, exchange)
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="unknown:cid-precise",
+            client_order_id="cid-precise",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=Decimal("100.0100"),
+            quantity=Decimal("0.1000"),
+            status=OrderStatus.UNKNOWN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    with service.state_store._connect() as conn:
+        conn.execute("UPDATE orders SET unknown_next_probe_at = 0 WHERE order_id = ?", ("unknown:cid-precise",))
+
+    exchange.all_snapshots = [
+        OrderSnapshot(
+            order_id="101",
+            client_order_id="cid-precise",
+            pair_symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=Decimal("100.01"),
+            quantity=Decimal("0.1"),
+            status=ExchangeOrderStatus.FILLED,
+            timestamp=1700000000000,
+            update_time=1700000000100,
+            status_raw="Filled",
+        )
+    ]
+
+    service.refresh_order_lifecycle(["BTC_TRY"])
+    assert service.unknown_order_registry.has_unknown() is False
+
+
+
+def test_submit_gate_enforced_metric_emitted_on_block_and_allow(tmp_path, monkeypatch) -> None:
+    class FakeInstrumentation:
+        def __init__(self) -> None:
+            self.counters: list[str] = []
+
+        def counter(self, name: str, value: int = 1, *, attrs=None) -> None:
+            del value, attrs
+            self.counters.append(name)
+
+        def gauge(self, name: str, value: float, *, attrs=None) -> None:
+            del name, value, attrs
+
+    fake_metrics = FakeInstrumentation()
+    monkeypatch.setattr(execution_service_module, "get_instrumentation", lambda: fake_metrics)
+
+    exchange = LifecycleExchange()
+    service = _service(tmp_path, exchange)
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="unknown:metric",
+            client_order_id="cid-metric",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
+            status=OrderStatus.UNKNOWN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    with pytest.raises(SubmitBlockedDueToUnknownError):
+        service.execute_intents([_intent("metric-block")])
+
+    service.state_store.update_order_status(
+        order_id="unknown:metric",
+        status=OrderStatus.FILLED,
+        reconciled=True,
+    )
+    service.execute_intents([OrderIntent(symbol="BTC_TRY", side=OrderSide.BUY, price=Decimal("101"), quantity=Decimal("0.2"), notional=Decimal("20.2"), cycle_id="metric-allow")])
+
+    assert fake_metrics.counters.count("submit_gate_enforced_total") >= 2
 

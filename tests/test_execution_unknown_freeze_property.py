@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.models import (
     Balance,
+    ExchangeError,
     OpenOrders,
     Order,
     OrderIntent,
@@ -112,7 +113,7 @@ def _intent(cycle_id: str) -> OrderIntent:
     )
 
 
-@given(st.lists(st.sampled_from(["unknown_on", "unknown_off", "submit"]), min_size=1, max_size=25))
+@given(st.lists(st.sampled_from(["unknown_on", "unknown_off", "submit", "reconcile_fail", "reconcile_ok"]), min_size=1, max_size=25))
 def test_submit_never_reaches_exchange_when_unknown_present(tmp_path, events) -> None:
     exchange = _FakeExchange()
     service = ExecutionService(
@@ -152,6 +153,17 @@ def test_submit_never_reaches_exchange_when_unknown_present(tmp_path, events) ->
                 reconciled=True,
             )
             logical_unknown = False
+            continue
+
+        if event == "reconcile_fail":
+            exchange.get_open_orders = lambda _pair_symbol: (_ for _ in ()).throw(ExchangeError("status=429"))
+            service.refresh_order_lifecycle(["BTC_TRY"])
+            continue
+
+        if event == "reconcile_ok":
+            exchange.get_open_orders = lambda _pair_symbol: OpenOrders(bids=[], asks=[])
+            service.refresh_order_lifecycle(["BTC_TRY"])
+            logical_unknown = bool(service.state_store.list_unknown_orders())
             continue
 
         before = exchange.place_calls

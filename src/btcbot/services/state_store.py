@@ -116,6 +116,14 @@ class ReservationResult:
     next_recovery_at_epoch: int | None
 
 
+
+
+def _serialize_decimal_for_db(value: Decimal, *, field_name: str) -> str:
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
+    return format(value, "f")
+
+
 class StateStore:
     """SQLite-backed state with per-process instance registration and optional strict conflict fail-fast."""
 
@@ -2014,8 +2022,8 @@ class StateStore:
                 normalize_symbol(order.symbol),
                 order.client_order_id,
                 order.side.value,
-                str(Decimal(str(order.price))),
-                str(Decimal(str(order.quantity))),
+                _serialize_decimal_for_db(order.price, field_name="order.price"),
+                _serialize_decimal_for_db(order.quantity, field_name="order.quantity"),
                 order.status.value,
                 order.created_at.isoformat(),
                 order.updated_at.isoformat(),
@@ -2076,8 +2084,8 @@ class StateStore:
                         order.order_id,
                         normalize_symbol(order.symbol),
                         order.side.value,
-                        str(Decimal(str(order.price))),
-                        str(Decimal(str(order.quantity))),
+                        _serialize_decimal_for_db(order.price, field_name="order.price"),
+                        _serialize_decimal_for_db(order.quantity, field_name="order.quantity"),
                         order.status.value,
                         order.updated_at.isoformat(),
                         now_ms,

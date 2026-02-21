@@ -1204,17 +1204,23 @@ class ExecutionService:
                     side=intent.side,
                     normalized_price=price,
                     normalized_quantity=quantity,
-                    order_client_id=client_order_id: self.exchange.place_limit_order(
+                    order_client_id=client_order_id,
+                    intent_cycle_id=intent.cycle_id,
+                    current_intent_id=(raw_intent.intent_id if raw_intent else None): self._submit_limit_order(
                         symbol=symbol,
                         side=side,
-                        price=float(normalized_price),
-                        quantity=float(normalized_quantity),
+                        price=normalized_price,
+                        quantity=normalized_quantity,
                         client_order_id=order_client_id,
+                        cycle_id=intent_cycle_id,
+                        intent_id=current_intent_id,
                     ),
                     max_attempts=self.submit_retry_max_attempts,
                     operation="submit",
                 )
             except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, SubmitBlockedDueToUnknownError):
+                    raise
                 orders_failed_exchange += 1
                 if isinstance(exc, NonRetryableSubmitError):
                     exc = exc.original
@@ -1264,8 +1270,8 @@ class ExecutionService:
                             client_order_id=None,
                             symbol=symbol_normalized,
                             side=intent.side,
-                            price=float(price),
-                            quantity=float(quantity),
+                            price=price,
+                            quantity=quantity,
                             status=OrderStatus.REJECTED,
                             created_at=datetime.now(UTC),
                             updated_at=datetime.now(UTC),
@@ -1333,8 +1339,8 @@ class ExecutionService:
                             client_order_id=client_order_id,
                             symbol=symbol_normalized,
                             side=intent.side,
-                            price=float(price),
-                            quantity=float(quantity),
+                            price=price,
+                            quantity=quantity,
                             status=OrderStatus.UNKNOWN,
                             created_at=now_utc,
                             updated_at=now_utc,
@@ -1356,8 +1362,8 @@ class ExecutionService:
                     client_order_id=client_order_id,
                     symbol=symbol_normalized,
                     side=intent.side,
-                    price=float(price),
-                    quantity=float(quantity),
+                    price=price,
+                    quantity=quantity,
                     status=OrderStatus.NEW,
                     created_at=datetime.now(UTC),
                     updated_at=datetime.now(UTC),
@@ -1426,6 +1432,54 @@ class ExecutionService:
             "attempted_exchange_calls": attempted_exchange_calls,
         }
         return placed
+
+    def _submit_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        price: Decimal,
+        quantity: Decimal,
+        client_order_id: str,
+        cycle_id: str,
+        intent_id: str | None,
+    ) -> Order:
+        self._sync_unknown_registry_from_store(allow_clear=True)
+        self._emit_unknown_freeze_metrics()
+        get_instrumentation().counter("submit_gate_enforced_total", 1)
+
+        if self.unknown_order_registry.has_unknown():
+            self._emit_unknown_freeze_metrics(submit_blocked=True)
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "execution",
+                    "reason_code": str(ReasonCode.RISK_BLOCK_UNKNOWN),
+                    "action": "REJECT",
+                    "scope": "per_intent",
+                    "intent_id": intent_id,
+                    "symbol": symbol,
+                    "side": side.value,
+                },
+            )
+            logger.warning(
+                "submit_blocked_due_to_unknown_order",
+                extra={
+                    "extra": {
+                        "unknown_orders": [record.order_id for record in self.unknown_order_registry.snapshot()],
+                    }
+                },
+            )
+            raise SubmitBlockedDueToUnknownError("submit blocked while unknown orders exist")
+
+        return self.exchange.place_limit_order(
+            symbol=symbol,
+            side=side,
+            price=price,
+            quantity=quantity,
+            client_order_id=client_order_id,
+        )
 
     def _recover_stale_pending_place_order(
         self,
