@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+import pytest
+
 import btcbot.services.execution_service as execution_service_module
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.models import (
@@ -384,7 +386,8 @@ def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_s
         unknown_reprobe_escalation_attempts=5,
     )
 
-    assert restarted.execute_intents([intent]) == 0
+    with pytest.raises(SubmitBlockedDueToUnknownError):
+        restarted.execute_intents([intent])
     assert exchange.place_calls == 1
 
     restarted.refresh_order_lifecycle(["BTC_TRY"])
