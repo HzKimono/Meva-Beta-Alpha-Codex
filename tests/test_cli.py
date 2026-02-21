@@ -7,6 +7,8 @@ import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from btcbot import cli
 from btcbot.adapters.action_to_order import build_exchange_rules
 from btcbot.adapters.btcturk_http import (
@@ -1768,9 +1770,11 @@ def test_run_cycle_uses_single_cash_snapshot_for_risk_and_summary(monkeypatch, c
                 )
             ]
 
+    startup_recovery_calls: list[dict[str, object]] = []
+
     class FakeStartupRecoveryService:
         def run(self, **kwargs):
-            del kwargs
+            startup_recovery_calls.append(dict(kwargs))
 
             class Result:
                 observe_only_required = False
@@ -1812,6 +1816,8 @@ def test_run_cycle_uses_single_cash_snapshot_for_risk_and_summary(monkeypatch, c
     )
 
     assert cli.run_cycle(settings, force_dry_run=True) == 0
+    assert startup_recovery_calls
+    assert startup_recovery_calls[-1].get("do_refresh_lifecycle") is False
 
     decision_payloads = [
         json.loads(JsonFormatter().format(record))
@@ -2085,6 +2091,7 @@ def test_run_cycle_heartbeats_state_store_once_per_cycle(monkeypatch) -> None:
 
 def test_run_cycle_calls_refresh_order_lifecycle_once_with_union_symbols(monkeypatch) -> None:
     refresh_calls: list[list[str]] = []
+    startup_recovery_calls: list[dict[str, object]] = []
 
     class FakeExchange:
         def close(self) -> None:
@@ -2168,6 +2175,17 @@ def test_run_cycle_calls_refresh_order_lifecycle_once_with_union_symbols(monkeyp
             del kwargs
             return []
 
+    class FakeStartupRecoveryService:
+        def run(self, **kwargs):
+            startup_recovery_calls.append(dict(kwargs))
+
+            class Result:
+                observe_only_required = False
+                invariant_errors: list[str] = []
+                observe_only_reason: str | None = None
+
+            return Result()
+
     class FakeExecutionService:
         def __init__(self, **kwargs) -> None:
             del kwargs
@@ -2194,11 +2212,14 @@ def test_run_cycle_calls_refresh_order_lifecycle_once_with_union_symbols(monkeyp
     monkeypatch.setattr(cli, "RiskService", FakeRiskService)
     monkeypatch.setattr(cli, "SweepService", FakeSweepService)
     monkeypatch.setattr(cli, "ExecutionService", FakeExecutionService)
+    monkeypatch.setattr(cli, "StartupRecoveryService", FakeStartupRecoveryService)
 
     settings = Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="BTC_TRY")
     assert cli.run_cycle(settings, force_dry_run=True) == 0
     assert len(refresh_calls) == 1
     assert set(refresh_calls[0]) == {"BTCTRY", "ETHTRY"}
+    assert startup_recovery_calls
+    assert startup_recovery_calls[-1].get("do_refresh_lifecycle") is False
 
 
 def test_run_cycle_degrades_to_observe_only_on_429_backoff(monkeypatch, caplog) -> None:
@@ -2434,3 +2455,14 @@ def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_conte
     assert "RISK_BLOCK_MAX_OPEN_ORDERS" in payload["top_reject_reasons"]
     assert payload["open_orders_count_origin"] == "reconciled"
     assert payload["open_order_identifiers"] == ["cid-1", "cid-2"]
+
+
+def test_help_text_env_file_reflects_opt_in_dotenv(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["btcbot", "--help"])
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    output = capsys.readouterr().out
+    assert "Default is no dotenv load" in output
+    assert "SETTINGS_ENV_FILE" in output

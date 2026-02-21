@@ -103,7 +103,7 @@ def main() -> int:
         default=None,
         help=(
             "Optional dotenv path for settings bootstrap (e.g. .env.live). "
-            "By default Settings uses .env.live when present."
+            "Default is no dotenv load; you can also set SETTINGS_ENV_FILE."
         ),
     )
 
@@ -1317,22 +1317,14 @@ def run_cycle(
                     if price > 0
                 }
 
-                class _StartupRecoveryExecutionView:
-                    def __init__(self, wrapped):
-                        self._wrapped = wrapped
-
-                    def __getattr__(self, name):
-                        if name == "refresh_order_lifecycle":
-                            return None
-                        return getattr(self._wrapped, name)
-
                 recovery = StartupRecoveryService().run(
                     cycle_id=cycle_id,
                     symbols=settings.symbols,
-                    execution_service=_StartupRecoveryExecutionView(execution_service),
+                    execution_service=execution_service,
                     accounting_service=accounting_service,
                     portfolio_service=portfolio_service,
                     mark_prices=startup_mark_prices,
+                    do_refresh_lifecycle=False,
                 )
                 if recovery.observe_only_required:
                     logger.error(
@@ -1419,6 +1411,9 @@ def run_cycle(
                 scoped_symbols = sorted(symbol for symbol in scoped_symbols if symbol)
                 if callable(refresh_order_lifecycle) and scoped_symbols:
                     lifecycle_summary = refresh_order_lifecycle(scoped_symbols)
+                    mark_lifecycle_refreshed = getattr(execution_service, "mark_lifecycle_refreshed", None)
+                    if callable(mark_lifecycle_refreshed):
+                        mark_lifecycle_refreshed(cycle_id=cycle_id)
 
                 backoff_count = int(lifecycle_summary.get("backoff_429_count", 0) or 0)
                 breaker_open = bool(lifecycle_summary.get("error_code") == "EXCHANGE_429_BACKOFF")
@@ -1479,6 +1474,14 @@ def run_cycle(
                 )
                 suppressed_dry_run = len(approved_intents) if dry_run else 0
                 rejected_by_risk = max(0, len(raw_intents) - len(approved_intents))
+                execution_summary = dict(getattr(execution_service, "last_execute_summary", {}) or {})
+                rejected_local = int(execution_summary.get("rejected_intents", 0))
+                rejected_precheck = int(execution_summary.get("intents_rejected_precheck", 0))
+                failed_exchange = int(execution_summary.get("orders_failed_exchange", 0))
+                attempted_exchange_calls = int(execution_summary.get("attempted_exchange_calls", 0))
+                if failed_exchange > attempted_exchange_calls:
+                    failed_exchange = attempted_exchange_calls
+                rejected_total = rejected_by_risk + rejected_local
                 blocked_events = list(getattr(getattr(risk_service, "risk_policy", None), "last_blocked_events", []))
                 reject_counts: dict[str, int] = {}
                 for event in blocked_events:
@@ -1514,15 +1517,11 @@ def run_cycle(
                             "orders_blocked_by_gate": blocked_by_gate,
                             "orders_suppressed_dry_run": suppressed_dry_run,
                             "orders_simulated": suppressed_dry_run,
-                            "rejected_intents": rejected_by_risk,
+                            "rejected_intents": rejected_total,
+                            "intents_rejected_precheck": rejected_precheck,
                             "top_reject_reasons": top_reject_reasons,
-                            "orders_failed_exchange": max(
-                                0,
-                                len(approved_intents)
-                                - placed
-                                - blocked_by_gate
-                                - suppressed_dry_run,
-                            ),
+                            "orders_failed_exchange": failed_exchange,
+                            "attempted_exchange_calls": attempted_exchange_calls,
                             "fills_inserted": fills_inserted,
                             "positions": len(accounting_service.get_positions()),
                             "dry_run": dry_run,
