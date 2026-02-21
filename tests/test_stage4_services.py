@@ -446,6 +446,33 @@ def test_reconcile_enrichment_and_missing_client_id() -> None:
     assert len(result.external_missing_client_id) == 1
 
 
+def test_reconcile_fail_closed_does_not_clear_unknown_for_failed_symbol(store: StateStore) -> None:
+    store.record_stage4_order_error(
+        client_order_id="cid-unknown-btc",
+        reason="submit_uncertain_outcome",
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="unknown",
+    )
+
+    db_open_orders = store.list_stage4_open_orders(include_unknown=True)
+    reconcile_result = ReconcileService().resolve(
+        exchange_open_orders=[],
+        db_open_orders=db_open_orders,
+        failed_symbols={"BTCTRY"},
+    )
+
+    for client_order_id in reconcile_result.mark_unknown_closed:
+        store.mark_stage4_unknown_closed(client_order_id)
+
+    assert reconcile_result.mark_unknown_closed == []
+    assert store.stage4_has_unknown_orders()
+    assert store.get_stage4_order_by_client_id("cid-unknown-btc").status == "unknown"
+
+
 def test_accounting_fetch_new_fills_initializes_since_ms_with_lookback_when_cursor_missing(
     store: StateStore,
 ) -> None:
@@ -967,3 +994,73 @@ def test_replace_submit_without_old_order_lookup_uses_new_notional_and_global_ex
             reason="replace_worst_case_exposure_blocked",
         )
     ]
+
+
+def test_stage4_uncertain_submit_records_unknown_and_freezes_submits(store: StateStore) -> None:
+    class UncertainExchange(FakeExchangeStage4):
+        def submit_limit_order(self, symbol: str, side: str, price: Decimal, qty: Decimal, client_order_id: str):
+            raise TimeoutError("submit-uncertain")
+
+    exchange = UncertainExchange()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            SAFE_MODE=False,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+
+    submit_1 = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="uncertain",
+        client_order_id="cid-uncertain-1",
+    )
+    submit_2 = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="blocked",
+        client_order_id="cid-uncertain-2",
+    )
+
+    report1 = svc.execute_with_report([submit_1])
+    report2 = svc.execute_with_report([submit_2])
+
+    assert report1.executed_total == 0
+    assert report2.executed_total == 0
+    assert store.stage4_has_unknown_orders()
+    assert store.get_stage4_order_by_client_id("cid-uncertain-1").status == "unknown"
+
+    store.record_stage4_order_submitted(
+        symbol="BTC_TRY",
+        client_order_id="cid-open-cancel-ok",
+        exchange_order_id="ex-open-cancel-ok",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+    )
+    cancel = LifecycleAction(
+        action_type=LifecycleActionType.CANCEL,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="cancel",
+        client_order_id="cid-open-cancel-ok",
+    )
+    cancel_report = svc.execute_with_report([cancel])
+    assert cancel_report.canceled == 1
