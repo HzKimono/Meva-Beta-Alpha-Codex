@@ -1055,7 +1055,19 @@ def test_state_store_new_after_grace_not_blocking(tmp_path) -> None:
 def test_refresh_order_lifecycle_missing_transitions(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     now = datetime.now(UTC)
-    store.save_order(Order(order_id="o-new", client_order_id="cid-new", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.NEW, created_at=now - timedelta(seconds=120), updated_at=now - timedelta(seconds=120)))
+    store.save_order(
+        Order(
+            order_id="o-new",
+            client_order_id="cid-new",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=100.0,
+            quantity=0.1,
+            status=OrderStatus.NEW,
+            created_at=now - timedelta(seconds=120),
+            updated_at=now - timedelta(seconds=120),
+        )
+    )
     store.save_order(Order(order_id="o-open", client_order_id="cid-open", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.OPEN, created_at=now, updated_at=now))
     store.save_order(Order(order_id="o-unk", client_order_id="cid-unk", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.UNKNOWN, created_at=now, updated_at=now))
 
