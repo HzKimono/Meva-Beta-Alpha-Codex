@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -18,6 +19,7 @@ from btcbot.domain.ledger import (
 )
 from btcbot.domain.models import normalize_symbol
 from btcbot.domain.stage4 import Fill, LifecycleAction, LifecycleActionType
+from btcbot.ports_price_conversion import FeeConversionRateError, PriceConverter
 from btcbot.services.state_store import StateStore
 
 
@@ -43,6 +45,8 @@ class PnlReport:
     fees_total_by_currency: dict[str, Decimal]
     per_symbol: list[SymbolPnlBreakdown]
     equity_estimate: Decimal
+    fees_total_try: Decimal | None = None
+    fee_conversion_missing_currencies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,8 @@ class LedgerService:
         slippage_bps: Decimal,
         fees_bps: Decimal,
         ts: datetime,
+        fee_currency: str = "TRY",
+        fee_currency_to_try_rate: Decimal | None = None,
     ) -> list[SimulatedFill]:
         simulated: list[SimulatedFill] = []
         for idx, action in enumerate(actions):
@@ -159,6 +165,10 @@ class LedgerService:
             applied = baseline * slip_mult
             notional = applied * action.qty
             fee_try = notional * (fees_bps / Decimal("10000"))
+            fee_ccy = fee_currency.upper()
+            fee_amount = fee_try
+            if fee_ccy != "TRY" and fee_currency_to_try_rate is not None and fee_currency_to_try_rate > 0:
+                fee_amount = fee_try / fee_currency_to_try_rate
             id_component = action.client_order_id or action.exchange_order_id or str(idx)
             fill_id = f"s7:{cycle_id}:{id_component}"
             fill_event = LedgerEvent(
@@ -184,8 +194,8 @@ class LedgerService:
                 side=None,
                 qty=Decimal("0"),
                 price=None,
-                fee=fee_try,
-                fee_currency="TRY",
+                fee=fee_amount,
+                fee_currency=fee_ccy,
                 exchange_trade_id=f"fee:{fill_id}",
                 exchange_order_id=action.exchange_order_id,
                 client_order_id=action.client_order_id,
@@ -227,7 +237,7 @@ class LedgerService:
         *,
         mark_prices: dict[str, Decimal],
         cash_try: Decimal,
-        price_for_fee_conversion: callable | None = None,
+        price_for_fee_conversion: PriceConverter | None = None,
         slippage_try: Decimal = Decimal("0"),
     ) -> FinancialBreakdown:
         events = self.state_store.load_ledger_events()
@@ -238,13 +248,10 @@ class LedgerService:
         }
         unrealized = compute_unrealized_pnl(state, normalized_marks)
 
-        fees_try = Decimal("0")
-        for ccy, amount in state.fees_by_currency.items():
-            if ccy.upper() == "TRY":
-                fees_try += amount
-            elif price_for_fee_conversion is not None:
-                converted = price_for_fee_conversion(ccy.upper(), "TRY")
-                fees_try += amount * Decimal(str(converted))
+        fees_try, _ = self._compute_fees_try(
+            fees_by_currency=state.fees_by_currency,
+            price_for_fee_conversion=price_for_fee_conversion,
+        )
 
         turnover = Decimal("0")
         for event in events:
@@ -274,7 +281,7 @@ class LedgerService:
         *,
         mark_prices: dict[str, Decimal],
         cash_try: Decimal,
-        price_for_fee_conversion: callable | None = None,
+        price_for_fee_conversion: PriceConverter | None = None,
         slippage_try: Decimal = Decimal("0"),
         ts: datetime | None = None,
     ) -> LedgerSnapshot:
@@ -317,6 +324,7 @@ class LedgerService:
         self,
         mark_prices: dict[str, Decimal],
         cash_try: Decimal = Decimal("0"),
+        price_for_fee_conversion: PriceConverter | None = None,
     ) -> PnlReport:
         events = self.state_store.load_ledger_events()
         state = apply_events(LedgerState(), events)
@@ -324,7 +332,15 @@ class LedgerService:
         normalized_marks = {
             normalize_symbol(symbol): value for symbol, value in mark_prices.items()
         }
-        breakdown = self.financial_breakdown(mark_prices=mark_prices, cash_try=cash_try)
+        breakdown = self.financial_breakdown(
+            mark_prices=mark_prices,
+            cash_try=cash_try,
+            price_for_fee_conversion=price_for_fee_conversion,
+        )
+        fees_total_try, missing_currencies = self._compute_fees_try(
+            fees_by_currency=state.fees_by_currency,
+            price_for_fee_conversion=price_for_fee_conversion,
+        )
         realized = breakdown.realized_pnl_try
         unrealized = breakdown.unrealized_pnl_try
 
@@ -352,7 +368,33 @@ class LedgerService:
             fees_total_by_currency=dict(state.fees_by_currency),
             per_symbol=per_symbol,
             equity_estimate=breakdown.equity_try,
+            fees_total_try=fees_total_try,
+            fee_conversion_missing_currencies=tuple(sorted(missing_currencies)),
         )
+
+    def _compute_fees_try(
+        self,
+        *,
+        fees_by_currency: dict[str, Decimal],
+        price_for_fee_conversion: Callable[[str, str], Decimal] | None,
+    ) -> tuple[Decimal, set[str]]:
+        fees_try = Decimal("0")
+        missing_rates: set[str] = set()
+        for ccy, amount in fees_by_currency.items():
+            normalized = ccy.upper()
+            if normalized == "TRY":
+                fees_try += amount
+                continue
+            if price_for_fee_conversion is None:
+                missing_rates.add(normalized)
+                continue
+            try:
+                converted = price_for_fee_conversion(normalized, "TRY")
+            except FeeConversionRateError:
+                missing_rates.add(normalized)
+                continue
+            fees_try += amount * Decimal(str(converted))
+        return fees_try, missing_rates
 
     def checkpoint(self) -> LedgerCheckpoint:
         events = self.state_store.load_ledger_events()

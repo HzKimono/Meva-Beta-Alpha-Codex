@@ -41,6 +41,7 @@ from btcbot.services.ledger_service import LedgerService
 from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
+from btcbot.services.price_conversion_service import MarkPriceConverter
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_budget_service import CapitalPolicyError, RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
@@ -63,6 +64,7 @@ class MarketSnapshot:
     anomalies: set[str]
     spreads_bps: dict[str, Decimal]
     age_seconds_by_symbol: dict[str, Decimal]
+    fetched_at_by_symbol: dict[str, datetime | None]
     max_data_age_seconds: Decimal
 
 
@@ -176,7 +178,24 @@ class Stage4CycleRunner:
                 cycle_now=cycle_now,
             )
             mark_prices = market_snapshot.mark_prices
-            mark_price_errors = market_snapshot.anomalies
+            stale_symbols = {
+                symbol
+                for symbol, age in market_snapshot.age_seconds_by_symbol.items()
+                if age > Decimal(str(settings.stale_market_data_seconds))
+            }
+            if stale_symbols:
+                logger.warning(
+                    "stale_market_data_age_exceeded",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "symbols": sorted(stale_symbols),
+                            "max_age_seconds": str(market_snapshot.max_data_age_seconds),
+                            "threshold_seconds": str(settings.stale_market_data_seconds),
+                        }
+                    },
+                )
+            mark_price_errors = market_snapshot.anomalies | stale_symbols
             snapshot_service = AccountSnapshotService(exchange=exchange)
             account_snapshot = snapshot_service.build_snapshot(
                 symbols=active_symbols,
@@ -328,7 +347,12 @@ class Stage4CycleRunner:
                     },
                 )
 
-            pnl_report = ledger_service.report(mark_prices=mark_prices, cash_try=try_cash)
+            fee_converter = MarkPriceConverter(mark_prices)
+            pnl_report = ledger_service.report(
+                mark_prices=mark_prices,
+                cash_try=try_cash,
+                price_for_fee_conversion=fee_converter,
+            )
             ledger_checkpoint = ledger_service.checkpoint()
             try:
                 risk_budget_service.apply_self_financing_checkpoint(
@@ -1080,6 +1104,7 @@ class Stage4CycleRunner:
         spreads_bps: dict[str, Decimal] = {}
         fetch_ages: list[Decimal] = []
         age_by_symbol: dict[str, Decimal] = {}
+        fetched_at_by_symbol: dict[str, datetime | None] = {}
         anomalies: set[str] = set()
         if not callable(get_orderbook):
             return MarketSnapshot(
@@ -1088,18 +1113,27 @@ class Stage4CycleRunner:
                 anomalies=set(symbols),
                 spreads_bps=spreads_bps,
                 age_seconds_by_symbol={self.norm(symbol): Decimal("999999") for symbol in symbols},
+                fetched_at_by_symbol={self.norm(symbol): None for symbol in symbols},
                 max_data_age_seconds=Decimal("999999"),
             )
 
+        get_orderbook_with_ts = getattr(base, "get_orderbook_with_timestamp", None)
         for symbol in symbols:
             normalized = self.norm(symbol)
-            fetched_at = cycle_now
+            observed_at: datetime | None = None
             try:
-                bid_raw, ask_raw = get_orderbook(symbol)
+                if callable(get_orderbook_with_ts):
+                    bid_raw, ask_raw, observed_raw = get_orderbook_with_ts(symbol)
+                    if isinstance(observed_raw, datetime):
+                        observed_at = observed_raw.astimezone(UTC)
+                else:
+                    bid_raw, ask_raw = get_orderbook(symbol)
+                    observed_at = datetime.now(UTC)
             except Exception:  # noqa: BLE001
                 anomalies.add(normalized)
                 fetch_ages.append(Decimal("999999"))
                 age_by_symbol[normalized] = Decimal("999999")
+                fetched_at_by_symbol[normalized] = None
                 continue
             bid = self._safe_decimal(bid_raw)
             ask = self._safe_decimal(ask_raw)
@@ -1127,9 +1161,18 @@ class Stage4CycleRunner:
                 age_by_symbol[normalized] = Decimal("999999")
                 continue
             mark_prices[normalized] = mark
-            age_seconds = Decimal(str(max(0.0, (cycle_now - fetched_at).total_seconds())))
+            if observed_at is None:
+                logger.warning(
+                    "stale_market_data_timestamp_missing",
+                    extra={"extra": {"symbol": normalized}},
+                )
+                anomalies.add(normalized)
+                age_seconds = Decimal("999999")
+            else:
+                age_seconds = Decimal(str(max(0.0, (cycle_now - observed_at).total_seconds())))
             fetch_ages.append(age_seconds)
             age_by_symbol[normalized] = age_seconds
+            fetched_at_by_symbol[normalized] = observed_at
 
         if not fetch_ages:
             max_age = Decimal("999999")
@@ -1141,6 +1184,7 @@ class Stage4CycleRunner:
             anomalies=anomalies,
             spreads_bps=spreads_bps,
             age_seconds_by_symbol=age_by_symbol,
+            fetched_at_by_symbol=fetched_at_by_symbol,
             max_data_age_seconds=max_age,
         )
 
