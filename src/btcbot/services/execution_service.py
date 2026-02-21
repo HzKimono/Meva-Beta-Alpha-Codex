@@ -987,6 +987,28 @@ class ExecutionService:
                 )
             return 0
 
+        if self.unknown_order_registry.has_unknown():
+            for intent, raw_intent in normalized_intents:
+                self._emit_unknown_freeze_metrics(submit_blocked=True)
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": intent.cycle_id,
+                        "decision_layer": "execution",
+                        "reason_code": str(ReasonCode.RISK_BLOCK_UNKNOWN),
+                        "action": "REJECT",
+                        "scope": "per_intent",
+                        "intent_id": (raw_intent.intent_id if raw_intent else None),
+                        "symbol": intent.symbol,
+                        "side": intent.side.value,
+                    },
+                )
+            logger.warning(
+                "submit_blocked_due_to_unknown_order",
+                extra={"extra": {"unknown_orders": [record.order_id for record in self.unknown_order_registry.snapshot()]}},
+            )
+            raise SubmitBlockedDueToUnknownError("submit blocked while unknown orders exist")
+
         cycle_balances: dict[str, Decimal] | None = None
         if not self.dry_run:
             cycle_balances = self._get_cycle_balances(cycle_id=execution_cycle_id)
