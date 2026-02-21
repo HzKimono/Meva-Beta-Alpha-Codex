@@ -943,7 +943,7 @@ class ExecutionService:
             "intents_rejected_precheck": 0,
             "attempted_exchange_calls": 0,
         }
-        self._sync_unknown_registry_from_store(allow_clear=True)
+        self._sync_unknown_registry_from_store(allow_clear=False)
         self._emit_unknown_freeze_metrics()
 
         if self.safe_mode:

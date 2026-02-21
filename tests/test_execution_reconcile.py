@@ -847,9 +847,22 @@ def test_submit_gate_enforced_metric_emitted_on_block_and_allow(tmp_path, monkey
         status=OrderStatus.FILLED,
         reconciled=True,
     )
-    service.execute_intents([OrderIntent(symbol="BTC_TRY", side=OrderSide.BUY, price=Decimal("101"), quantity=Decimal("0.2"), notional=Decimal("20.2"), cycle_id="metric-allow")])
+    blocked_without_reconcile = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=Decimal("101"),
+        quantity=Decimal("0.2"),
+        notional=Decimal("20.2"),
+        cycle_id="metric-allow-blocked-without-reconcile",
+    )
+    service.mark_lifecycle_refreshed(cycle_id=blocked_without_reconcile.cycle_id)
+    with pytest.raises(SubmitBlockedDueToUnknownError):
+        service.execute_intents([blocked_without_reconcile])
 
-    assert fake_metrics.counters.count("submit_gate_enforced_total") >= 2
+    service.refresh_order_lifecycle(["BTC_TRY"])
+    service.execute_intents([OrderIntent(symbol="BTC_TRY", side=OrderSide.BUY, price=Decimal("102"), quantity=Decimal("0.3"), notional=Decimal("30.6"), cycle_id="metric-allow")])
+
+    assert fake_metrics.counters.count("submit_gate_enforced_total") >= 3
 
 
 
@@ -876,3 +889,54 @@ def test_place_hash_is_stable_for_equivalent_quantized_decimals(tmp_path) -> Non
 
     assert service._place_hash(intent_a) == service._place_hash(intent_b)
 
+
+
+def test_db_unknown_to_filled_without_reconcile_does_not_unfreeze(tmp_path) -> None:
+    exchange = LifecycleExchange()
+    service = _service(tmp_path, exchange)
+    now = datetime.now(UTC)
+    service.state_store.save_order(
+        Order(
+            order_id="unknown:no-reconcile",
+            client_order_id="cid-no-reconcile",
+            symbol="BTCTRY",
+            side=OrderSide.BUY,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
+            status=OrderStatus.UNKNOWN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    with pytest.raises(SubmitBlockedDueToUnknownError):
+        service.execute_intents([_intent("db-update-blocked-1")])
+
+    service.state_store.update_order_status(
+        order_id="unknown:no-reconcile",
+        status=OrderStatus.FILLED,
+        reconciled=True,
+    )
+
+    blocked_without_reconcile = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=Decimal("101"),
+        quantity=Decimal("0.2"),
+        notional=Decimal("20.2"),
+        cycle_id="db-update-blocked-2",
+    )
+    service.mark_lifecycle_refreshed(cycle_id=blocked_without_reconcile.cycle_id)
+    with pytest.raises(SubmitBlockedDueToUnknownError):
+        service.execute_intents([blocked_without_reconcile])
+
+    service.refresh_order_lifecycle(["BTC_TRY"])
+    allow_intent = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=Decimal("102"),
+        quantity=Decimal("0.3"),
+        notional=Decimal("30.6"),
+        cycle_id="db-update-allowed-after-reconcile",
+    )
+    assert service.execute_intents([allow_intent]) == 1
