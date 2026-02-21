@@ -2638,6 +2638,17 @@ class StateStore:
             )
         return filtered
 
+    def list_unknown_orders(self) -> list[StoredOrder]:
+        return [
+            order
+            for order in self.find_open_or_unknown_orders(
+                None,
+                include_new_after_grace=True,
+                include_escalated_unknown=True,
+            )
+            if order.status == OrderStatus.UNKNOWN
+        ]
+
     def mark_order_canceled(self, order_id: str) -> None:
         self.update_order_status(order_id=order_id, status=OrderStatus.CANCELED)
 
