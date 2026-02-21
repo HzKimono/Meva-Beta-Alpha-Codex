@@ -19,7 +19,9 @@ class ReconcileService:
         *,
         exchange_open_orders: list[Order],
         db_open_orders: list[Order],
+        failed_symbols: set[str] | None = None,
     ) -> ReconcileResult:
+        blocked_symbols = {symbol.upper() for symbol in (failed_symbols or set())}
         exchange_by_client: dict[str, Order] = {}
         external_missing_client_id: list[Order] = []
         for order in exchange_open_orders:
@@ -37,6 +39,8 @@ class ReconcileService:
         mark_unknown_closed: list[str] = []
         enrich_exchange_ids: list[tuple[str, str]] = []
         for client_order_id, order in db_by_client.items():
+            if str(order.symbol).upper() in blocked_symbols:
+                continue
             exchange_match = exchange_by_client.get(client_order_id)
             if exchange_match is None:
                 mark_unknown_closed.append(client_order_id)

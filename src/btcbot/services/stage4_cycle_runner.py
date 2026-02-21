@@ -242,10 +242,17 @@ class Stage4CycleRunner:
                     )
 
             db_open_orders = state_store.list_stage4_open_orders(include_unknown=True)
-            reconcile_result = reconcile_service.resolve(
-                exchange_open_orders=exchange_open_orders,
-                db_open_orders=db_open_orders,
-            )
+            try:
+                reconcile_result = reconcile_service.resolve(
+                    exchange_open_orders=exchange_open_orders,
+                    db_open_orders=db_open_orders,
+                    failed_symbols=failed_symbols,
+                )
+            except TypeError:
+                reconcile_result = reconcile_service.resolve(
+                    exchange_open_orders=exchange_open_orders,
+                    db_open_orders=db_open_orders,
+                )
             ledger_service = LedgerService(state_store=state_store, logger=logger)
             for order in reconcile_result.import_external:
                 state_store.import_stage4_external_order(order)

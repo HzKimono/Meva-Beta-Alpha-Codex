@@ -446,6 +446,33 @@ def test_reconcile_enrichment_and_missing_client_id() -> None:
     assert len(result.external_missing_client_id) == 1
 
 
+def test_reconcile_fail_closed_does_not_clear_unknown_for_failed_symbol(store: StateStore) -> None:
+    store.record_stage4_order_error(
+        client_order_id="cid-unknown-btc",
+        reason="submit_uncertain_outcome",
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="unknown",
+    )
+
+    db_open_orders = store.list_stage4_open_orders(include_unknown=True)
+    reconcile_result = ReconcileService().resolve(
+        exchange_open_orders=[],
+        db_open_orders=db_open_orders,
+        failed_symbols={"BTCTRY"},
+    )
+
+    for client_order_id in reconcile_result.mark_unknown_closed:
+        store.mark_stage4_unknown_closed(client_order_id)
+
+    assert reconcile_result.mark_unknown_closed == []
+    assert store.stage4_has_unknown_orders()
+    assert store.get_stage4_order_by_client_id("cid-unknown-btc").status == "unknown"
+
+
 def test_accounting_fetch_new_fills_initializes_since_ms_with_lookback_when_cursor_missing(
     store: StateStore,
 ) -> None:
