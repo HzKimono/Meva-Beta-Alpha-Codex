@@ -864,3 +864,19 @@ def test_dry_run_get_orderbook_with_timestamp_returns_none_when_observed_at_miss
 
     assert (bid, ask) == (Decimal("100"), Decimal("101"))
     assert ts is None
+
+
+def test_get_orderbook_with_timestamp_inflight_wait_timeout_raises_exchange_error() -> None:
+    import threading
+
+    client = BtcturkHttpClient(orderbook_cache_ttl_s=1.0, orderbook_inflight_wait_timeout_s=0.01)
+    key = ("BTCTRY", None)
+    gate = threading.Event()
+    client._orderbook_inflight[key] = gate
+
+    with pytest.raises(ExchangeError, match="Orderbook inflight wait timeout"):
+        client.get_orderbook_with_timestamp("BTC_TRY")
+    gate.set()
+    with client._orderbook_lock:
+        client._orderbook_inflight.pop(key, None)
+    client.close()

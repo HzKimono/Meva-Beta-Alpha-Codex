@@ -432,3 +432,31 @@ def test_apply_agent_policy_scales_guardrails_with_budget_multiplier(monkeypatch
 
     assert captured["max_exposure_try"] == Decimal("250")
     assert captured["max_order_notional_try"] == Decimal("125")
+
+
+def test_risk_budget_live_missing_mark_price_fail_closed(tmp_path) -> None:
+    db = StateStore(str(tmp_path / "risk_missing_mark.sqlite"))
+    fixed_now = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
+    service = RiskBudgetService(db, now_provider=lambda: fixed_now)
+
+    pnl_report = PnlReport(
+        realized_pnl_total=Decimal("0"),
+        unrealized_pnl_total=Decimal("0"),
+        fees_total_by_currency={"TRY": Decimal("0")},
+        per_symbol=[],
+        equity_estimate=Decimal("1000"),
+    )
+
+    decision, *_ = service.compute_decision(
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={"BTCTRY": Decimal("100")},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=False,
+        live_mode=True,
+        tradable_symbols=["BTCTRY", "ETHTRY"],
+    )
+
+    assert decision.mode == Mode.OBSERVE_ONLY
+    assert decision.risk_decision.reasons == ["mark_price_missing_fail_closed"]

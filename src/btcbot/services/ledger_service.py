@@ -88,6 +88,10 @@ class LedgerService:
     def __init__(self, state_store: StateStore, logger: logging.Logger) -> None:
         self.state_store = state_store
         self.logger = logger
+        self._cached_state: LedgerState | None = None
+        self._cached_event_count = 0
+        self._cached_last_event_id: str | None = None
+        self.last_reduce_delta_events = 0
 
     def ingest_exchange_updates(self, fills: list[Fill]) -> LedgerIngestResult:
         events: list[LedgerEvent] = []
@@ -240,8 +244,7 @@ class LedgerService:
         price_for_fee_conversion: PriceConverter | None = None,
         slippage_try: Decimal = Decimal("0"),
     ) -> FinancialBreakdown:
-        events = self.state_store.load_ledger_events()
-        state = apply_events(LedgerState(), events)
+        events, state = self._load_state_incremental()
         realized = compute_realized_pnl(state)
         normalized_marks = {
             normalize_symbol(symbol): value for symbol, value in mark_prices.items()
@@ -326,23 +329,19 @@ class LedgerService:
         cash_try: Decimal = Decimal("0"),
         price_for_fee_conversion: PriceConverter | None = None,
     ) -> PnlReport:
-        events = self.state_store.load_ledger_events()
-        state = apply_events(LedgerState(), events)
+        events, state = self._load_state_incremental()
 
         normalized_marks = {
             normalize_symbol(symbol): value for symbol, value in mark_prices.items()
         }
-        breakdown = self.financial_breakdown(
-            mark_prices=mark_prices,
-            cash_try=cash_try,
-            price_for_fee_conversion=price_for_fee_conversion,
-        )
+        realized = compute_realized_pnl(state)
+        unrealized = compute_unrealized_pnl(state, normalized_marks)
         fees_total_try, missing_currencies = self._compute_fees_try(
             fees_by_currency=state.fees_by_currency,
             price_for_fee_conversion=price_for_fee_conversion,
         )
-        realized = breakdown.realized_pnl_try
-        unrealized = breakdown.unrealized_pnl_try
+        mtm = self._position_mtm(state, normalized_marks)
+        equity_estimate = cash_try + mtm
 
         per_symbol: list[SymbolPnlBreakdown] = []
         for symbol, ledger in sorted(state.symbols.items()):
@@ -367,10 +366,11 @@ class LedgerService:
             unrealized_pnl_total=unrealized,
             fees_total_by_currency=dict(state.fees_by_currency),
             per_symbol=per_symbol,
-            equity_estimate=breakdown.equity_try,
+            equity_estimate=equity_estimate,
             fees_total_try=fees_total_try,
             fee_conversion_missing_currencies=tuple(sorted(missing_currencies)),
         )
+
 
     def _compute_fees_try(
         self,
@@ -396,8 +396,42 @@ class LedgerService:
             fees_try += amount * Decimal(str(converted))
         return fees_try, missing_rates
 
-    def checkpoint(self) -> LedgerCheckpoint:
+    def _load_state_incremental(self) -> tuple[list[LedgerEvent], LedgerState]:
         events = self.state_store.load_ledger_events()
+        if not events:
+            self._cached_state = LedgerState()
+            self._cached_event_count = 0
+            self._cached_last_event_id = None
+            self.last_reduce_delta_events = 0
+            return events, LedgerState()
+
+        if (
+            self._cached_state is None
+            or self._cached_event_count > len(events)
+            or (
+                self._cached_event_count > 0
+                and self._cached_event_count <= len(events)
+                and self._cached_last_event_id
+                != events[self._cached_event_count - 1].event_id
+            )
+        ):
+            state = apply_events(LedgerState(), events)
+            self.last_reduce_delta_events = len(events)
+        else:
+            delta = events[self._cached_event_count :]
+            if delta:
+                state = apply_events(self._cached_state, delta)
+            else:
+                state = self._cached_state
+            self.last_reduce_delta_events = len(delta)
+
+        self._cached_state = state
+        self._cached_event_count = len(events)
+        self._cached_last_event_id = events[-1].event_id
+        return events, state
+
+    def checkpoint(self) -> LedgerCheckpoint:
+        events, _ = self._load_state_incremental()
         if not events:
             return LedgerCheckpoint(event_count=0, last_ts=None, last_event_id=None)
         last = events[-1]

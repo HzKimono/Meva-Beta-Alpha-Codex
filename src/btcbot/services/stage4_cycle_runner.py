@@ -151,6 +151,9 @@ class Stage4CycleRunner:
                 fee_bps_taker=settings.fee_bps_taker,
                 slippage_bps_buffer=settings.slippage_bps_buffer,
                 min_profit_bps=Decimal(str(settings.min_profit_bps)),
+                replace_inflight_budget_per_symbol_try=Decimal(
+                    str(settings.replace_inflight_budget_per_symbol_try)
+                ),
             )
             risk_budget_service = RiskBudgetService(state_store=state_store)
             execution_service = ExecutionService(
@@ -401,6 +404,8 @@ class Stage4CycleRunner:
                     mark_prices=mark_prices,
                     realized_today_try=snapshot.realized_today_try,
                     kill_switch_active=settings.kill_switch,
+                    live_mode=live_mode,
+                    tradable_symbols=active_symbols,
                 )
             )
             budget_notional_multiplier = getattr(

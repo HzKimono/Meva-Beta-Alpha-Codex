@@ -178,6 +178,8 @@ class BtcturkHttpClient(ExchangeClient):
         breaker_429_consecutive_threshold: int = _BREAKER_CONSECUTIVE_429_THRESHOLD,
         breaker_cooldown_seconds: float = _BREAKER_COOLDOWN_SECONDS,
         orderbook_cache_ttl_s: float = 0.2,
+        orderbook_inflight_wait_timeout_s: float = 2.0,
+        live_rules_require_exchangeinfo: bool = True,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -204,6 +206,8 @@ class BtcturkHttpClient(ExchangeClient):
         self._breaker_cooldown_seconds = max(0.0, breaker_cooldown_seconds)
         self._breaker_state: dict[str, _BreakerState] = {}
         self._orderbook_cache_ttl_s = max(0.0, orderbook_cache_ttl_s)
+        self._orderbook_inflight_wait_timeout_s = max(0.1, orderbook_inflight_wait_timeout_s)
+        self._live_rules_require_exchangeinfo = live_rules_require_exchangeinfo
         self._orderbook_cache: dict[tuple[str, int | None], tuple[float, tuple[Decimal, Decimal], datetime]] = {}
         self._orderbook_inflight: dict[tuple[str, int | None], Event] = {}
         self._orderbook_lock = Lock()
@@ -635,7 +639,8 @@ class BtcturkHttpClient(ExchangeClient):
                 get_instrumentation().counter("orderbook_inflight_joins_total", 1, attrs={"pair_symbol": pair_symbol})
 
         if not leader:
-            inflight.wait()
+            if not inflight.wait(timeout=self._orderbook_inflight_wait_timeout_s):
+                raise ExchangeError(f"Orderbook inflight wait timeout for {pair_symbol}")
             with self._orderbook_lock:
                 cached = self._orderbook_cache.get(key)
                 if cached is not None and cached[0] > monotonic():
@@ -689,7 +694,8 @@ class BtcturkHttpClient(ExchangeClient):
                 leader = False
 
         if not leader:
-            inflight.wait()
+            if not inflight.wait(timeout=self._orderbook_inflight_wait_timeout_s):
+                raise ExchangeError(f"Orderbook inflight wait timeout for {pair_symbol}")
             with self._orderbook_lock:
                 cached_after = self._orderbook_cache.get(key)
                 if cached_after is not None and cached_after[0] > monotonic():
@@ -1059,11 +1065,11 @@ class BtcturkHttpClient(ExchangeClient):
         client_order_id: str,
     ) -> OrderAck:
         symbol_normalized = normalize_symbol(symbol)
-        rules = self._resolve_symbol_rules(symbol_normalized)
         if price <= 0:
             raise ValidationError(f"price must be positive; observed={price}")
         if qty <= 0:
             raise ValidationError(f"quantity must be positive; observed={qty}")
+        rules = self._resolve_symbol_rules(symbol_normalized)
         validate_order(price=price, qty=qty, rules=rules)
         quantized_price = quantize_price(price, rules)
         quantized_qty = quantize_quantity(qty, rules)
@@ -1129,6 +1135,8 @@ class BtcturkHttpClient(ExchangeClient):
         for pair in exchange_info:
             if normalize_symbol(pair.pair_symbol) == symbol_normalized:
                 return pair_info_to_symbol_rules(pair)
+        if self._live_rules_require_exchangeinfo:
+            raise ValidationError(f"exchangeinfo_missing_symbol_rules:{symbol_normalized}")
         return pair_info_to_symbol_rules(
             PairInfo(
                 pairSymbol=symbol,

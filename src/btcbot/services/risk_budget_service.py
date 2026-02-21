@@ -215,6 +215,8 @@ class RiskBudgetService:
         mark_prices: dict[str, Decimal],
         realized_today_try: Decimal,
         kill_switch_active: bool,
+        live_mode: bool = False,
+        tradable_symbols: list[str] | None = None,
     ) -> tuple[BudgetDecision, Mode | None, Decimal, Decimal, date]:
         current = self.state_store.get_risk_state_current()
         prev_mode_raw = current.get("current_mode")
@@ -236,6 +238,11 @@ class RiskBudgetService:
             positions, mark_prices, pnl_report.equity_estimate
         )
         fees_today = self._resolve_fees_today(pnl_report)
+
+        missing_marks: list[str] = []
+        if live_mode:
+            candidates = tradable_symbols if tradable_symbols is not None else [position.symbol for position in positions]
+            missing_marks = sorted({symbol for symbol in candidates if symbol not in mark_prices})
 
         signals = RiskSignals(
             equity_try=pnl_report.equity_estimate,
@@ -267,6 +274,20 @@ class RiskBudgetService:
             )
             mode = Mode.OBSERVE_ONLY
             reasons = [FEE_CONVERSION_MISSING_RATE_REASON]
+        if missing_marks:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": f"{today.isoformat()}:compute_decision",
+                    "decision_layer": "risk_budget",
+                    "reason_code": "mark_price_missing_fail_closed",
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {"missing_symbols": ",".join(missing_marks)},
+                },
+            )
+            mode = Mode.OBSERVE_ONLY
+            reasons = ["mark_price_missing_fail_closed"]
         decided_at = self.now_provider()
         if kill_switch_active:
             mode = Mode.OBSERVE_ONLY
