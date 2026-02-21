@@ -1190,21 +1190,24 @@ class BtcturkHttpClient(ExchangeClient):
         if client_order_id is None:
             raise ValueError("client_order_id is required for BTCTurk place_limit_order")
 
-        request = SubmitOrderRequest(
-            pair_symbol=_btcturk_pair_symbol(symbol),
-            side=side,
-            price=price,
-            quantity=quantity,
+        symbol_normalized = normalize_symbol(symbol)
+        price_decimal = Decimal(str(price))
+        quantity_decimal = Decimal(str(quantity))
+
+        ack = self.submit_limit_order(
+            symbol=symbol_normalized,
+            side=side.value,
+            price=price_decimal,
+            qty=quantity_decimal,
             client_order_id=client_order_id,
         )
-        result = self._submit_limit_order_legacy(request)
         return Order(
-            order_id=result.order_id,
+            order_id=ack.exchange_order_id,
             client_order_id=client_order_id,
-            symbol=normalize_symbol(symbol),
+            symbol=symbol_normalized,
             side=side,
-            price=price,
-            quantity=quantity,
+            price=price_decimal,
+            quantity=quantity_decimal,
             status=OrderStatus.OPEN,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),

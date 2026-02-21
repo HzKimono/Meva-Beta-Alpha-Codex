@@ -154,6 +154,7 @@ class Stage4CycleRunner:
                 replace_inflight_budget_per_symbol_try=Decimal(
                     str(settings.replace_inflight_budget_per_symbol_try)
                 ),
+                max_gross_exposure_try=Decimal(str(settings.risk_max_gross_exposure_try)),
             )
             risk_budget_service = RiskBudgetService(state_store=state_store)
             execution_service = ExecutionService(
@@ -601,12 +602,18 @@ class Stage4CycleRunner:
                 for action in lifecycle_plan.actions
                 if self.norm(action.symbol) not in failed_symbols
             ]
+            open_orders_by_client_id = {
+                order.client_order_id: order
+                for order in current_open_orders
+                if order.client_order_id
+            }
             accepted_actions, risk_decisions = risk_policy.filter_actions(
                 safe_actions,
                 open_orders_count=len(current_open_orders),
                 current_position_notional_try=current_position_notional,
                 pnl=snapshot,
                 positions_by_symbol=positions_by_symbol,
+                open_orders_by_client_id=open_orders_by_client_id,
             )
 
             risk_decision = getattr(budget_decision, "risk_decision", budget_decision)

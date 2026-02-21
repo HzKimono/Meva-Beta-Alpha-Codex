@@ -460,3 +460,30 @@ def test_risk_budget_live_missing_mark_price_fail_closed(tmp_path) -> None:
 
     assert decision.mode == Mode.OBSERVE_ONLY
     assert decision.risk_decision.reasons == ["mark_price_missing_fail_closed"]
+
+def test_risk_budget_live_non_positive_mark_price_fail_closed(tmp_path) -> None:
+    db = StateStore(str(tmp_path / "risk_non_positive_mark.sqlite"))
+    fixed_now = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
+    service = RiskBudgetService(db, now_provider=lambda: fixed_now)
+
+    pnl_report = PnlReport(
+        realized_pnl_total=Decimal("0"),
+        unrealized_pnl_total=Decimal("0"),
+        fees_total_by_currency={"TRY": Decimal("0")},
+        per_symbol=[],
+        equity_estimate=Decimal("1000"),
+    )
+
+    decision, *_ = service.compute_decision(
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={"BTCTRY": Decimal("0")},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=False,
+        live_mode=True,
+        tradable_symbols=["BTCTRY"],
+    )
+
+    assert decision.mode == Mode.OBSERVE_ONLY
+    assert decision.risk_decision.reasons == ["mark_price_missing_fail_closed"]

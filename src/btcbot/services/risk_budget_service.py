@@ -242,7 +242,11 @@ class RiskBudgetService:
         missing_marks: list[str] = []
         if live_mode:
             candidates = tradable_symbols if tradable_symbols is not None else [position.symbol for position in positions]
-            missing_marks = sorted({symbol for symbol in candidates if symbol not in mark_prices})
+            for symbol in candidates:
+                mark = mark_prices.get(symbol)
+                if mark is None or mark <= 0:
+                    missing_marks.append(symbol)
+            missing_marks = sorted(set(missing_marks))
 
         signals = RiskSignals(
             equity_try=pnl_report.equity_estimate,
