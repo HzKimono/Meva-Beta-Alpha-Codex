@@ -694,7 +694,7 @@ class BtcturkHttpClient(ExchangeClient):
                 cached_after = self._orderbook_cache.get(key)
                 if cached_after is not None and cached_after[0] > monotonic():
                     return cached_after[1][0], cached_after[1][1], cached_after[2]
-            return Decimal("0"), Decimal("0"), None
+            raise ExchangeError(f"Orderbook inflight request failed for {pair_symbol}")
 
         try:
             params: dict[str, str | int] = {"pairSymbol": pair_symbol}
@@ -1279,13 +1279,6 @@ class DryRunExchangeClient(ExchangeClient):
         del limit
         bid, ask = self.get_orderbook(symbol)
         return bid, ask, self._orderbook_observed_at.get(symbol)
-
-    def get_orderbook_with_timestamp(
-        self, symbol: str, limit: int | None = None
-    ) -> tuple[Decimal, Decimal, datetime | None]:
-        del limit
-        bid, ask = self.get_orderbook(symbol)
-        return bid, ask, datetime.now(UTC)
 
     def get_ticker_stats(self) -> list[dict[str, object]]:
         stats: list[dict[str, object]] = []

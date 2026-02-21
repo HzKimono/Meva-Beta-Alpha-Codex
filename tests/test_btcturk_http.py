@@ -4,7 +4,7 @@ import base64
 import hashlib
 import hmac
 import ssl
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
@@ -13,6 +13,7 @@ import pytest
 from btcbot.adapters.btcturk_http import (
     BtcturkHttpClient,
     BtcturkHttpClientStage4,
+    DryRunExchangeClient,
     ConfigurationError,
     _parse_stage4_open_order_item,
     _should_retry,
@@ -826,3 +827,40 @@ def test_get_orderbook_with_timestamp_inflight_join_reuses_leader_fetched_at() -
     assert results[1][2] == results[0][2]
     assert calls["count"] == 1
     client.close()
+
+
+def test_get_orderbook_with_timestamp_inflight_missing_cache_raises_exchange_error() -> None:
+    import threading
+
+    client = BtcturkHttpClient(orderbook_cache_ttl_s=1.0)
+    key = ("BTCTRY", None)
+    gate = threading.Event()
+    gate.set()
+    client._orderbook_inflight[key] = gate
+
+    with pytest.raises(ExchangeError, match="Orderbook inflight request failed"):
+        client.get_orderbook_with_timestamp("BTC_TRY")
+    client.close()
+
+
+def test_dry_run_get_orderbook_with_timestamp_uses_stored_observed_at() -> None:
+    symbol = "BTCTRY"
+    client = DryRunExchangeClient(orderbooks={symbol: (Decimal("100"), Decimal("101"))})
+    observed_at = datetime(2026, 1, 1, tzinfo=UTC)
+    client._orderbook_observed_at[symbol] = observed_at
+
+    bid, ask, ts = client.get_orderbook_with_timestamp(symbol)
+
+    assert (bid, ask) == (Decimal("100"), Decimal("101"))
+    assert ts == observed_at
+
+
+def test_dry_run_get_orderbook_with_timestamp_returns_none_when_observed_at_missing() -> None:
+    symbol = "BTCTRY"
+    client = DryRunExchangeClient(orderbooks={symbol: (Decimal("100"), Decimal("101"))})
+    client._orderbook_observed_at.pop(symbol, None)
+
+    bid, ask, ts = client.get_orderbook_with_timestamp(symbol)
+
+    assert (bid, ask) == (Decimal("100"), Decimal("101"))
+    assert ts is None

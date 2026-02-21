@@ -293,7 +293,9 @@ def test_market_data_rules_provider_fail_closed_when_defaults_disabled(caplog) -
 
 
 
-def test_policy_rejects_intents_when_exchange_rules_unavailable_fail_closed(caplog) -> None:
+def test_policy_rejects_intents_when_exchange_rules_unavailable_fail_closed(
+    caplog, monkeypatch
+) -> None:
     clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
     policy = RiskPolicy(
         rules_provider=MarketDataExchangeRulesProvider(
@@ -315,6 +317,13 @@ def test_policy_rejects_intents_when_exchange_rules_unavailable_fail_closed(capl
         mark_prices={},
     )
 
+    captured: list[dict[str, object]] = []
+
+    def _capture_decision(logger, payload):
+        del logger
+        captured.append(payload)
+
+    monkeypatch.setattr("btcbot.risk.policy.emit_decision", _capture_decision)
     caplog.set_level(logging.WARNING, logger="btcbot.risk.policy")
     approved = policy.evaluate(context, [_intent("rules_missing")])
 
@@ -323,6 +332,10 @@ def test_policy_rejects_intents_when_exchange_rules_unavailable_fail_closed(capl
         str(event.get("reason_code")) == "exchange_rules_unavailable_blocked"
         for event in policy.last_blocked_events
     )
+    assert captured
+    assert captured[-1]["decision_layer"] == "risk_policy"
+    assert captured[-1]["reason_code"] == "exchange_rules_unavailable_blocked"
+    assert captured[-1]["action"] == "BLOCK"
     assert any(record.getMessage() == "exchange_rules_unavailable_blocked" for record in caplog.records)
 
 def test_market_data_rules_provider_logs_traceback_on_fallback(caplog) -> None:

@@ -600,6 +600,17 @@ def test_stage4_stale_data_blocks_with_btcturk_adapter_timestamp_cache(monkeypat
         base_url="https://api.btcturk.com",
         orderbook_cache_ttl_s=120.0,
     )
+    fresh_ts = datetime.now(UTC)
+    client._orderbook_cache[("BTCTRY", None)] = (
+        monotonic() + 120.0,
+        (Decimal("100"), Decimal("102")),
+        fresh_ts,
+    )
+    first = client.get_orderbook_with_timestamp("BTC_TRY")
+    second = client.get_orderbook_with_timestamp("BTC_TRY")
+    assert first[2] == fresh_ts
+    assert second[2] == fresh_ts
+
     stale_ts = datetime.now(UTC) - timedelta(minutes=45)
     client._orderbook_cache[("BTCTRY", None)] = (
         monotonic() + 120.0,
@@ -625,3 +636,46 @@ def test_stage4_stale_data_blocks_with_btcturk_adapter_timestamp_cache(monkeypat
     assert runner.run_one_cycle(settings) == 0
     counts = _read_latest_cycle_counts(db_path)
     assert counts["accepted_actions"] == 0
+
+
+def test_stage4_cycle_duration_ms_uses_real_end_timestamps(monkeypatch, tmp_path) -> None:
+    from time import sleep as thread_sleep
+
+    exchange = FakeExchange()
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    from btcbot.services import stage4_cycle_runner as module
+
+    captured: list[int | None] = []
+
+    class FakeAnomalyDetector:
+        def __init__(self, config=None, now_provider=None) -> None:
+            del config, now_provider
+
+        def detect(self, **kwargs):
+            captured.append(kwargs.get("cycle_duration_ms"))
+            return []
+
+    class SlowExecution(module.ExecutionService):
+        def execute_with_report(self, actions):
+            thread_sleep(0.05)
+            return super().execute_with_report(actions)
+
+    monkeypatch.setattr(module, "AnomalyDetectorService", FakeAnomalyDetector)
+    monkeypatch.setattr(module, "ExecutionService", SlowExecution)
+
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "duration.sqlite"),
+        SYMBOLS="BTC_TRY",
+        DYNAMIC_UNIVERSE_ENABLED=False,
+    )
+    assert runner.run_one_cycle(settings) == 0
+    assert len(captured) >= 2
+    assert captured[0] is not None and captured[1] is not None
+    assert int(captured[1]) >= int(captured[0])
