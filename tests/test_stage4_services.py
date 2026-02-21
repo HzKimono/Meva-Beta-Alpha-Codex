@@ -725,3 +725,56 @@ def test_execution_report_tracks_only_min_notional_rejections(tmp_path) -> None:
     assert report_missing.rejected_min_notional == 0
     assert report_min.rejected == 1
     assert report_min.rejected_min_notional == 1
+
+
+def test_risk_replace_inflight_budget_blocks_double_exposure() -> None:
+    policy = RiskPolicy(
+        max_open_orders=10,
+        max_position_notional_try=Decimal("10000"),
+        max_daily_loss_try=Decimal("200"),
+        max_drawdown_pct=Decimal("20"),
+        fee_bps_taker=Decimal("10"),
+        slippage_bps_buffer=Decimal("10"),
+        min_profit_bps=Decimal("20"),
+        replace_inflight_budget_per_symbol_try=Decimal("50"),
+    )
+    actions = [
+        LifecycleAction(
+            action_type=LifecycleActionType.CANCEL,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            reason="replace_cancel",
+            client_order_id="old",
+        ),
+        LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            reason="replace_submit",
+            client_order_id="new",
+            replace_for_client_order_id="old",
+        ),
+    ]
+    pnl = PnLSnapshot(
+        total_equity_try=Decimal("1000"),
+        realized_today_try=Decimal("0"),
+        drawdown_pct=Decimal("0"),
+        ts=now_utc(),
+        realized_total_try=Decimal("0"),
+    )
+
+    accepted, decisions = policy.filter_actions(
+        actions,
+        open_orders_count=1,
+        current_position_notional_try=Decimal("0"),
+        pnl=pnl,
+        positions_by_symbol={},
+    )
+
+    assert accepted[0].action_type == LifecycleActionType.CANCEL
+    assert len(accepted) == 1
+    assert any(decision.reason == "replace_inflight_budget" for decision in decisions)

@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from btcbot.domain.ledger import EquityPoint, compute_max_drawdown
+from btcbot.domain.ledger import EquityPoint, LedgerEventType, compute_max_drawdown
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services.ledger_service import LedgerService
+from btcbot.services.price_conversion_service import MarkPriceConverter
 from btcbot.services.state_store import StateStore
 
 
@@ -145,3 +146,45 @@ def test_stage7_simulated_fill_ids_are_deterministic_and_idempotent(tmp_path) ->
     second = service.append_simulated_fills(fills_b)
     assert first.events_inserted == 2
     assert second.events_ignored == 2
+
+
+def test_stage7_simulated_non_try_fee_currency_is_convertible(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "s7_non_try_fee.db"))
+    service = LedgerService(state_store=store, logger=__import__("logging").getLogger(__name__))
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="BUY",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="test",
+        client_order_id="b1",
+    )
+
+    fills = service.simulate_dry_run_fills(
+        cycle_id="c1",
+        actions=[action],
+        mark_prices={"BTCTRY": Decimal("100")},
+        slippage_bps=Decimal("0"),
+        fees_bps=Decimal("10"),
+        ts=ts,
+        fee_currency="USDT",
+        fee_currency_to_try_rate=Decimal("35"),
+    )
+    service.append_simulated_fills(fills)
+
+    events = store.load_ledger_events()
+    fee_events = [event for event in events if event.type == LedgerEventType.FEE]
+    assert len(fee_events) == 1
+    expected_fee_try = Decimal("100") * Decimal("1") * (Decimal("10") / Decimal("10000"))
+    expected_fee_usdt = expected_fee_try / Decimal("35")
+    assert fee_events[0].fee_currency == "USDT"
+    assert fee_events[0].fee == expected_fee_usdt
+
+    snap = service.snapshot(
+        mark_prices={"USDTTRY": Decimal("35")},
+        cash_try=Decimal("0"),
+        price_for_fee_conversion=MarkPriceConverter({"USDTTRY": Decimal("35")}),
+    )
+    assert snap.fees_try == expected_fee_try

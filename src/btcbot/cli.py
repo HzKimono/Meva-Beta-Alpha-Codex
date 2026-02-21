@@ -1255,7 +1255,10 @@ def run_cycle(
                 )
                 risk_service = RiskService(
                     risk_policy=RiskPolicy(
-                        rules_provider=MarketDataExchangeRulesProvider(market_data_service),
+                        rules_provider=MarketDataExchangeRulesProvider(
+                            market_data_service,
+                            allow_default_fallback=dry_run,
+                        ),
                         max_orders_per_cycle=settings.max_orders_per_cycle,
                         max_open_orders_per_symbol=settings.max_open_orders_per_symbol,
                         cooldown_seconds=settings.cooldown_seconds,

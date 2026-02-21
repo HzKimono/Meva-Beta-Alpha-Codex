@@ -153,6 +153,7 @@ def test_submit_limit_order_invalid_quantity_scale_caught_before_request() -> No
         api_secret="c2VjcmV0",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
 
     with pytest.raises(ValidationError, match="quantity scale violation"):
@@ -186,6 +187,7 @@ def test_submit_limit_order_invalid_price_scale_caught_before_request() -> None:
         api_secret="c2VjcmV0",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
 
     with pytest.raises(ValidationError, match="price scale violation"):
@@ -325,5 +327,39 @@ def test_submit_limit_order_non_positive_values_caught_before_request() -> None:
             client_order_id="coid-non-positive-qty",
         )
 
+    assert calls["post"] == 0
+    client.close()
+
+
+def test_submit_limit_order_live_requires_exchangeinfo_and_blocks_post() -> None:
+    calls = {"get": 0, "post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            calls["get"] += 1
+            return httpx.Response(200, json={"success": True, "data": []})
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+            return httpx.Response(200, json={"success": True, "data": {"id": 1}})
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=True,
+    )
+
+    with pytest.raises(ValidationError, match="exchangeinfo_missing_symbol_rules"):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("0.01"),
+            client_order_id="coid-live-require-rules",
+        )
+
+    assert calls["get"] >= 1
     assert calls["post"] == 0
     client.close()

@@ -15,6 +15,7 @@ from btcbot.services.ledger_service import PnlReport
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
+FEE_CONVERSION_MISSING_RATE_REASON = "fee_conversion_missing_rate"
 
 
 @dataclass(frozen=True)
@@ -214,6 +215,8 @@ class RiskBudgetService:
         mark_prices: dict[str, Decimal],
         realized_today_try: Decimal,
         kill_switch_active: bool,
+        live_mode: bool = False,
+        tradable_symbols: list[str] | None = None,
     ) -> tuple[BudgetDecision, Mode | None, Decimal, Decimal, date]:
         current = self.state_store.get_risk_state_current()
         prev_mode_raw = current.get("current_mode")
@@ -236,6 +239,11 @@ class RiskBudgetService:
         )
         fees_today = self._resolve_fees_today(pnl_report)
 
+        missing_marks: list[str] = []
+        if live_mode:
+            candidates = tradable_symbols if tradable_symbols is not None else [position.symbol for position in positions]
+            missing_marks = sorted({symbol for symbol in candidates if symbol not in mark_prices})
+
         signals = RiskSignals(
             equity_try=pnl_report.equity_estimate,
             peak_equity_try=peak_equity,
@@ -246,6 +254,40 @@ class RiskBudgetService:
             fees_try_today=fees_today,
         )
         mode, reasons = decide_mode(limits=limits, signals=signals)
+        if pnl_report.fee_conversion_missing_currencies:
+            missing = list(sorted(set(pnl_report.fee_conversion_missing_currencies)))
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": f"{today.isoformat()}:compute_decision",
+                    "decision_layer": "risk_budget",
+                    "reason_code": FEE_CONVERSION_MISSING_RATE_REASON,
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {
+                        "missing_currencies": ",".join(missing),
+                        "fees_total_by_currency": {
+                            k: str(v) for k, v in pnl_report.fees_total_by_currency.items()
+                        },
+                    },
+                },
+            )
+            mode = Mode.OBSERVE_ONLY
+            reasons = [FEE_CONVERSION_MISSING_RATE_REASON]
+        if missing_marks:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": f"{today.isoformat()}:compute_decision",
+                    "decision_layer": "risk_budget",
+                    "reason_code": "mark_price_missing_fail_closed",
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {"missing_symbols": ",".join(missing_marks)},
+                },
+            )
+            mode = Mode.OBSERVE_ONLY
+            reasons = ["mark_price_missing_fail_closed"]
         decided_at = self.now_provider()
         if kill_switch_active:
             mode = Mode.OBSERVE_ONLY
@@ -368,6 +410,8 @@ class RiskBudgetService:
         return max(Decimal(str(peak_raw)), equity_try)
 
     def _resolve_fees_today(self, pnl_report: PnlReport) -> Decimal:
+        if pnl_report.fees_total_try is not None:
+            return Decimal(str(pnl_report.fees_total_try))
         return Decimal(str(pnl_report.fees_total_by_currency.get("TRY", Decimal("0"))))
 
     def _compute_gross_exposure(

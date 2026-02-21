@@ -79,6 +79,8 @@ def build_exchange_stage3(settings: Settings, *, force_dry_run: bool) -> Exchang
         rate_limiter=limiter,
         breaker_429_consecutive_threshold=settings.breaker_429_consecutive_threshold,
         breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
+        orderbook_inflight_wait_timeout_s=settings.orderbook_inflight_wait_timeout_s,
+        live_rules_require_exchangeinfo=settings.live_rules_require_exchangeinfo,
     )
 
 
@@ -96,6 +98,8 @@ def build_exchange_stage4(settings: Settings, *, dry_run: bool) -> ExchangeClien
         rate_limiter=_build_rate_limiter(settings),
         breaker_429_consecutive_threshold=settings.breaker_429_consecutive_threshold,
         breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
+        orderbook_inflight_wait_timeout_s=settings.orderbook_inflight_wait_timeout_s,
+        live_rules_require_exchangeinfo=settings.live_rules_require_exchangeinfo,
     )
     return BtcturkHttpClientStage4(live_client)
 

@@ -81,6 +81,14 @@ class Settings(BaseSettings):
         default=5000,
         alias="ORDERBOOK_MAX_STALENESS_MS",
     )
+    orderbook_inflight_wait_timeout_s: float = Field(
+        default=2.0,
+        alias="ORDERBOOK_INFLIGHT_WAIT_TIMEOUT_S",
+    )
+    live_rules_require_exchangeinfo: bool = Field(
+        default=True,
+        alias="LIVE_RULES_REQUIRE_EXCHANGEINFO",
+    )
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     dry_run: bool = Field(default=True, alias="DRY_RUN")
     live_trading: bool = Field(default=False, alias="LIVE_TRADING")
@@ -118,6 +126,9 @@ class Settings(BaseSettings):
     max_open_orders: int = Field(default=5, alias="MAX_OPEN_ORDERS")
     max_position_notional_try: Decimal = Field(
         default=Decimal("5000"), alias="MAX_POSITION_NOTIONAL_TRY"
+    )
+    replace_inflight_budget_per_symbol_try: Decimal = Field(
+        default=Decimal("5000"), alias="REPLACE_INFLIGHT_BUDGET_PER_SYMBOL_TRY"
     )
     max_daily_loss_try: Decimal = Field(default=Decimal("1000"), alias="MAX_DAILY_LOSS_TRY")
     max_drawdown_pct: Decimal = Field(default=Decimal("10"), alias="MAX_DRAWDOWN_PCT")
