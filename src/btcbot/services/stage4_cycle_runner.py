@@ -41,6 +41,7 @@ from btcbot.services.ledger_service import LedgerService
 from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
+from btcbot.services.price_conversion_service import MarkPriceConverter
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_budget_service import CapitalPolicyError, RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
@@ -328,7 +329,12 @@ class Stage4CycleRunner:
                     },
                 )
 
-            pnl_report = ledger_service.report(mark_prices=mark_prices, cash_try=try_cash)
+            fee_converter = MarkPriceConverter(mark_prices)
+            pnl_report = ledger_service.report(
+                mark_prices=mark_prices,
+                cash_try=try_cash,
+                price_for_fee_conversion=fee_converter,
+            )
             ledger_checkpoint = ledger_service.checkpoint()
             try:
                 risk_budget_service.apply_self_financing_checkpoint(
