@@ -27,6 +27,7 @@ def test_submit_limit_order_payload_fields() -> None:
         api_secret="c2VjcmV0",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
     client._next_stamp_ms = lambda: "1700000000123"
 
@@ -34,7 +35,7 @@ def test_submit_limit_order_payload_fields() -> None:
         symbol="BTC_TRY",
         side=OrderSide.BUY,
         price=123.45,
-        quantity=0.01,
+        quantity=0.1,
         client_order_id="meva2-c1-BTCTRY-b-1234abcd",
     )
 
@@ -44,7 +45,7 @@ def test_submit_limit_order_payload_fields() -> None:
     body = json.loads(str(seen["body"]))
     assert body["pairSymbol"] == "BTCTRY"
     assert body["price"] == "123.45"
-    assert body["quantity"] == "0.01"
+    assert body["quantity"] == "0.1"
     assert body["orderMethod"] == "limit"
     assert body["orderType"] == "buy"
     assert body["newOrderClientId"] == "meva2-c1-BTCTRY-b-1234abcd"
@@ -118,6 +119,7 @@ def test_submit_limit_order_400_includes_code_and_message() -> None:
         api_secret="c2VjcmV0",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
 
     with pytest.raises(ExchangeError) as exc_info:
@@ -125,7 +127,7 @@ def test_submit_limit_order_400_includes_code_and_message() -> None:
             symbol="BTC_TRY",
             side=OrderSide.BUY,
             price=123.45,
-            quantity=0.01,
+            quantity=0.1,
             client_order_id="coid-1",
         )
 
@@ -153,6 +155,7 @@ def test_submit_limit_order_invalid_quantity_scale_caught_before_request() -> No
         api_secret="c2VjcmV0",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
 
     with pytest.raises(ValidationError, match="quantity scale violation"):
@@ -186,6 +189,7 @@ def test_submit_limit_order_invalid_price_scale_caught_before_request() -> None:
         api_secret="c2VjcmV0",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
 
     with pytest.raises(ValidationError, match="price scale violation"):
@@ -271,6 +275,7 @@ def test_submit_limit_order_415_exposes_sanitized_request_json() -> None:
         api_secret="c2VjcmV0",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
 
     with pytest.raises(ExchangeError) as exc_info:
@@ -278,7 +283,7 @@ def test_submit_limit_order_415_exposes_sanitized_request_json() -> None:
             symbol="BTC_TRY",
             side=OrderSide.BUY,
             price=100.0,
-            quantity=0.01,
+            quantity=0.1,
             client_order_id="coid-415",
         )
 
@@ -287,7 +292,7 @@ def test_submit_limit_order_415_exposes_sanitized_request_json() -> None:
     assert exc.request_json is not None
     assert exc.request_json["pairSymbol"] == "BTCTRY"
     assert exc.request_json["price"] == "100"
-    assert exc.request_json["quantity"] == "0.01"
+    assert exc.request_json["quantity"] == "0.1"
     assert exc.request_json["newOrderClientId"] == "coid-415"
     client.close()
 
@@ -323,6 +328,119 @@ def test_submit_limit_order_non_positive_values_caught_before_request() -> None:
             price=Decimal("100"),
             qty=Decimal("0"),
             client_order_id="coid-non-positive-qty",
+        )
+
+    assert calls["post"] == 0
+    client.close()
+
+
+def test_submit_limit_order_live_requires_exchangeinfo_and_blocks_post() -> None:
+    calls = {"get": 0, "post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            calls["get"] += 1
+            return httpx.Response(200, json={"success": True, "data": []})
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+            return httpx.Response(200, json={"success": True, "data": {"id": 1}})
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=True,
+    )
+
+    with pytest.raises(ValidationError, match="exchangeinfo_missing_symbol_rules"):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("0.01"),
+            client_order_id="coid-live-require-rules",
+        )
+
+    assert calls["get"] >= 1
+    assert calls["post"] == 0
+    client.close()
+
+def test_place_limit_order_live_requires_exchangeinfo_and_blocks_post() -> None:
+    calls = {"get": 0, "post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            calls["get"] += 1
+            return httpx.Response(200, json={"success": True, "data": []})
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+            return httpx.Response(200, json={"success": True, "data": {"id": 1}})
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=True,
+    )
+
+    with pytest.raises(ValidationError, match="exchangeinfo_missing_symbol_rules"):
+        client.place_limit_order(
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=Decimal("100"),
+            quantity=Decimal("0.01"),
+            client_order_id="legacy-coid-live-require-rules",
+        )
+
+    assert calls["get"] >= 1
+    assert calls["post"] == 0
+    client.close()
+
+
+def test_place_limit_order_enforces_same_scale_validation_as_submit_limit_order() -> None:
+    calls = {"post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [
+                        {
+                            "pairSymbol": "BTCTRY",
+                            "numeratorScale": 4,
+                            "denominatorScale": 2,
+                            "minTotalAmount": "10",
+                            "tickSize": "0.1",
+                            "stepSize": "0.01",
+                        }
+                    ],
+                },
+            )
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+            return httpx.Response(200, json={"success": True, "data": {"id": 42}})
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+    )
+
+    with pytest.raises(ValidationError, match="price scale violation"):
+        client.place_limit_order(
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=Decimal("100.17"),
+            quantity=Decimal("0.01"),
+            client_order_id="legacy-scale-invalid",
         )
 
     assert calls["post"] == 0

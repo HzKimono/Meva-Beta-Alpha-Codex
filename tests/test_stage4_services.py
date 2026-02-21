@@ -725,3 +725,122 @@ def test_execution_report_tracks_only_min_notional_rejections(tmp_path) -> None:
     assert report_missing.rejected_min_notional == 0
     assert report_min.rejected == 1
     assert report_min.rejected_min_notional == 1
+
+
+def test_risk_replace_worst_case_budget_blocks_submit_but_keeps_cancel() -> None:
+    policy = RiskPolicy(
+        max_open_orders=10,
+        max_position_notional_try=Decimal("10000"),
+        max_daily_loss_try=Decimal("200"),
+        max_drawdown_pct=Decimal("20"),
+        fee_bps_taker=Decimal("10"),
+        slippage_bps_buffer=Decimal("10"),
+        min_profit_bps=Decimal("20"),
+        replace_inflight_budget_per_symbol_try=Decimal("150"),
+        max_gross_exposure_try=Decimal("500"),
+    )
+    old_order = Order(
+        symbol="BTC_TRY",
+        side="buy",
+        type="limit",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        status="open",
+        created_at=now_utc(),
+        updated_at=now_utc(),
+        client_order_id="old",
+    )
+    actions = [
+        LifecycleAction(
+            action_type=LifecycleActionType.CANCEL,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            reason="replace_cancel",
+            client_order_id="old",
+        ),
+        LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            reason="replace_submit",
+            client_order_id="new",
+            replace_for_client_order_id="old",
+        ),
+    ]
+    pnl = PnLSnapshot(
+        total_equity_try=Decimal("1000"),
+        realized_today_try=Decimal("0"),
+        drawdown_pct=Decimal("0"),
+        ts=now_utc(),
+        realized_total_try=Decimal("0"),
+    )
+
+    accepted, decisions = policy.filter_actions(
+        actions,
+        open_orders_count=1,
+        current_position_notional_try=Decimal("0"),
+        pnl=pnl,
+        positions_by_symbol={},
+        open_orders_by_client_id={"old": old_order},
+    )
+
+    assert [a.action_type for a in accepted] == [LifecycleActionType.CANCEL]
+    assert any(d.reason == "replace_worst_case_exposure_blocked" and not d.accepted for d in decisions)
+
+
+def test_risk_replace_worst_case_within_budget_accepts_submit() -> None:
+    policy = RiskPolicy(
+        max_open_orders=10,
+        max_position_notional_try=Decimal("10000"),
+        max_daily_loss_try=Decimal("200"),
+        max_drawdown_pct=Decimal("20"),
+        fee_bps_taker=Decimal("10"),
+        slippage_bps_buffer=Decimal("10"),
+        min_profit_bps=Decimal("20"),
+        replace_inflight_budget_per_symbol_try=Decimal("250"),
+        max_gross_exposure_try=Decimal("500"),
+    )
+    old_order = Order(
+        symbol="BTC_TRY",
+        side="buy",
+        type="limit",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        status="open",
+        created_at=now_utc(),
+        updated_at=now_utc(),
+        client_order_id="old",
+    )
+    submit = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="replace_submit",
+        client_order_id="new",
+        replace_for_client_order_id="old",
+    )
+    pnl = PnLSnapshot(
+        total_equity_try=Decimal("1000"),
+        realized_today_try=Decimal("0"),
+        drawdown_pct=Decimal("0"),
+        ts=now_utc(),
+        realized_total_try=Decimal("0"),
+    )
+
+    accepted, decisions = policy.filter_actions(
+        [submit],
+        open_orders_count=1,
+        current_position_notional_try=Decimal("0"),
+        pnl=pnl,
+        positions_by_symbol={},
+        open_orders_by_client_id={"old": old_order},
+    )
+
+    assert accepted == [submit]
+    assert any(d.reason == "accepted" and d.accepted for d in decisions)
