@@ -241,7 +241,7 @@ class Stage4CycleRunner:
                         extra={"extra": {"symbol": normalized, "error_type": type(exc).__name__}},
                     )
 
-            db_open_orders = state_store.list_stage4_open_orders()
+            db_open_orders = state_store.list_stage4_open_orders(include_unknown=True)
             reconcile_result = reconcile_service.resolve(
                 exchange_open_orders=exchange_open_orders,
                 db_open_orders=db_open_orders,

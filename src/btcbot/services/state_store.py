@@ -2708,6 +2708,20 @@ class StateStore:
             ).fetchone()
         return row is not None
 
+    def stage4_has_unknown_orders(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM stage4_orders WHERE status = 'unknown' LIMIT 1"
+            ).fetchone()
+        return row is not None
+
+    def stage4_unknown_client_order_ids(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT client_order_id FROM stage4_orders WHERE status = 'unknown' ORDER BY updated_at DESC"
+            ).fetchall()
+        return [str(row["client_order_id"]) for row in rows if row["client_order_id"]]
+
     def get_stage4_order_by_client_id(self, client_order_id: str):
         """Load a Stage4 order by client_order_id."""
         from btcbot.domain.stage4 import Order as Stage4Order
@@ -2741,12 +2755,15 @@ class StateStore:
         symbol: str | None = None,
         *,
         include_external: bool = False,
+        include_unknown: bool = False,
     ):
         from btcbot.domain.stage4 import Order as Stage4Order
 
-        query = (
-            "SELECT * FROM stage4_orders WHERE status IN ('open','submitted','cancel_requested')"
-        )
+        statuses = ["open", "submitted", "cancel_requested"]
+        if include_unknown:
+            statuses.append("unknown")
+        status_clause = ",".join(f"'{status}'" for status in statuses)
+        query = f"SELECT * FROM stage4_orders WHERE status IN ({status_clause})"
         if not include_external:
             query += " AND mode != 'external'"
         params: list[str] = []

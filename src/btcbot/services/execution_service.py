@@ -35,7 +35,8 @@ from btcbot.domain.symbols import split_symbol
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.market_data_service import MarketDataService
-from btcbot.services.retry import retry_with_backoff
+from btcbot.services.execution_errors import ExecutionErrorCategory, classify_exchange_error
+from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.services.trading_policy import policy_reason_to_code, validate_live_side_effects_policy
 from btcbot.services.unknown_order_registry import UnknownOrderRecord, UnknownOrderRegistry
@@ -46,12 +47,6 @@ PLACE_ORDER_IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60
 CANCEL_ORDER_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 MAX_CYCLE_BALANCE_SNAPSHOTS = 10
 MAX_CYCLE_LIFECYCLE_MARKERS = 10
-
-
-class NonRetryableSubmitError(Exception):
-    def __init__(self, original: Exception) -> None:
-        super().__init__(str(original))
-        self.original = original
 
 
 class SubmitBlockedDueToUnknownError(RuntimeError):
@@ -136,6 +131,14 @@ class ExecutionService:
         )
         self.sell_fee_in_base_bps = Decimal(os.getenv("EXECUTION_SELL_FEE_IN_BASE_BPS", "0"))
         self.sleep_fn = sleep_fn or time.sleep
+        self.execution_wrapper = ExecutionWrapper(
+            exchange,
+            submit_retry_max_attempts=self.submit_retry_max_attempts,
+            cancel_retry_max_attempts=self.cancel_retry_max_attempts,
+            retry_base_delay_ms=self.retry_base_delay_ms,
+            retry_max_delay_ms=self.retry_max_delay_ms,
+            sleep_fn=self.sleep_fn,
+        )
         self.lifecycle_refresh_min_interval_seconds = 5
         self.lifecycle_backoff_cooldown_seconds = 15
         self._last_lifecycle_refresh_at: dict[str, float] = {}
@@ -792,35 +795,31 @@ class ExecutionService:
 
             try:
                 started = datetime.now(UTC)
-                was_canceled = self._retry_exchange_call(
-                    lambda order_id=order.order_id: self.exchange.cancel_order(order_id),
-                    max_attempts=self.cancel_retry_max_attempts,
-                    operation="cancel",
+                was_canceled = self.execution_wrapper.cancel_order(
+                    order_id=order.order_id,
                 )
                 get_instrumentation().histogram(
                     "cancel_latency_ms",
                     (datetime.now(UTC) - started).total_seconds() * 1000,
                     attrs={"symbol": order.symbol},
                 )
-            except Exception as exc:  # noqa: BLE001
-                if isinstance(exc, NonRetryableSubmitError):
-                    exc = exc.original
-                if not self._is_uncertain_error(exc):
-                    logger.exception(
-                        "Failed to cancel stale order",
-                        extra={"extra": {"order_id": order.order_id}},
-                    )
-                    self.state_store.finalize_idempotency_key(
-                        "cancel_order",
-                        idempotency_key,
-                        action_id=action_id,
-                        client_order_id=order.client_order_id,
-                        order_id=order.order_id,
-                        status="FAILED",
-                    )
-                    self.state_store.clear_action_dedupe_key(action_id)
-                    continue
+            except Exception:
+                logger.exception(
+                    "Failed to cancel stale order",
+                    extra={"extra": {"order_id": order.order_id}},
+                )
+                self.state_store.finalize_idempotency_key(
+                    "cancel_order",
+                    idempotency_key,
+                    action_id=action_id,
+                    client_order_id=order.client_order_id,
+                    order_id=order.order_id,
+                    status="FAILED",
+                )
+                self.state_store.clear_action_dedupe_key(action_id)
+                continue
 
+            if isinstance(was_canceled, UncertainResult):
                 outcome = self._reconcile_cancel(order)
                 if outcome.status == ReconcileStatus.CONFIRMED:
                     canceled += 1
@@ -872,6 +871,10 @@ class ExecutionService:
                         status="COMMITTED",
                     )
                 else:
+                    logger.exception(
+                        "Failed to cancel stale order",
+                        extra={"extra": {"order_id": order.order_id}},
+                    )
                     self.state_store.finalize_idempotency_key(
                         "cancel_order",
                         idempotency_key,
@@ -1199,31 +1202,19 @@ class ExecutionService:
 
             attempted_exchange_calls += 1
             try:
-                order = self._retry_exchange_call(
-                    lambda symbol=symbol_normalized,
+                order = self._submit_limit_order(
+                    symbol=symbol,
                     side=intent.side,
-                    normalized_price=price,
-                    normalized_quantity=quantity,
-                    order_client_id=client_order_id,
-                    intent_cycle_id=intent.cycle_id,
-                    current_intent_id=(raw_intent.intent_id if raw_intent else None): self._submit_limit_order(
-                        symbol=symbol,
-                        side=side,
-                        price=normalized_price,
-                        quantity=normalized_quantity,
-                        client_order_id=order_client_id,
-                        cycle_id=intent_cycle_id,
-                        intent_id=current_intent_id,
-                    ),
-                    max_attempts=self.submit_retry_max_attempts,
-                    operation="submit",
+                    price=price,
+                    quantity=quantity,
+                    client_order_id=client_order_id,
+                    cycle_id=intent.cycle_id,
+                    intent_id=(raw_intent.intent_id if raw_intent else None),
                 )
             except Exception as exc:  # noqa: BLE001
                 if isinstance(exc, SubmitBlockedDueToUnknownError):
                     raise
                 orders_failed_exchange += 1
-                if isinstance(exc, NonRetryableSubmitError):
-                    exc = exc.original
                 if not self._is_uncertain_error(exc):
                     response_body = None
                     status_code = None
@@ -1400,6 +1391,60 @@ class ExecutionService:
                 placed += 1
                 continue
 
+            if isinstance(order, UncertainResult):
+                orders_failed_exchange += 1
+                outcome = self._reconcile_submit(
+                    symbol_normalized=symbol_normalized,
+                    side=intent.side,
+                    price=price,
+                    quantity=quantity,
+                    client_order_id=client_order_id,
+                )
+                if outcome.status != ReconcileStatus.CONFIRMED or outcome.order_id is None:
+                    self.state_store.attach_action_metadata(
+                        action_id=action_id,
+                        client_order_id=client_order_id,
+                        order_id=None,
+                        reconciled=False,
+                        reconcile_status=outcome.status.value,
+                        reconcile_reason=outcome.reason,
+                        idempotency_key=(idempotency_key),
+                        intent_id=(raw_intent.intent_id if raw_intent else None),
+                    )
+                    self.state_store.finalize_idempotency_key(
+                        "place_order",
+                        idempotency_key,
+                        action_id=action_id,
+                        client_order_id=client_order_id,
+                        order_id=None,
+                        status="UNKNOWN",
+                    )
+                    unknown_order_id = f"unknown:{client_order_id}"
+                    now_utc = datetime.now(UTC)
+                    self.state_store.save_order(
+                        Order(
+                            order_id=unknown_order_id,
+                            client_order_id=client_order_id,
+                            symbol=symbol_normalized,
+                            side=intent.side,
+                            price=price,
+                            quantity=quantity,
+                            status=OrderStatus.UNKNOWN,
+                            created_at=now_utc,
+                            updated_at=now_utc,
+                        ),
+                        reconciled=True,
+                        idempotency_key=idempotency_key,
+                        intent_id=(raw_intent.intent_id if raw_intent else None),
+                    )
+                    self.unknown_order_registry.mark_unknown(
+                        order_id=unknown_order_id,
+                        reason=(outcome.reason or "submit_reconcile_unknown"),
+                        ts=int(now_utc.timestamp() * 1000),
+                    )
+                    self._emit_unknown_freeze_metrics()
+                    continue
+
             self.state_store.save_order(
                 order,
                 idempotency_key=(idempotency_key),
@@ -1473,7 +1518,7 @@ class ExecutionService:
             )
             raise SubmitBlockedDueToUnknownError("submit blocked while unknown orders exist")
 
-        return self.exchange.place_limit_order(
+        return self.execution_wrapper.submit_limit_order(
             symbol=symbol,
             side=side,
             price=price,
@@ -1844,74 +1889,7 @@ class ExecutionService:
         }.get(status, OrderStatus.UNKNOWN)
 
     def _is_uncertain_error(self, exc: Exception) -> bool:
-        if isinstance(exc, httpx.TimeoutException):
-            return True
-        if isinstance(exc, ExchangeError):
-            status = self._extract_status_code(exc)
-            message = str(exc)
-            if status == 429 or "status=429" in message:
-                return True
-            if status is not None and status >= 500:
-                return True
-            if status == 400:
-                return False
-            return "json" in message.lower() and status is None
-        return "json" in str(exc).lower()
-
-    def _retry_exchange_call(self, fn, *, max_attempts: int, operation: str):
-        if max_attempts <= 1:
-            return fn()
-
-        def _wrapped_call():
-            try:
-                return fn()
-            except ExchangeError as exc:
-                status = self._extract_status_code(exc)
-                if status == 400:
-                    raise NonRetryableSubmitError(exc) from exc
-                raise
-
-        seed = int(hashlib.sha256(operation.encode("utf-8")).hexdigest()[:8], 16)
-        return retry_with_backoff(
-            _wrapped_call,
-            max_attempts=max_attempts,
-            base_delay_ms=self.retry_base_delay_ms,
-            max_delay_ms=self.retry_max_delay_ms,
-            jitter_seed=seed,
-            retry_on_exceptions=(ExchangeError,),
-            retry_after_getter=self._retry_after_from_exception,
-            sleep_fn=self.sleep_fn,
-            on_retry=lambda attempt: logger.warning(
-                "exchange_retry",
-                extra={
-                    "extra": {
-                        "operation": operation,
-                        "attempt": attempt.attempt,
-                        "delay_ms": attempt.delay_ms,
-                        "error_type": attempt.error_type,
-                    }
-                },
-            ),
-        )
-
-    def _retry_after_from_exception(self, exc: Exception) -> str | None:
-        if not isinstance(exc, ExchangeError):
-            return None
-        for candidate in (exc.response_body, str(exc)):
-            if not candidate:
-                continue
-            match = re.search(r"retry-?after[=: ]+(\d+)", candidate, flags=re.IGNORECASE)
-            if match is not None:
-                return match.group(1)
-        return None
-
-    def _extract_status_code(self, exc: ExchangeError) -> int | None:
-        if exc.status_code is not None:
-            return int(exc.status_code)
-        match = re.search(r"status=(\d{3})", str(exc))
-        if match is None:
-            return None
-        return int(match.group(1))
+        return classify_exchange_error(exc) == ExecutionErrorCategory.UNCERTAIN
 
     def _was_submitted_in_cycle(self, *, cycle_id: str, order: Order) -> bool:
         with self.state_store._connect() as conn:
@@ -1958,8 +1936,8 @@ class ExecutionService:
 
     def _canonical_place_fields(self, intent: OrderIntent) -> tuple[str, str, str, str]:
         symbol = normalize_symbol(intent.symbol)
-        price = Decimal(intent.price)
-        quantity = Decimal(intent.quantity)
+        price = Decimal(str(intent.price))
+        quantity = Decimal(str(intent.quantity))
         if self.market_data_service is not None:
             try:
                 rules = self.market_data_service.get_symbol_rules(symbol)

@@ -7,6 +7,7 @@ from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Quantizer
 from btcbot.services.client_order_id_service import build_exchange_client_id
+from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.state_store import StateStore
 
@@ -37,6 +38,7 @@ class ExecutionService:
         self.state_store = state_store
         self.settings = settings
         self.rules_service = rules_service
+        self.execution_wrapper = ExecutionWrapper(exchange)
 
     def execute(self, actions: list[LifecycleAction]) -> int:
         return self.execute_with_report(actions).executed_total
@@ -58,6 +60,12 @@ class ExecutionService:
         rejected_min_notional = 0
         for action in actions:
             if action.action_type == LifecycleActionType.SUBMIT:
+                if self.state_store.stage4_has_unknown_orders():
+                    logger.warning(
+                        "stage4_submit_blocked_due_to_unknown",
+                        extra={"extra": {"unknown_orders": self.state_store.stage4_unknown_client_order_ids()}},
+                    )
+                    continue
                 if not action.client_order_id:
                     logger.warning(
                         "submit_missing_client_order_id", extra={"symbol": action.symbol}
@@ -165,13 +173,26 @@ class ExecutionService:
                     simulated += 1
                     continue
 
-                ack = self.exchange.submit_limit_order(
+                ack_or_uncertain = self.execution_wrapper.submit_limit_order(
                     symbol=action.symbol,
                     side=action.side,
                     price=q_price,
                     qty=q_qty,
                     client_order_id=exchange_client_id,
                 )
+                if isinstance(ack_or_uncertain, UncertainResult):
+                    self.state_store.record_stage4_order_error(
+                        client_order_id=action.client_order_id,
+                        reason="submit_uncertain_outcome",
+                        symbol=action.symbol,
+                        side=action.side,
+                        price=q_price,
+                        qty=q_qty,
+                        mode="live",
+                        status="unknown",
+                    )
+                    continue
+                ack = ack_or_uncertain
                 logger.info(
                     "submit_acknowledged",
                     extra={
@@ -227,7 +248,22 @@ class ExecutionService:
                     canceled += 1
                     continue
 
-                if self.exchange.cancel_order_by_exchange_id(exchange_id):
+                canceled_or_uncertain = self.execution_wrapper.cancel_order(
+                    exchange_order_id=exchange_id
+                )
+                if isinstance(canceled_or_uncertain, UncertainResult):
+                    self.state_store.record_stage4_order_error(
+                        client_order_id=client_id,
+                        reason="cancel_uncertain_outcome",
+                        symbol=action.symbol,
+                        side=action.side,
+                        price=action.price,
+                        qty=action.qty,
+                        mode="live",
+                        status="unknown",
+                    )
+                    continue
+                if canceled_or_uncertain:
                     self.state_store.record_stage4_order_canceled(client_id)
                     canceled += 1
 
