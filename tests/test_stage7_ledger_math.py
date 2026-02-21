@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from btcbot.domain.ledger import EquityPoint, compute_max_drawdown
+from btcbot.domain.ledger import EquityPoint, LedgerEventType, compute_max_drawdown
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.services.ledger_service import LedgerService
 from btcbot.services.price_conversion_service import MarkPriceConverter
@@ -174,9 +174,17 @@ def test_stage7_simulated_non_try_fee_currency_is_convertible(tmp_path) -> None:
     )
     service.append_simulated_fills(fills)
 
+    events = store.load_ledger_events()
+    fee_events = [event for event in events if event.type == LedgerEventType.FEE]
+    assert len(fee_events) == 1
+    expected_fee_try = Decimal("100") * Decimal("1") * (Decimal("10") / Decimal("10000"))
+    expected_fee_usdt = expected_fee_try / Decimal("35")
+    assert fee_events[0].fee_currency == "USDT"
+    assert fee_events[0].fee == expected_fee_usdt
+
     snap = service.snapshot(
         mark_prices={"USDTTRY": Decimal("35")},
         cash_try=Decimal("0"),
         price_for_fee_conversion=MarkPriceConverter({"USDTTRY": Decimal("35")}),
     )
-    assert snap.fees_try == Decimal("0.1")
+    assert snap.fees_try == expected_fee_try

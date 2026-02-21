@@ -204,7 +204,7 @@ class BtcturkHttpClient(ExchangeClient):
         self._breaker_cooldown_seconds = max(0.0, breaker_cooldown_seconds)
         self._breaker_state: dict[str, _BreakerState] = {}
         self._orderbook_cache_ttl_s = max(0.0, orderbook_cache_ttl_s)
-        self._orderbook_cache: dict[tuple[str, int | None], tuple[float, tuple[Decimal, Decimal]]] = {}
+        self._orderbook_cache: dict[tuple[str, int | None], tuple[float, tuple[Decimal, Decimal], datetime]] = {}
         self._orderbook_inflight: dict[tuple[str, int | None], Event] = {}
         self._orderbook_lock = Lock()
 
@@ -657,13 +657,24 @@ class BtcturkHttpClient(ExchangeClient):
             best_ask = _parse_best_price(data.get("asks"), side="ask", symbol=symbol)
             result = (best_bid, best_ask)
             with self._orderbook_lock:
-                self._orderbook_cache[key] = (monotonic() + self._orderbook_cache_ttl_s, result)
+                self._orderbook_cache[key] = (
+                    monotonic() + self._orderbook_cache_ttl_s,
+                    result,
+                    datetime.now(UTC),
+                )
             return result
         finally:
             with self._orderbook_lock:
                 event = self._orderbook_inflight.pop(key, None)
             if event is not None:
                 event.set()
+
+    def get_orderbook_with_timestamp(
+        self, symbol: str, limit: int | None = None
+    ) -> tuple[Decimal, Decimal, datetime | None]:
+        del limit
+        bid, ask = self.get_orderbook(symbol)
+        return bid, ask, datetime.now(UTC)
 
     def get_ticker_stats(self) -> list[dict[str, object]]:
         payload = self._get("/api/v2/ticker")
@@ -1212,6 +1223,13 @@ class DryRunExchangeClient(ExchangeClient):
         self._exchange_info = exchange_info or []
         self._rng = Random(42)
         self._fills: list[TradeFill] = []
+
+    def get_orderbook_with_timestamp(
+        self, symbol: str, limit: int | None = None
+    ) -> tuple[Decimal, Decimal, datetime | None]:
+        del limit
+        bid, ask = self.get_orderbook(symbol)
+        return bid, ask, datetime.now(UTC)
 
     def get_ticker_stats(self) -> list[dict[str, object]]:
         stats: list[dict[str, object]] = []

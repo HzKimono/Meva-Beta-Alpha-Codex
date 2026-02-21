@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from btcbot.config import Settings
@@ -471,3 +471,65 @@ def test_bootstrap_intents_skip_when_open_buy_order_exists() -> None:
 
     assert intents == []
     assert drop_reasons.get("skipped_due_to_open_orders") == 1
+
+
+
+def _read_latest_cycle_counts(db_path) -> dict[str, int]:
+    store = StateStore(str(db_path))
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT counts_json FROM cycle_audit ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    return json.loads(row["counts_json"])
+
+
+class _TimestampedExchange(FakeExchange):
+    def __init__(self, *, observed_at: datetime) -> None:
+        super().__init__()
+        self._observed_at = observed_at
+
+    def get_orderbook_with_timestamp(self, symbol: str):
+        del symbol
+        return (Decimal("100"), Decimal("102"), self._observed_at)
+
+
+def test_stale_market_snapshot_blocks_symbol_execution(monkeypatch, tmp_path, caplog) -> None:
+    exchange = _TimestampedExchange(observed_at=datetime.now(UTC) - timedelta(minutes=30))
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "stale_market.sqlite"),
+        SYMBOLS="BTC_TRY",
+        STALE_MARKET_DATA_SECONDS=10,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert runner.run_one_cycle(settings) == 0
+    counts = _read_latest_cycle_counts(tmp_path / "stale_market.sqlite")
+    assert counts["accepted_actions"] == 0
+    assert "stale_market_data_age_exceeded" in caplog.text
+
+
+def test_fresh_market_snapshot_keeps_symbol_tradable(monkeypatch, tmp_path, caplog) -> None:
+    exchange = _TimestampedExchange(observed_at=datetime.now(UTC))
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "fresh_market.sqlite"),
+        SYMBOLS="BTC_TRY",
+        STALE_MARKET_DATA_SECONDS=10,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert runner.run_one_cycle(settings) == 0
+    counts = _read_latest_cycle_counts(tmp_path / "fresh_market.sqlite")
+    assert counts["accepted_actions"] >= 0
+    assert "stale_market_data_age_exceeded" not in caplog.text
