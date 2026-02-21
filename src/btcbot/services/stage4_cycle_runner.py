@@ -665,7 +665,8 @@ class Stage4CycleRunner:
                     else:
                         cursor_stall_by_symbol[symbol] = 0
 
-            cycle_duration_ms = int((cycle_now - cycle_started_at).total_seconds() * 1000)
+            cycle_observed_at = datetime.now(UTC)
+            cycle_duration_ms = int((cycle_observed_at - cycle_started_at).total_seconds() * 1000)
             anomalies = anomaly_detector.detect(
                 market_data_age_seconds={
                     k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()
@@ -715,7 +716,8 @@ class Stage4CycleRunner:
             execution_report = execution_service.execute_with_report(prefiltered_actions)
             self._assert_execution_invariant(execution_report)
 
-            updated_cycle_duration_ms = int((cycle_now - cycle_started_at).total_seconds() * 1000)
+            cycle_ended_at = datetime.now(UTC)
+            updated_cycle_duration_ms = int((cycle_ended_at - cycle_started_at).total_seconds() * 1000)
             updated_anomalies = anomaly_detector.detect(
                 market_data_age_seconds={
                     k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()
@@ -828,7 +830,7 @@ class Stage4CycleRunner:
             cycle_metrics: CycleMetrics = metrics_service.build_cycle_metrics(
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,
-                cycle_ended_at=cycle_now,
+                cycle_ended_at=datetime.now(UTC),
                 mode=final_mode.value,
                 fills=fills,
                 fills_fetched_count=fills_fetched,

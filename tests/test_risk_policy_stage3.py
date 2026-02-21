@@ -291,6 +291,40 @@ def test_market_data_rules_provider_fail_closed_when_defaults_disabled(caplog) -
 
     assert any(record.getMessage() == "exchange_rules_missing_fail_closed" for record in caplog.records)
 
+
+
+def test_policy_rejects_intents_when_exchange_rules_unavailable_fail_closed(caplog) -> None:
+    clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+    policy = RiskPolicy(
+        rules_provider=MarketDataExchangeRulesProvider(
+            FailingMarketDataService(),
+            now_provider=clock.now,
+            allow_default_fallback=False,
+        ),
+        max_orders_per_cycle=1,
+        max_open_orders_per_symbol=1,
+        cooldown_seconds=60,
+        notional_cap_try_per_cycle=Decimal("100"),
+        max_notional_per_order_try=Decimal("0"),
+        now_provider=clock.now,
+    )
+    context = RiskPolicyContext(
+        cycle_id="c1",
+        open_orders_by_symbol={},
+        last_intent_ts_by_symbol_side={},
+        mark_prices={},
+    )
+
+    caplog.set_level(logging.WARNING, logger="btcbot.risk.policy")
+    approved = policy.evaluate(context, [_intent("rules_missing")])
+
+    assert approved == []
+    assert any(
+        str(event.get("reason_code")) == "exchange_rules_unavailable_blocked"
+        for event in policy.last_blocked_events
+    )
+    assert any(record.getMessage() == "exchange_rules_unavailable_blocked" for record in caplog.records)
+
 def test_market_data_rules_provider_logs_traceback_on_fallback(caplog) -> None:
     clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
     provider = MarketDataExchangeRulesProvider(FailingMarketDataService(), now_provider=clock.now)

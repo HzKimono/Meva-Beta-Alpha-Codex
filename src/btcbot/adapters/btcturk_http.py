@@ -672,9 +672,54 @@ class BtcturkHttpClient(ExchangeClient):
     def get_orderbook_with_timestamp(
         self, symbol: str, limit: int | None = None
     ) -> tuple[Decimal, Decimal, datetime | None]:
-        del limit
-        bid, ask = self.get_orderbook(symbol)
-        return bid, ask, datetime.now(UTC)
+        pair_symbol = self._pair_symbol(symbol)
+        key = (pair_symbol, limit)
+
+        with self._orderbook_lock:
+            cached = self._orderbook_cache.get(key)
+            now = monotonic()
+            if cached is not None and cached[0] > now:
+                return cached[1][0], cached[1][1], cached[2]
+            inflight = self._orderbook_inflight.get(key)
+            if inflight is None:
+                inflight = Event()
+                self._orderbook_inflight[key] = inflight
+                leader = True
+            else:
+                leader = False
+
+        if not leader:
+            inflight.wait()
+            with self._orderbook_lock:
+                cached_after = self._orderbook_cache.get(key)
+                if cached_after is not None and cached_after[0] > monotonic():
+                    return cached_after[1][0], cached_after[1][1], cached_after[2]
+            return Decimal("0"), Decimal("0"), None
+
+        try:
+            params: dict[str, str | int] = {"pairSymbol": pair_symbol}
+            if limit is not None:
+                params["limit"] = limit
+            payload = self._get("/api/v2/orderbook", params=params)
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise ValueError(f"Malformed orderbook payload for {symbol}: data must be an object")
+            best_bid = _parse_best_price(data.get("bids"), side="bid", symbol=symbol)
+            best_ask = _parse_best_price(data.get("asks"), side="ask", symbol=symbol)
+            fetched_at = datetime.now(UTC)
+            result = (best_bid, best_ask)
+            with self._orderbook_lock:
+                self._orderbook_cache[key] = (
+                    monotonic() + self._orderbook_cache_ttl_s,
+                    result,
+                    fetched_at,
+                )
+            return best_bid, best_ask, fetched_at
+        finally:
+            with self._orderbook_lock:
+                event = self._orderbook_inflight.pop(key, None)
+            if event is not None:
+                event.set()
 
     def get_ticker_stats(self) -> list[dict[str, object]]:
         payload = self._get("/api/v2/ticker")
@@ -1223,6 +1268,17 @@ class DryRunExchangeClient(ExchangeClient):
         self._exchange_info = exchange_info or []
         self._rng = Random(42)
         self._fills: list[TradeFill] = []
+        now = datetime.now(UTC)
+        self._orderbook_observed_at: dict[str, datetime] = {
+            symbol: now for symbol in self._orderbooks
+        }
+
+    def get_orderbook_with_timestamp(
+        self, symbol: str, limit: int | None = None
+    ) -> tuple[Decimal, Decimal, datetime | None]:
+        del limit
+        bid, ask = self.get_orderbook(symbol)
+        return bid, ask, self._orderbook_observed_at.get(symbol)
 
     def get_orderbook_with_timestamp(
         self, symbol: str, limit: int | None = None
