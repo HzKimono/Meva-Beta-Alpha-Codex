@@ -7,8 +7,6 @@ from pathlib import Path
 
 import pytest
 
-import pytest
-
 import btcbot.services.execution_service as execution_service_module
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.models import (
@@ -49,9 +47,9 @@ class LifecycleExchange(ExchangeClient):
     def get_balances(self) -> list[Balance]:
         return []
 
-    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
+    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[Decimal, Decimal]:
         del symbol, limit
-        return (0.0, 0.0)
+        return (Decimal("0"), Decimal("0"))
 
     def get_exchange_info(self) -> list[PairInfo]:
         return []
@@ -98,8 +96,8 @@ class LifecycleExchange(ExchangeClient):
         self,
         symbol: str,
         side: OrderSide,
-        price: float,
-        quantity: float,
+        price: Decimal,
+        quantity: Decimal,
         client_order_id: str | None = None,
     ) -> Order:
         self.place_calls += 1
@@ -133,8 +131,8 @@ class LifecycleExchange(ExchangeClient):
                 client_order_id="cid-101",
                 symbol="BTCTRY",
                 side=OrderSide.BUY,
-                price=100.0,
-                quantity=0.1,
+                price=Decimal("100.0"),
+                quantity=Decimal("0.1"),
                 status=OrderStatus.OPEN,
                 created_at=now - timedelta(seconds=500),
                 updated_at=now,
@@ -146,9 +144,9 @@ def _intent(cycle_id: str = "c1") -> OrderIntent:
     return OrderIntent(
         symbol="BTC_TRY",
         side=OrderSide.BUY,
-        price=100.0,
-        quantity=0.1,
-        notional=10.0,
+        price=Decimal("100.0"),
+        quantity=Decimal("0.1"),
+        notional=Decimal("10.0"),
         cycle_id=cycle_id,
     )
 
@@ -176,8 +174,8 @@ def test_refresh_lifecycle_marks_reconciled_from_open_orders(tmp_path) -> None:
             client_order_id="cid-open",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.OPEN,
             created_at=now,
             updated_at=now,
@@ -190,8 +188,8 @@ def test_refresh_lifecycle_marks_reconciled_from_open_orders(tmp_path) -> None:
             client_order_id="cid-open",
             pair_symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=ExchangeOrderStatus.OPEN,
             timestamp=1700000000000,
             update_time=1700000000100,
@@ -228,8 +226,8 @@ def test_refresh_lifecycle_marks_reconciled_from_all_orders(tmp_path) -> None:
             client_order_id="cid-cancel",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.OPEN,
             created_at=now,
             updated_at=now,
@@ -243,8 +241,8 @@ def test_refresh_lifecycle_marks_reconciled_from_all_orders(tmp_path) -> None:
             client_order_id="cid-cancel",
             pair_symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=ExchangeOrderStatus.CANCELED,
             timestamp=1700000000000,
             update_time=1700000000100,
@@ -283,8 +281,8 @@ def test_lifecycle_new_to_open_on_refresh(tmp_path) -> None:
             client_order_id=None,
             pair_symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=ExchangeOrderStatus.OPEN,
             timestamp=1700000000000,
             update_time=1700000000100,
@@ -308,8 +306,8 @@ def test_lifecycle_open_to_filled_from_all_orders(tmp_path) -> None:
             client_order_id=None,
             pair_symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=ExchangeOrderStatus.FILLED,
             timestamp=1700000000000,
             update_time=1700000000100,
@@ -335,8 +333,8 @@ def test_lifecycle_open_to_canceled_after_confirmed_cancel(tmp_path) -> None:
             client_order_id="cid-101",
             pair_symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=ExchangeOrderStatus.CANCELED,
             timestamp=1700000000000,
             update_time=1700000000100,
@@ -405,8 +403,8 @@ def test_unknown_order_reprobe_survives_restart_and_resolves_without_duplicate_s
             client_order_id=None,
             pair_symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=ExchangeOrderStatus.FILLED,
             timestamp=1700000000000,
             update_time=1700000000100,
@@ -432,8 +430,8 @@ def test_unknown_probe_dynamic_lookback_uses_first_seen(tmp_path) -> None:
             client_order_id="cid-101",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.OPEN,
             created_at=now,
             updated_at=now,
@@ -486,8 +484,8 @@ def test_unknown_reprobe_clamps_corrupted_attempts(tmp_path) -> None:
             client_order_id="cid-101",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.UNKNOWN,
             created_at=now,
             updated_at=now,
@@ -549,8 +547,8 @@ def test_unknown_escalation_emits_metric_and_forces_observe_only(tmp_path, monke
             client_order_id="cid-101",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.UNKNOWN,
             created_at=now,
             updated_at=now,
@@ -580,8 +578,8 @@ def test_unknown_state_preserved_and_not_reacted(tmp_path) -> None:
             client_order_id="cid-101",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.UNKNOWN,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
@@ -614,8 +612,8 @@ def test_submit_blocked_when_unknown_present_and_cancel_allowed(tmp_path) -> Non
             client_order_id="cid-1",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.UNKNOWN,
             created_at=now,
             updated_at=now,
@@ -629,8 +627,8 @@ def test_submit_blocked_when_unknown_present_and_cancel_allowed(tmp_path) -> Non
         client_order_id="cid-open",
         symbol="BTCTRY",
         side=OrderSide.BUY,
-        price=100.0,
-        quantity=0.1,
+        price=Decimal("100.0"),
+        quantity=Decimal("0.1"),
         status=OrderStatus.OPEN,
         created_at=now - timedelta(seconds=1000),
         updated_at=now - timedelta(seconds=1000),
@@ -649,8 +647,8 @@ def test_freeze_remains_active_when_reconcile_fails(tmp_path) -> None:
             client_order_id="cid-1",
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.UNKNOWN,
             created_at=now,
             updated_at=now,
@@ -695,8 +693,8 @@ def test_freeze_clears_only_after_reconcile_confirms_zero_unknown(tmp_path) -> N
             client_order_id=unknown_client_order_id,
             pair_symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100,
-            quantity=0.1,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
             status=ExchangeOrderStatus.FILLED,
             timestamp=1700000000000,
             update_time=1700000000100,
@@ -708,9 +706,9 @@ def test_freeze_clears_only_after_reconcile_confirms_zero_unknown(tmp_path) -> N
     allowed_intent = OrderIntent(
         symbol="BTC_TRY",
         side=OrderSide.BUY,
-        price=101.0,
-        quantity=0.2,
-        notional=20.2,
+        price=Decimal("101.0"),
+        quantity=Decimal("0.2"),
+        notional=Decimal("20.2"),
         cycle_id="allowed-after-reconcile",
     )
     assert service.execute_intents([allowed_intent]) == 1
@@ -803,6 +801,10 @@ def test_reconcile_handles_decimal_precision_without_false_unknown(tmp_path) -> 
     service.refresh_order_lifecycle(["BTC_TRY"])
     assert service.unknown_order_registry.has_unknown() is False
 
+    stored = service.state_store.get_order("101")
+    assert stored is not None
+    assert stored.price == Decimal("100.01")
+    assert stored.quantity == Decimal("0.1")
 
 
 def test_submit_gate_enforced_metric_emitted_on_block_and_allow(tmp_path, monkeypatch) -> None:

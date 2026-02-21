@@ -635,8 +635,8 @@ class ExecutionService:
             client_order_id=snapshot.client_order_id,
             symbol=snapshot.pair_symbol,
             side=side,
-            price=float(snapshot.price),
-            quantity=float(snapshot.quantity),
+            price=snapshot.price,
+            quantity=snapshot.quantity,
             status=self._map_exchange_status(snapshot.status),
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
@@ -1444,7 +1444,7 @@ class ExecutionService:
         cycle_id: str,
         intent_id: str | None,
     ) -> Order:
-        self._sync_unknown_registry_from_store(allow_clear=True)
+        self._sync_unknown_registry_from_store(allow_clear=False)
         self._emit_unknown_freeze_metrics()
         get_instrumentation().counter("submit_gate_enforced_total", 1)
 

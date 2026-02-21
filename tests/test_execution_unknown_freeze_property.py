@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -55,9 +56,9 @@ class _FakeExchange(ExchangeClient):
     def get_balances(self) -> list[Balance]:
         return []
 
-    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
+    def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[Decimal, Decimal]:
         del symbol, limit
-        return (0.0, 0.0)
+        return (Decimal("0"), Decimal("0"))
 
     def get_exchange_info(self) -> list[PairInfo]:
         return []
@@ -74,8 +75,8 @@ class _FakeExchange(ExchangeClient):
         self,
         symbol: str,
         side: OrderSide,
-        price: float,
-        quantity: float,
+        price: Decimal,
+        quantity: Decimal,
         client_order_id: str | None = None,
     ) -> Order:
         del symbol, side, price, quantity, client_order_id
@@ -86,8 +87,8 @@ class _FakeExchange(ExchangeClient):
             client_order_id=None,
             symbol="BTCTRY",
             side=OrderSide.BUY,
-            price=100.0,
-            quantity=0.1,
+            price=Decimal("100.0"),
+            quantity=Decimal("0.1"),
             status=OrderStatus.NEW,
             created_at=now,
             updated_at=now,
@@ -106,9 +107,9 @@ def _intent(cycle_id: str) -> OrderIntent:
     return OrderIntent(
         symbol="BTC_TRY",
         side=OrderSide.BUY,
-        price=100.0,
-        quantity=0.1,
-        notional=10.0,
+        price=Decimal("100.0"),
+        quantity=Decimal("0.1"),
+        notional=Decimal("10.0"),
         cycle_id=cycle_id,
     )
 
@@ -136,8 +137,8 @@ def test_submit_never_reaches_exchange_when_unknown_present(tmp_path, events) ->
                     client_order_id="cid-prop",
                     symbol="BTCTRY",
                     side=OrderSide.BUY,
-                    price=100,
-                    quantity=0.1,
+                    price=Decimal("100"),
+                    quantity=Decimal("0.1"),
                     status=OrderStatus.UNKNOWN,
                     created_at=now,
                     updated_at=now,
