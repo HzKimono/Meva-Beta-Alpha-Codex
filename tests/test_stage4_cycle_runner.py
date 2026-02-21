@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
-from decimal import Decimal
 
+import httpx
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from time import monotonic
+
+from btcbot.adapters.btcturk_http import BtcturkHttpClient
 from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import OrderSide, PairInfo
@@ -471,3 +475,153 @@ def test_bootstrap_intents_skip_when_open_buy_order_exists() -> None:
 
     assert intents == []
     assert drop_reasons.get("skipped_due_to_open_orders") == 1
+
+
+
+def _read_latest_cycle_counts(db_path) -> dict[str, int]:
+    store = StateStore(str(db_path))
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT counts_json FROM cycle_audit ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    return json.loads(row["counts_json"])
+
+
+class _TimestampedExchange(FakeExchange):
+    def __init__(self, *, observed_at: datetime) -> None:
+        super().__init__()
+        self._observed_at = observed_at
+
+    def get_orderbook_with_timestamp(self, symbol: str):
+        del symbol
+        return (Decimal("100"), Decimal("102"), self._observed_at)
+
+
+def test_stale_market_snapshot_blocks_symbol_execution(monkeypatch, tmp_path, caplog) -> None:
+    exchange = _TimestampedExchange(observed_at=datetime.now(UTC) - timedelta(minutes=30))
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "stale_market.sqlite"),
+        SYMBOLS="BTC_TRY",
+        STALE_MARKET_DATA_SECONDS=10,
+        DYNAMIC_UNIVERSE_ENABLED=False,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert runner.run_one_cycle(settings) == 0
+    counts = _read_latest_cycle_counts(tmp_path / "stale_market.sqlite")
+    assert counts["accepted_actions"] == 0
+    assert "stale_market_data_age_exceeded" in caplog.text
+
+
+def test_fresh_market_snapshot_keeps_symbol_tradable(monkeypatch, tmp_path, caplog) -> None:
+    exchange = _TimestampedExchange(observed_at=datetime.now(UTC))
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "fresh_market.sqlite"),
+        SYMBOLS="BTC_TRY",
+        STALE_MARKET_DATA_SECONDS=10,
+        DYNAMIC_UNIVERSE_ENABLED=False,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert runner.run_one_cycle(settings) == 0
+    counts = _read_latest_cycle_counts(tmp_path / "fresh_market.sqlite")
+    assert counts["accepted_actions"] >= 0
+    assert "stale_market_data_age_exceeded" not in caplog.text
+
+
+class _AdapterBackedExchange:
+    def __init__(self, *, client: BtcturkHttpClient) -> None:
+        self.client = client
+
+    def get_orderbook(self, symbol: str):
+        return self.client.get_orderbook(symbol)
+
+    def get_balances(self):
+        return [type("B", (), {"asset": "TRY", "free": Decimal("100")})()]
+
+    def list_open_orders(self, symbol: str):
+        del symbol
+        return []
+
+    def get_recent_fills(self, symbol: str, since_ms: int | None = None):
+        del symbol, since_ms
+        return []
+
+    def get_exchange_info(self) -> list[PairInfo]:
+        return [
+            PairInfo(
+                pairSymbol="BTCTRY",
+                numeratorScale=6,
+                denominatorScale=2,
+                minTotalAmount=Decimal("10"),
+                tickSize=Decimal("0.1"),
+                stepSize=Decimal("0.0001"),
+            )
+        ]
+
+    def submit_limit_order(self, symbol, side, price, qty, client_order_id):
+        del symbol, side, price, qty, client_order_id
+        return type("Ack", (), {"exchange_order_id": "ex-1", "status": "submitted"})()
+
+    def cancel_order_by_exchange_id(self, exchange_order_id: str):
+        del exchange_order_id
+        return True
+
+    def cancel_order_by_client_order_id(self, client_order_id: str):
+        del client_order_id
+        return True
+
+    def close(self) -> None:
+        self.client.close()
+
+
+def test_stage4_stale_data_blocks_with_btcturk_adapter_timestamp_cache(monkeypatch, tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"bids": [["100", "1"]], "asks": [["102", "1"]]}},
+            request=request,
+        )
+
+    client = BtcturkHttpClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        orderbook_cache_ttl_s=120.0,
+    )
+    stale_ts = datetime.now(UTC) - timedelta(minutes=45)
+    client._orderbook_cache[("BTCTRY", None)] = (
+        monotonic() + 120.0,
+        (Decimal("100"), Decimal("102")),
+        stale_ts,
+    )
+    exchange = _AdapterBackedExchange(client=client)
+    runner = Stage4CycleRunner()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    db_path = tmp_path / "stale_adapter.sqlite"
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STALE_MARKET_DATA_SECONDS=10,
+        DYNAMIC_UNIVERSE_ENABLED=False,
+    )
+    assert runner.run_one_cycle(settings) == 0
+    counts = _read_latest_cycle_counts(db_path)
+    assert counts["accepted_actions"] == 0

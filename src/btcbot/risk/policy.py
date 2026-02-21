@@ -10,7 +10,11 @@ from btcbot.domain.decision_codes import ReasonCode, map_risk_reason
 from btcbot.domain.intent import Intent
 from btcbot.domain.models import OrderSide, normalize_symbol
 from btcbot.observability_decisions import emit_decision
-from btcbot.risk.exchange_rules import ExchangeRules, ExchangeRulesProvider
+from btcbot.risk.exchange_rules import (
+    ExchangeRules,
+    ExchangeRulesProvider,
+    ExchangeRulesUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +186,43 @@ class RiskPolicy:
                 price_tick=Decimal("0"),
                 qty_step=Decimal("0.00000001"),
             )
-        rules = self.rules_provider.get_rules(intent.symbol)
+        try:
+            rules = self.rules_provider.get_rules(intent.symbol)
+        except ExchangeRulesUnavailableError:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": context.cycle_id,
+                    "decision_layer": "risk_policy",
+                    "reason_code": "exchange_rules_unavailable_blocked",
+                    "action": "BLOCK",
+                    "scope": "per_intent",
+                    "intent_id": intent.intent_id,
+                    "symbol": normalize_symbol(intent.symbol),
+                    "side": intent.side.value,
+                },
+            )
+            self.last_blocked_events.append(
+                {
+                    "intent_id": intent.intent_id,
+                    "symbol": normalize_symbol(intent.symbol),
+                    "reason_code": "exchange_rules_unavailable_blocked",
+                    "cycle_id": context.cycle_id,
+                    "decision_layer": "risk_policy",
+                }
+            )
+            logger.warning(
+                "exchange_rules_unavailable_blocked",
+                extra={
+                    "extra": {
+                        "cycle_id": context.cycle_id,
+                        "intent_id": intent.intent_id,
+                        "symbol": normalize_symbol(intent.symbol),
+                        "side": intent.side.value,
+                    }
+                },
+            )
+            return None
         q_price = _quantize(intent.limit_price, rules.price_tick)
         q_qty = _quantize(intent.qty, rules.qty_step)
         if q_price <= 0 or q_qty <= 0:

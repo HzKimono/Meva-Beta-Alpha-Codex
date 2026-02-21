@@ -5,13 +5,12 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import Enum, StrEnum
+from enum import Enum
 
+from btcbot.domain.risk_budget import Mode
 
-class RiskMode(StrEnum):
-    NORMAL = "NORMAL"
-    REDUCE_RISK_ONLY = "REDUCE_RISK_ONLY"
-    OBSERVE_ONLY = "OBSERVE_ONLY"
+# Canonical mode enum is domain.risk_budget.Mode; keep RiskMode alias for compatibility.
+RiskMode = Mode
 
 
 @dataclass(frozen=True)
