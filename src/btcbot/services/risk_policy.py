@@ -67,16 +67,12 @@ class RiskPolicy:
 
         projected_open_orders = open_orders_count
         projected_position_notional = current_position_notional_try
-        replace_inflight_notional_by_symbol: dict[str, Decimal] = {}
         min_required_bps = self.fee_bps_taker + self.slippage_bps_buffer + self.min_profit_bps
         open_orders_lookup = open_orders_by_client_id or {}
 
         for action in actions:
             if action.action_type == LifecycleActionType.CANCEL:
                 projected_open_orders = max(0, projected_open_orders - 1)
-                if action.side.lower() == "buy":
-                    remaining = replace_inflight_notional_by_symbol.get(action.symbol, Decimal("0"))
-                    replace_inflight_notional_by_symbol[action.symbol] = max(Decimal("0"), remaining - (action.price * action.qty))
                 accepted.append(action)
                 decisions.append(RiskDecision(action=action, accepted=True, reason="accepted"))
                 continue
@@ -125,11 +121,6 @@ class RiskPolicy:
                 if projected_position_notional > self.max_position_notional_try:
                     projected_open_orders -= 1
                     projected_position_notional -= action_notional
-                    if is_replace_submit:
-                        replace_inflight_notional_by_symbol[action.symbol] = max(
-                            Decimal("0"),
-                            replace_inflight_notional_by_symbol.get(action.symbol, Decimal("0")) - action_notional,
-                        )
                     decisions.append(
                         RiskDecision(
                             action=action,
