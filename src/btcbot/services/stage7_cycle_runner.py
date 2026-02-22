@@ -12,7 +12,7 @@ from btcbot.adapters.replay_exchange import ReplayExchangeClient
 from btcbot.config import Settings
 from btcbot.domain.accounting import Position, TradeFill
 from btcbot.domain.anomalies import combine_modes
-from btcbot.domain.ledger import LedgerEvent, LedgerEventType, LedgerState, apply_events
+from btcbot.domain.ledger import LedgerEvent, LedgerEventType
 from btcbot.domain.models import Balance, normalize_symbol
 from btcbot.domain.models import OrderSide as DomainOrderSide
 from btcbot.domain.order_intent import OrderIntent
@@ -689,7 +689,7 @@ class Stage7CycleRunner:
                 },
             )
 
-            ledger_state = apply_events(LedgerState(), state_store.load_ledger_events())
+            ledger_state, _, _, _ = ledger_service.load_state_incremental(scope_id="stage7")
             for symbol in sorted(ledger_state.symbols):
                 symbol_state = ledger_state.symbols[symbol]
                 qty = sum((lot.qty for lot in symbol_state.lots), Decimal("0"))
@@ -729,6 +729,7 @@ class Stage7CycleRunner:
                 cash_try=exposure_snapshot.free_cash_try,
                 slippage_try=slippage_try,
                 ts=now,
+                ledger_state=ledger_state,
             )
 
             collector.stop_timer("ledger")

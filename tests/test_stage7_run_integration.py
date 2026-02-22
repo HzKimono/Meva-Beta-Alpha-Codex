@@ -1053,3 +1053,75 @@ def test_stage7_fill_materialization_is_idempotent_for_same_cycle(monkeypatch, t
 
     assert fills_count == 1
     assert ledger_events_count == 2
+
+
+def test_stage7_repeated_run_uses_incremental_ledger_checkpoint(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "stage7_repeat.db"
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.Stage4CycleRunner.run_one_cycle",
+        lambda self, settings: 0,
+    )
+
+    class _Pair:
+        def __init__(self, pair_symbol: str) -> None:
+            self.pair_symbol = pair_symbol
+            self.tick_size = Decimal("0.1")
+            self.step_size = Decimal("0.0001")
+            self.min_total_amount = Decimal("10")
+
+    class _Exchange:
+        def get_exchange_info(self):
+            return [_Pair("BTC_TRY")]
+
+        def get_ticker_stats(self):
+            return [{"pairSymbol": "BTC_TRY", "volume": "1000", "last": "100", "high": "101", "low": "99"}]
+
+        def get_orderbook(self, symbol):
+            del symbol
+            return Decimal("99"), Decimal("100")
+
+        def get_candles(self, symbol, lookback):
+            del symbol
+            return [{"close": "100"} for _ in range(lookback)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "btcbot.services.stage7_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: SimpleNamespace(client=_Exchange(), close=lambda: None),
+    )
+
+    original_load = StateStore.load_ledger_events
+
+    def _fail_full_replay(self, *args, **kwargs):
+        raise AssertionError("full ledger replay should not be used in stage7")
+
+    monkeypatch.setattr(StateStore, "load_ledger_events", _fail_full_replay)
+
+    settings = Settings(
+        DRY_RUN=True,
+        STAGE7_ENABLED=True,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+    )
+
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+    assert cli.run_cycle_stage7(settings, force_dry_run=True) == 0
+
+    monkeypatch.setattr(StateStore, "load_ledger_events", original_load)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        checkpoint = conn.execute(
+            "SELECT scope_id, last_rowid, snapshot_version FROM ledger_reducer_checkpoints WHERE scope_id='stage7'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert checkpoint is not None
+    assert checkpoint["scope_id"] == "stage7"
+    assert int(checkpoint["last_rowid"]) >= 0
+    assert int(checkpoint["snapshot_version"]) == 1

@@ -89,3 +89,61 @@ def test_append_ledger_fee_events_dedupes_exchange_trade_id(tmp_path) -> None:
     assert first.inserted == 1
     assert second.inserted == 0
     assert len(rows) == 1
+
+
+def test_ledger_incremental_rowid_and_checkpoint_io(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "ledger_checkpoint.db"))
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    events = [
+        LedgerEvent(
+            event_id="e1",
+            ts=ts,
+            symbol="BTCTRY",
+            type=LedgerEventType.FEE,
+            side=None,
+            qty=Decimal("0"),
+            price=None,
+            fee=Decimal("1"),
+            fee_currency="TRY",
+            exchange_trade_id="fee:e1",
+            exchange_order_id=None,
+            client_order_id=None,
+            meta={},
+        ),
+        LedgerEvent(
+            event_id="e2",
+            ts=ts,
+            symbol="BTCTRY",
+            type=LedgerEventType.FEE,
+            side=None,
+            qty=Decimal("0"),
+            price=None,
+            fee=Decimal("2"),
+            fee_currency="TRY",
+            exchange_trade_id="fee:e2",
+            exchange_order_id=None,
+            client_order_id=None,
+            meta={},
+        ),
+    ]
+    store.append_ledger_events(events)
+
+    assert store.get_latest_ledger_event_rowid() >= 2
+    events_after_zero, max_rowid_zero = store.load_ledger_events_after_rowid(0)
+    events_after_one, max_rowid_one = store.load_ledger_events_after_rowid(1)
+    assert len(events_after_zero) == 2
+    assert len(events_after_one) == 1
+    assert max_rowid_zero >= 2
+    assert max_rowid_one >= 2
+
+    store.upsert_ledger_checkpoint(
+        scope_id="stage7",
+        last_rowid=2,
+        snapshot_json='{"symbols":{},"fees_by_currency":{}}',
+        snapshot_version=1,
+        updated_at=ts.isoformat(),
+    )
+    checkpoint = store.get_ledger_checkpoint("stage7")
+    assert checkpoint is not None
+    assert checkpoint.last_rowid == 2
+    assert checkpoint.snapshot_version == 1
