@@ -49,6 +49,10 @@ class FakeExchange:
 @dataclass
 class Txn:
     state: str
+    symbol: str
+    side: str
+    old_client_order_ids: tuple[str, ...]
+    new_client_order_id: str
     last_error: str | None = None
 
 
@@ -136,13 +140,27 @@ class FakeStateStore:
         return self.replace.get(replace_tx_id)
 
     def upsert_replace_tx(self, *, replace_tx_id: str, symbol: str, side: str, old_client_order_ids: list[str], new_client_order_id: str, state: str, last_error: str | None = None) -> None:
-        del symbol, side, old_client_order_ids, new_client_order_id
         current = self.replace.get(replace_tx_id)
         if current is None:
-            self.replace[replace_tx_id] = Txn(state=state, last_error=last_error)
+            self.replace[replace_tx_id] = Txn(
+                state=state,
+                symbol=symbol,
+                side=side,
+                old_client_order_ids=tuple(old_client_order_ids),
+                new_client_order_id=new_client_order_id,
+                last_error=last_error,
+            )
 
     def update_replace_tx_state(self, *, replace_tx_id: str, state: str, last_error: str | None = None) -> None:
-        self.replace[replace_tx_id] = Txn(state=state, last_error=last_error)
+        current = self.replace[replace_tx_id]
+        self.replace[replace_tx_id] = Txn(
+            state=state,
+            symbol=current.symbol,
+            side=current.side,
+            old_client_order_ids=current.old_client_order_ids,
+            new_client_order_id=current.new_client_order_id,
+            last_error=last_error,
+        )
 
 
 def _service(exchange: FakeExchange, state_store: FakeStateStore) -> ExecutionService:
@@ -197,6 +215,7 @@ def test_replace_defers_until_open_order_disappears() -> None:
     assert first.submitted == 0
 
     exchange.open_orders = []
+    state_store.record_stage4_order_canceled("old")
     second = svc.execute_with_report(_replace_actions())
     assert second.submitted == 1
 
@@ -213,5 +232,6 @@ def test_uncertain_cancel_defers_then_reconcile_allows_submit() -> None:
 
     exchange.uncertain_cancel = False
     exchange.open_orders = []
+    state_store.record_stage4_order_canceled("old")
     second = svc.execute_with_report(_replace_actions())
     assert second.submitted == 1

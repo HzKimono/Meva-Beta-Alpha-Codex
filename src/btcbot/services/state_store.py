@@ -98,18 +98,32 @@ REPLACE_TX_STATE_ORDER = {
     "SUBMIT_SENT": 3,
     "SUBMIT_CONFIRMED": 4,
 }
+REPLACE_TX_RETRYABLE_BLOCKED_STATES = {"BLOCKED_UNKNOWN", "BLOCKED_RECONCILE"}
+REPLACE_TX_TERMINAL_STATES = {"SUBMIT_CONFIRMED", "FAILED"}
 
 
 def _is_replace_tx_forward_transition(current_state: str, new_state: str) -> bool:
-    current_rank = REPLACE_TX_STATE_ORDER.get(current_state)
-    new_rank = REPLACE_TX_STATE_ORDER.get(new_state)
-    if current_rank is None or new_rank is None:
-        return current_state != new_state
+    known_states = set(REPLACE_TX_STATE_ORDER) | REPLACE_TX_RETRYABLE_BLOCKED_STATES | REPLACE_TX_TERMINAL_STATES
+    if current_state not in known_states:
+        raise ValueError(f"unknown current replace_tx state: {current_state}")
+    if new_state not in known_states:
+        raise ValueError(f"unknown target replace_tx state: {new_state}")
+
+    if current_state in REPLACE_TX_TERMINAL_STATES:
+        return new_state == current_state
+
+    if new_state in REPLACE_TX_RETRYABLE_BLOCKED_STATES:
+        return True
+    if new_state == "FAILED":
+        return True
+
+    current_rank = REPLACE_TX_STATE_ORDER.get(current_state, -1)
+    new_rank = REPLACE_TX_STATE_ORDER.get(new_state, -1)
     return new_rank >= current_rank
 
 
 def _is_replace_tx_terminal(state: str) -> bool:
-    return state in {"SUBMIT_CONFIRMED", "FAILED"}
+    return state in REPLACE_TX_TERMINAL_STATES
 
 
 def _is_replace_tx_retryable_open(state: str) -> bool:
@@ -3122,6 +3136,37 @@ class StateStore:
             status="rejected",
         )
 
+    @staticmethod
+    def _parse_replace_old_ids(raw: object) -> tuple[str, ...]:
+        if raw is None:
+            return ()
+        try:
+            parsed = json.loads(str(raw))
+        except json.JSONDecodeError:
+            return ()
+        if not isinstance(parsed, list):
+            return ()
+        return tuple(str(item) for item in parsed)
+
+    @staticmethod
+    def _same_replace_metadata(
+        *,
+        existing_symbol: str,
+        existing_side: str,
+        existing_old_ids: tuple[str, ...],
+        existing_new_id: str,
+        symbol: str,
+        side: str,
+        old_ids: list[str],
+        new_id: str,
+    ) -> bool:
+        return (
+            normalize_symbol(existing_symbol) == normalize_symbol(symbol)
+            and existing_side == side
+            and set(existing_old_ids) == set(old_ids)
+            and existing_new_id == new_id
+        )
+
     def get_replace_tx(self, replace_tx_id: str) -> ReplaceTxRecord | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -3130,12 +3175,12 @@ class StateStore:
             ).fetchone()
         if row is None:
             return None
-        old_ids = json.loads(str(row["old_client_order_ids_json"])) if row["old_client_order_ids_json"] else []
+        old_ids = self._parse_replace_old_ids(row["old_client_order_ids_json"])
         return ReplaceTxRecord(
             replace_tx_id=str(row["replace_tx_id"]),
             symbol=str(row["symbol"]),
             side=str(row["side"]),
-            old_client_order_ids=tuple(str(item) for item in old_ids),
+            old_client_order_ids=old_ids,
             new_client_order_id=str(row["new_client_order_id"]),
             state=str(row["state"]),
             last_error=(str(row["last_error"]) if row["last_error"] else None),
@@ -3157,7 +3202,11 @@ class StateStore:
         now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             existing = conn.execute(
-                "SELECT state, last_error FROM stage4_replace_transactions WHERE replace_tx_id=?",
+                """
+                SELECT symbol, side, old_client_order_ids_json, new_client_order_id, state, last_error
+                FROM stage4_replace_transactions
+                WHERE replace_tx_id=?
+                """,
                 (replace_tx_id,),
             ).fetchone()
             if existing is None:
@@ -3181,10 +3230,35 @@ class StateStore:
                 )
                 return
 
+            existing_old_ids = self._parse_replace_old_ids(existing["old_client_order_ids_json"])
+            if not self._same_replace_metadata(
+                existing_symbol=str(existing["symbol"]),
+                existing_side=str(existing["side"]),
+                existing_old_ids=existing_old_ids,
+                existing_new_id=str(existing["new_client_order_id"]),
+                symbol=symbol,
+                side=side,
+                old_ids=old_client_order_ids,
+                new_id=new_client_order_id,
+            ):
+                mismatch_error = "replace_tx_metadata_mismatch"
+                conn.execute(
+                    """
+                    UPDATE stage4_replace_transactions
+                    SET last_error=?, last_updated_at=?
+                    WHERE replace_tx_id=?
+                    """,
+                    (mismatch_error, now, replace_tx_id),
+                )
+                return
+
             current_state = str(existing["state"])
             current_error = str(existing["last_error"]) if existing["last_error"] else None
-            next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
-            next_error = last_error if next_state != current_state else current_error
+            try:
+                next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
+            except ValueError:
+                next_state = current_state
+            next_error = last_error if next_state != current_state and last_error is not None else current_error
             conn.execute(
                 """
                 UPDATE stage4_replace_transactions
@@ -3220,7 +3294,11 @@ class StateStore:
                 return
             current_state = str(existing["state"])
             current_error = str(existing["last_error"]) if existing["last_error"] else None
-            next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
+            try:
+                next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
+            except ValueError:
+                logger.warning("replace_tx_invalid_transition", extra={"extra": {"replace_tx_id": replace_tx_id, "from_state": current_state, "to_state": state}})
+                next_state = current_state
             next_error = last_error if last_error is not None else current_error
             conn.execute(
                 """
@@ -3242,13 +3320,13 @@ class StateStore:
             ).fetchall()
         records: list[ReplaceTxRecord] = []
         for row in rows:
-            old_ids = json.loads(str(row["old_client_order_ids_json"])) if row["old_client_order_ids_json"] else []
+            old_ids = self._parse_replace_old_ids(row["old_client_order_ids_json"])
             records.append(
                 ReplaceTxRecord(
                     replace_tx_id=str(row["replace_tx_id"]),
                     symbol=str(row["symbol"]),
                     side=str(row["side"]),
-                    old_client_order_ids=tuple(str(item) for item in old_ids),
+                    old_client_order_ids=old_ids,
                     new_client_order_id=str(row["new_client_order_id"]),
                     state=str(row["state"]),
                     last_error=(str(row["last_error"]) if row["last_error"] else None),

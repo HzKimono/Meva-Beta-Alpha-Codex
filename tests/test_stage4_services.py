@@ -1168,6 +1168,7 @@ def test_replace_submit_deferred_until_exchange_confirms_cancel(store: StateStor
     assert first.submitted == 0
 
     exchange.open_orders_by_symbol["BTC_TRY"] = []
+    store.record_stage4_order_canceled("old")
     second = svc.execute_with_report(actions)
     assert second.submitted == 1
 
@@ -1389,3 +1390,132 @@ def test_replace_multiple_submit_actions_coalesced_to_last(store: StateStore) ->
     assert exchange.submits[0][0] == "BTC_TRY"
     assert store.get_stage4_order_by_client_id("new-multi-1") is None
     assert store.get_stage4_order_by_client_id("new-multi-2") is not None
+
+
+
+def test_replace_local_non_terminal_defers_even_when_exchange_cleared(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    exchange.open_orders_by_symbol["BTC_TRY"] = []
+    store.record_stage4_order_submitted(
+        symbol="BTC_TRY",
+        client_order_id="old-local-open",
+        exchange_order_id="ex-old-local-open",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="open",
+    )
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            SAFE_MODE=False,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    actions = [
+        LifecycleAction(
+            action_type=LifecycleActionType.CANCEL,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            reason="replace_cancel",
+            client_order_id="old-local-open",
+            exchange_order_id="ex-old-local-open",
+        ),
+        LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("101"),
+            qty=Decimal("1"),
+            reason="replace_submit",
+            client_order_id="new-local-open",
+            replace_for_client_order_id="old-local-open",
+        ),
+    ]
+    report = svc.execute_with_report(actions)
+    assert report.submitted == 0
+
+
+def test_replace_multiple_submit_coalesce_increments_metric(store: StateStore) -> None:
+    class SpyMetrics:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def counter(self, name: str, value: int = 1, *, attrs=None) -> None:
+            del value, attrs
+            self.calls.append(name)
+
+        def gauge(self, name: str, value: float, *, attrs=None) -> None:
+            del name, value, attrs
+
+    exchange = FakeExchangeStage4()
+    exchange.open_orders_by_symbol["BTC_TRY"] = []
+    store.record_stage4_order_submitted(
+        symbol="BTC_TRY",
+        client_order_id="old-metric",
+        exchange_order_id="ex-old-metric",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="canceled",
+    )
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            SAFE_MODE=False,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    svc.instrumentation = SpyMetrics()  # type: ignore[assignment]
+    actions = [
+        LifecycleAction(
+            action_type=LifecycleActionType.CANCEL,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            reason="replace_cancel",
+            client_order_id="old-metric",
+            exchange_order_id="ex-old-metric",
+        ),
+        LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("101"),
+            qty=Decimal("1"),
+            reason="replace_submit",
+            client_order_id="new-metric-1",
+            replace_for_client_order_id="old-metric",
+        ),
+        LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("102"),
+            qty=Decimal("1"),
+            reason="replace_submit",
+            client_order_id="new-metric-2",
+            replace_for_client_order_id="old-metric",
+        ),
+    ]
+    svc.execute_with_report(actions)
+    assert "replace_multiple_submits_coalesced_total" in svc.instrumentation.calls

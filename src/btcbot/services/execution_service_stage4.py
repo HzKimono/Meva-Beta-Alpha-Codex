@@ -177,6 +177,34 @@ class ExecutionService:
             current_state = "INIT"
         else:
             current_state = existing_tx.state
+            if (
+                existing_tx.symbol.replace("_", "") != group.symbol.replace("_", "")
+                or existing_tx.side != group.side
+                or set(existing_tx.old_client_order_ids) != set(old_ids)
+                or existing_tx.new_client_order_id != new_id
+            ):
+                self.state_store.update_replace_tx_state(
+                    replace_tx_id=replace_tx_id,
+                    state=current_state,
+                    last_error="replace_tx_metadata_mismatch",
+                )
+                self.instrumentation.counter("replace_tx_metadata_mismatch_total", 1)
+                emit_decision(
+                    logger,
+                    {
+                        "decision_layer": "execution_stage4_replace",
+                        "reason_code": "replace_tx_metadata_mismatch",
+                        "action": "SUPPRESS",
+                        "payload": {
+                            "replace_tx_id": replace_tx_id,
+                            "symbol": group.symbol,
+                            "side": group.side,
+                            "old_client_order_ids": old_ids,
+                            "new_client_order_id": new_id,
+                        },
+                    },
+                )
+                return 0, 0, 0, 0, 0
 
         if current_state in {"SUBMIT_CONFIRMED", "FAILED"}:
             return 0, 0, 0, 0, 0
@@ -294,10 +322,9 @@ class ExecutionService:
             if old_id in open_client_ids:
                 return False, f"still_open:{old_id}"
             local_order = self.state_store.get_stage4_order_by_client_id(old_id)
-            if local_order is None:
-                continue
-            if local_order.status not in TERMINAL_OLD_ORDER_STATUSES and old_id in open_client_ids:
-                return False, f"local_non_terminal:{old_id}:{local_order.status}"
+            if local_order is None or local_order.status not in TERMINAL_OLD_ORDER_STATUSES:
+                status = "missing" if local_order is None else local_order.status
+                return False, f"local_state_not_terminal:{old_id}:{status}"
 
         return True, "confirmed"
 
