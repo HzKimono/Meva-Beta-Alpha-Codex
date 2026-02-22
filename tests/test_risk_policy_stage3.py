@@ -272,8 +272,6 @@ def test_policy_allows_evaluation_when_rules_unavailable() -> None:
     assert len(approved) == 1
 
 
-
-
 def test_market_data_rules_provider_fail_closed_when_defaults_disabled(caplog) -> None:
     clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
     provider = MarketDataExchangeRulesProvider(
@@ -285,12 +283,13 @@ def test_market_data_rules_provider_fail_closed_when_defaults_disabled(caplog) -
     caplog.set_level(logging.ERROR, logger="btcbot.risk.exchange_rules")
     try:
         provider.get_rules("BTC_TRY")
-        assert False, "expected fail-closed rules exception"
+        raise AssertionError("expected fail-closed rules exception")
     except ExchangeRulesUnavailableError:
         pass
 
-    assert any(record.getMessage() == "exchange_rules_missing_fail_closed" for record in caplog.records)
-
+    assert any(
+        record.getMessage() == "exchange_rules_missing_fail_closed" for record in caplog.records
+    )
 
 
 def test_policy_rejects_intents_when_exchange_rules_unavailable_fail_closed(
@@ -336,7 +335,10 @@ def test_policy_rejects_intents_when_exchange_rules_unavailable_fail_closed(
     assert captured[-1]["decision_layer"] == "risk_policy"
     assert captured[-1]["reason_code"] == "exchange_rules_unavailable_blocked"
     assert captured[-1]["action"] == "BLOCK"
-    assert any(record.getMessage() == "exchange_rules_unavailable_blocked" for record in caplog.records)
+    assert any(
+        record.getMessage() == "exchange_rules_unavailable_blocked" for record in caplog.records
+    )
+
 
 def test_market_data_rules_provider_logs_traceback_on_fallback(caplog) -> None:
     clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
@@ -529,6 +531,7 @@ def test_cash_reserve_target_blocks_buy_but_not_sell() -> None:
     approved = policy.evaluate(context, [buy_intent, sell_intent])
 
     assert [intent.side for intent in approved] == [OrderSide.SELL]
+
 
 def test_policy_block_log_includes_symbol_side_and_open_order_identifiers(caplog) -> None:
     clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))

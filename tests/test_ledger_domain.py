@@ -119,7 +119,9 @@ def test_ledger_state_snapshot_round_trip_is_deterministic() -> None:
         [
             _event("b", ts, "ETHTRY", LedgerEventType.FILL, "BUY", "2", "50"),
             _event("a", ts, "BTCTRY", LedgerEventType.FILL, "BUY", "1", "100"),
-            _event("c", ts, "BTCTRY", LedgerEventType.FEE, None, "0", None, fee="1", fee_currency="TRY"),
+            _event(
+                "c", ts, "BTCTRY", LedgerEventType.FEE, None, "0", None, fee="1", fee_currency="TRY"
+            ),
         ],
     )
 

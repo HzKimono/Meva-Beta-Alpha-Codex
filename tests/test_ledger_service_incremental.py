@@ -35,7 +35,9 @@ def _fee_event(event_id: str, ts: datetime, fee: Decimal) -> LedgerEvent:
     )
 
 
-def _fill_event(event_id: str, ts: datetime, side: str, qty: Decimal, price: Decimal) -> LedgerEvent:
+def _fill_event(
+    event_id: str, ts: datetime, side: str, qty: Decimal, price: Decimal
+) -> LedgerEvent:
     return LedgerEvent(
         event_id=event_id,
         ts=ts,
@@ -72,7 +74,9 @@ def test_full_replay_and_incremental_checkpoint_parity(tmp_path) -> None:
     store.append_ledger_events(events)
 
     full_state = apply_events(LedgerState(), store.load_ledger_events())
-    incremental_state, last_rowid, used_checkpoint, applied_events = service.load_state_incremental()
+    incremental_state, last_rowid, used_checkpoint, applied_events = (
+        service.load_state_incremental()
+    )
 
     _assert_state_equal(full_state, incremental_state)
     assert last_rowid > 0
@@ -82,7 +86,9 @@ def test_full_replay_and_incremental_checkpoint_parity(tmp_path) -> None:
     checkpoint_before = store.get_ledger_checkpoint("stage7")
     assert checkpoint_before is not None
 
-    second_state, second_rowid, second_used_checkpoint, second_applied = service.load_state_incremental()
+    second_state, second_rowid, second_used_checkpoint, second_applied = (
+        service.load_state_incremental()
+    )
     _assert_state_equal(full_state, second_state)
     assert second_rowid == last_rowid
     assert second_used_checkpoint is True
@@ -111,12 +117,16 @@ def test_incremental_cursor_does_not_skip_events_appended_during_checkpoint_writ
     def _upsert_with_concurrent_append(**kwargs):
         if not injected["done"]:
             injected["done"] = True
-            store.append_ledger_events([_fee_event("fee-3", t0 + timedelta(seconds=2), Decimal("3"))])
+            store.append_ledger_events(
+                [_fee_event("fee-3", t0 + timedelta(seconds=2), Decimal("3"))]
+            )
         return original_upsert(**kwargs)
 
     store.upsert_ledger_checkpoint = _upsert_with_concurrent_append  # type: ignore[method-assign]
     try:
-        state_after_second, second_cursor, used_checkpoint, second_applied = service.load_state_incremental()
+        state_after_second, second_cursor, used_checkpoint, second_applied = (
+            service.load_state_incremental()
+        )
     finally:
         store.upsert_ledger_checkpoint = original_upsert  # type: ignore[method-assign]
 
@@ -140,7 +150,9 @@ def test_incremental_perf_guard_no_new_events(tmp_path) -> None:
     service = LedgerService(state_store=store, logger=logging.getLogger(__name__))
 
     ts = datetime(2026, 1, 1, tzinfo=UTC)
-    events = [_fee_event(f"fee-{idx}", ts + timedelta(seconds=idx), Decimal("1")) for idx in range(50000)]
+    events = [
+        _fee_event(f"fee-{idx}", ts + timedelta(seconds=idx), Decimal("1")) for idx in range(50000)
+    ]
     store.append_ledger_events(events)
 
     start_full = time.monotonic()

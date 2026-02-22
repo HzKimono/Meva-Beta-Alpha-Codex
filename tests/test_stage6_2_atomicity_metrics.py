@@ -243,7 +243,9 @@ def test_compute_execution_quality_per_symbol_counts_all_fills_with_partial_slip
     assert snapshot.per_symbol[0].slippage_bps_avg == Decimal("100")
 
 
-def test_cycle_metrics_fills_count_uses_persisted_semantics_for_deduped_fills(monkeypatch, tmp_path) -> None:
+def test_cycle_metrics_fills_count_uses_persisted_semantics_for_deduped_fills(
+    monkeypatch, tmp_path
+) -> None:
     exchange = ExchangeForAtomicity()
     runner = Stage4CycleRunner()
     db_path = tmp_path / "fills_semantics.sqlite"

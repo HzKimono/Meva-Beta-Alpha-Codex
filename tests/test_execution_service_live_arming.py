@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -22,7 +23,7 @@ from btcbot.services.state_store import StateStore
 
 class RecordingExchange(ExchangeClient):
     def __init__(self) -> None:
-        self.placed: list[tuple[str, OrderSide, float, float, str | None]] = []
+        self.placed: list[tuple[str, OrderSide, Decimal, Decimal, str | None]] = []
         self.canceled: list[str] = []
 
     def get_balances(self) -> list[Balance]:
@@ -137,7 +138,7 @@ def test_execute_intents_quantizes_before_submit(tmp_path) -> None:
     placed = service.execute_intents([_intent()])
 
     assert placed == 1
-    assert exchange.placed == [("BTCTRY", OrderSide.BUY, 100.0, 0.1, exchange.placed[0][4])]
+    assert exchange.placed == [("BTCTRY", OrderSide.BUY, Decimal("100.00"), Decimal("0.1000"), exchange.placed[0][4])]
     assert exchange.placed[0][4] is not None
 
 

@@ -9,5 +9,4 @@ class FeeConversionRateError(RuntimeError):
 
 
 class PriceConverter(Protocol):
-    def __call__(self, base_currency: str, quote_currency: str) -> Decimal:
-        ...
+    def __call__(self, base_currency: str, quote_currency: str) -> Decimal: ...

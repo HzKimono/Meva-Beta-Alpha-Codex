@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Callable
+from typing import Any
 
 from btcbot.domain.money_policy import (
     DEFAULT_MONEY_POLICY,
@@ -15,8 +16,6 @@ from btcbot.domain.money_policy import (
     round_qty,
     round_quote,
 )
-
-from btcbot.domain.money_policy import DEFAULT_MONEY_POLICY, round_fee, round_price, round_qty
 
 
 class LedgerEventType(StrEnum):
@@ -99,7 +98,9 @@ def apply_events(
     fees = dict(state.fees_by_currency)
 
     for event in _sort_events(events):
-        policy = policy_resolver(event.symbol) if policy_resolver is not None else DEFAULT_MONEY_POLICY
+        policy = (
+            policy_resolver(event.symbol) if policy_resolver is not None else DEFAULT_MONEY_POLICY
+        )
         current = symbol_state.get(event.symbol, SymbolLedger(symbol=event.symbol))
         lots = list(current.lots)
         realized = current.realized_pnl

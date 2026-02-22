@@ -8,7 +8,9 @@ from btcbot.ports_price_conversion import FeeConversionRateError, PriceConverter
 
 class MarkPriceConverter(PriceConverter):
     def __init__(self, mark_prices: dict[str, Decimal]) -> None:
-        self._marks = {normalize_symbol(symbol): Decimal(str(price)) for symbol, price in mark_prices.items()}
+        self._marks = {
+            normalize_symbol(symbol): Decimal(str(price)) for symbol, price in mark_prices.items()
+        }
         self._cache: dict[tuple[str, str], Decimal] = {}
 
     def __call__(self, base_currency: str, quote_currency: str) -> Decimal:

@@ -1090,6 +1090,8 @@ def test_run_cycle_stage4_classifies_capital_invariant_error(monkeypatch, tmp_pa
 def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
 
     captured: dict[str, object] = {}
 
@@ -1127,6 +1129,8 @@ def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> No
 def test_main_stage7_backtest_passes_include_adaptation(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
 
     captured: dict[str, object] = {}
 
@@ -1164,6 +1168,8 @@ def test_main_stage7_backtest_passes_include_adaptation(monkeypatch) -> None:
 def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
 
     captured: dict[str, object] = {}
 
@@ -1189,6 +1195,8 @@ def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
 def test_main_run_lock_failure_happens_before_instrumentation(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
         state_db_path = "./btcbot_state.db"
 
     called = {"configured": False}
@@ -1305,6 +1313,8 @@ def test_run_with_optional_loop_negative_one_means_infinite_until_interrupt() ->
 def test_main_stage7_run_accepts_db_flag(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
 
     captured: dict[str, object] = {}
 
@@ -1330,6 +1340,8 @@ def test_main_stage7_run_accepts_db_flag(monkeypatch) -> None:
 def test_main_stage7_report_accepts_db_flag(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
 
     captured: dict[str, object] = {}
 
@@ -1356,6 +1368,8 @@ def test_main_stage7_report_accepts_db_flag(monkeypatch) -> None:
 def test_main_stage7_db_count_supports_env_fallback(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
 
     captured: dict[str, object] = {}
 
@@ -1377,6 +1391,8 @@ def test_main_stage7_db_count_supports_env_fallback(monkeypatch) -> None:
 def test_main_supports_env_file_override(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
         state_db_path = "btcbot_state.db"
 
     captured: dict[str, object] = {}
@@ -1401,6 +1417,8 @@ def test_main_supports_env_file_override(monkeypatch) -> None:
 def test_main_run_accepts_sleep_seconds_alias(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "test"
+        state_db_path = ":memory:"
         state_db_path = "btcbot_state.db"
 
     captured: dict[str, object] = {}
@@ -1795,7 +1813,9 @@ def test_run_cycle_uses_single_cash_snapshot_for_risk_and_summary(monkeypatch, c
                 qty_step=Decimal("0.0001"),
             )
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "StateStore", FakeStateStore)
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
@@ -1890,7 +1910,9 @@ def test_stage3_runtime_reuses_single_state_store_across_loop_cycles(monkeypatch
     assert len(set(seen_ids)) == 1
 
 
-def test_stage3_live_loop_acceptance_no_open_orders_submits_and_no_db_conflicts(monkeypatch, caplog) -> None:
+def test_stage3_live_loop_acceptance_no_open_orders_submits_and_no_db_conflicts(
+    monkeypatch, caplog
+) -> None:
     class DummyLock:
         def __enter__(self):
             return self
@@ -2074,7 +2096,9 @@ def test_run_cycle_heartbeats_state_store_once_per_cycle(monkeypatch) -> None:
             del intents, cycle_id
             return 0
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
     monkeypatch.setattr(cli, "AccountingService", FakeAccountingService)
@@ -2203,7 +2227,9 @@ def test_run_cycle_calls_refresh_order_lifecycle_once_with_union_symbols(monkeyp
             del intents, cycle_id
             return 0
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "StateStore", FakeStateStore)
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
@@ -2273,7 +2299,16 @@ def test_run_cycle_degrades_to_observe_only_on_429_backoff(monkeypatch, caplog) 
 
         def generate(self, cycle_id: str, symbols, balances):
             del cycle_id, symbols, balances
-            return [Intent.create(cycle_id="c1", symbol="BTC_TRY", side=OrderSide.BUY, qty=Decimal("0.1"), limit_price=Decimal("100"), reason="test")]
+            return [
+                Intent.create(
+                    cycle_id="c1",
+                    symbol="BTC_TRY",
+                    side=OrderSide.BUY,
+                    qty=Decimal("0.1"),
+                    limit_price=Decimal("100"),
+                    reason="test",
+                )
+            ]
 
     class FakeRiskService:
         def __init__(self, **kwargs) -> None:
@@ -2299,7 +2334,11 @@ def test_run_cycle_degrades_to_observe_only_on_429_backoff(monkeypatch, caplog) 
 
         def refresh_order_lifecycle(self, symbols):
             del symbols
-            return {"backoff_429_count": 3, "error_code": "EXCHANGE_429_BACKOFF", "backoff_endpoints": ["open_orders"]}
+            return {
+                "backoff_429_count": 3,
+                "error_code": "EXCHANGE_429_BACKOFF",
+                "backoff_endpoints": ["open_orders"],
+            }
 
         def cancel_stale_orders(self, cycle_id: str) -> int:
             del cycle_id
@@ -2309,7 +2348,9 @@ def test_run_cycle_degrades_to_observe_only_on_429_backoff(monkeypatch, caplog) 
             del intents, cycle_id
             raise AssertionError("execute_intents should be skipped under 429 backoff")
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "StateStore", FakeStateStore)
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)
@@ -2331,7 +2372,9 @@ def test_run_cycle_degrades_to_observe_only_on_429_backoff(monkeypatch, caplog) 
     assert "EXCHANGE_429_BACKOFF" in payload["top_reject_reasons"]
 
 
-def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_context(monkeypatch, caplog) -> None:
+def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_context(
+    monkeypatch, caplog
+) -> None:
     class FakeExchange:
         def close(self) -> None:
             return None
@@ -2382,7 +2425,16 @@ def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_conte
 
         def generate(self, cycle_id: str, symbols, balances):
             del cycle_id, symbols, balances
-            return [Intent.create(cycle_id="c1", symbol="BTC_TRY", side=OrderSide.BUY, qty=Decimal("0.1"), limit_price=Decimal("100"), reason="test")]
+            return [
+                Intent.create(
+                    cycle_id="c1",
+                    symbol="BTC_TRY",
+                    side=OrderSide.BUY,
+                    qty=Decimal("0.1"),
+                    limit_price=Decimal("100"),
+                    reason="test",
+                )
+            ]
 
     class FakeRiskService:
         def __init__(self, **kwargs) -> None:
@@ -2430,7 +2482,9 @@ def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_conte
             del intents, cycle_id
             return 0
 
-    monkeypatch.setattr(cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange())
+    monkeypatch.setattr(
+        cli, "build_exchange_stage3", lambda settings, force_dry_run: FakeExchange()
+    )
     monkeypatch.setattr(cli, "StateStore", FakeStateStore)
     monkeypatch.setattr(cli, "PortfolioService", FakePortfolioService)
     monkeypatch.setattr(cli, "MarketDataService", FakeMarketDataService)

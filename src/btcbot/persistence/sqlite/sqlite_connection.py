@@ -117,7 +117,9 @@ def ensure_stage4_schema(conn: sqlite3.Connection) -> None:
     )
     pnl_cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(pnl_snapshots)")}
     if "realized_total_try" not in pnl_cols:
-        conn.execute("ALTER TABLE pnl_snapshots ADD COLUMN realized_total_try TEXT NOT NULL DEFAULT '0'")
+        conn.execute(
+            "ALTER TABLE pnl_snapshots ADD COLUMN realized_total_try TEXT NOT NULL DEFAULT '0'"
+        )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_snapshots_ts ON pnl_snapshots(ts)")
     conn.execute(
         """

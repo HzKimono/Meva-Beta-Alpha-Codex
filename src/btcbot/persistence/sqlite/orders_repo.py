@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from decimal import Decimal
 import logging
 import sqlite3
+from datetime import UTC, datetime
+from decimal import Decimal
 
 from btcbot.domain.models import normalize_symbol
 from btcbot.domain.stage4 import Order as Stage4Order

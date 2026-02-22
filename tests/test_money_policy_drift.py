@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from btcbot.domain.ledger import LedgerEvent, LedgerEventType, LedgerState, apply_events, compute_realized_pnl
+from btcbot.domain.ledger import (
+    LedgerEvent,
+    LedgerEventType,
+    LedgerState,
+    apply_events,
+    compute_realized_pnl,
+)
 from btcbot.domain.money_policy import (
     MoneyMathPolicy,
     round_fee,
@@ -49,7 +55,9 @@ def test_roundtrip_price_tick_and_qty_step() -> None:
 
 
 def test_fee_rounding_consistency() -> None:
-    policy = MoneyMathPolicy(price_tick=Decimal("0.01"), qty_step=Decimal("0.0001"), fee_precision=8)
+    policy = MoneyMathPolicy(
+        price_tick=Decimal("0.01"), qty_step=Decimal("0.0001"), fee_precision=8
+    )
 
     price = round_price(Decimal("100.019"), policy)
     qty = round_qty(Decimal("0.123456"), policy)
@@ -64,7 +72,9 @@ def test_fee_rounding_consistency() -> None:
 
 
 def test_pnl_drift_epsilon() -> None:
-    policy = MoneyMathPolicy(price_tick=Decimal("0.01"), qty_step=Decimal("0.00000001"), epsilon=Decimal("0.00000001"))
+    policy = MoneyMathPolicy(
+        price_tick=Decimal("0.01"), qty_step=Decimal("0.00000001"), epsilon=Decimal("0.00000001")
+    )
     ts = datetime(2024, 1, 1, tzinfo=UTC)
 
     events = [
@@ -76,7 +86,9 @@ def test_pnl_drift_epsilon() -> None:
         _event("f3", ts, None, "0", None, fee="0.157516500"),
     ]
 
-    policy_resolver = lambda symbol: policy
+    def policy_resolver(symbol: str):
+        return policy
+
     state = apply_events(LedgerState(), events, policy_resolver=policy_resolver)
     ledger_realized = compute_realized_pnl(state, policy_resolver=policy_resolver)
     ledger_fees = state.fees_by_currency.get("TRY", Decimal("0"))

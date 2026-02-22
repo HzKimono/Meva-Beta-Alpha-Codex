@@ -81,7 +81,9 @@ class RestMarketDataProvider(MarketDataProvider):
         with self._lock:
             cached = self._cache.get(symbol)
             if cached is not None and self._is_fresh(cached, now_ms):
-                get_instrumentation().counter("orderbook_cache_hit_total", 1, attrs={"symbol": symbol})
+                get_instrumentation().counter(
+                    "orderbook_cache_hit_total", 1, attrs={"symbol": symbol}
+                )
                 return cached
             in_flight = self._inflight.get(symbol)
             if in_flight is not None:
@@ -97,7 +99,9 @@ class RestMarketDataProvider(MarketDataProvider):
         if is_owner:
             try:
                 bid, ask = self.exchange.get_orderbook(symbol)
-                result = _OrderbookCacheEntry(best_bid=bid, best_ask=ask, observed_at_ms=self._now_ms())
+                result = _OrderbookCacheEntry(
+                    best_bid=bid, best_ask=ask, observed_at_ms=self._now_ms()
+                )
                 with self._lock:
                     self._cache[symbol] = result
                     self._inflight.pop(symbol, None)

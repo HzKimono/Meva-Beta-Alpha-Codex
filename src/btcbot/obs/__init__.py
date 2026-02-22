@@ -1,7 +1,6 @@
-from btcbot.obs.alerts import AlertRule, BASELINE_ALERT_RULES, format_alert_rules
+from btcbot.obs.alerts import BASELINE_ALERT_RULES, AlertRule, format_alert_rules
 from btcbot.obs.logging import cycle_context, get_logger, set_base_context
-from btcbot.obs.metric_registry import MetricDef, MetricType, REGISTRY, validate_registry
-from btcbot.obs.process_role import ProcessRole, get_process_role_from_env
+from btcbot.obs.metric_registry import REGISTRY, MetricDef, MetricType, validate_registry
 from btcbot.obs.metrics import (
     MetricsSink,
     emit_metric,
@@ -10,6 +9,7 @@ from btcbot.obs.metrics import (
     set_gauge,
     set_metrics_sink,
 )
+from btcbot.obs.process_role import ProcessRole, get_process_role_from_env
 
 __all__ = [
     "AlertRule",

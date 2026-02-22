@@ -8,8 +8,8 @@ from decimal import Decimal
 
 from btcbot.domain.decision_codes import ReasonCode, map_risk_reason
 from btcbot.domain.intent import Intent
-from btcbot.domain.money_policy import MoneyMathPolicy, round_price, round_qty
 from btcbot.domain.models import OrderSide, normalize_symbol
+from btcbot.domain.money_policy import MoneyMathPolicy, round_price, round_qty
 from btcbot.observability_decisions import emit_decision
 from btcbot.risk.exchange_rules import (
     ExchangeRules,
@@ -301,9 +301,11 @@ class RiskPolicy:
             )
             open_identifiers = context.open_order_identifiers_by_symbol.get(normalized_symbol, [])
             extra_payload["open_order_identifiers"] = list(open_identifiers[:5])
-            extra_payload["open_orders_count_origin"] = context.open_order_count_origin_by_symbol.get(
-                normalized_symbol,
-                "reconciled",
+            extra_payload["open_orders_count_origin"] = (
+                context.open_order_count_origin_by_symbol.get(
+                    normalized_symbol,
+                    "reconciled",
+                )
             )
 
         if reason == ReasonCode.RISK_BLOCK_CASH_RESERVE_TARGET and context is not None:

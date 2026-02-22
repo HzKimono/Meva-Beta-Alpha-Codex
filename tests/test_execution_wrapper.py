@@ -76,12 +76,34 @@ class _Stage4Exchange:
     ],
 )
 def test_wrapper_parity_stage3_stage4(error, kind, retry_calls) -> None:
-    stage3 = ExecutionWrapper(_Stage3Exchange(submit_error=error), submit_retry_max_attempts=3, sleep_fn=lambda _: None)
-    stage4 = ExecutionWrapper(_Stage4Exchange(submit_error=error), submit_retry_max_attempts=3, sleep_fn=lambda _: None)
+    stage3 = ExecutionWrapper(
+        _Stage3Exchange(submit_error=error), submit_retry_max_attempts=3, sleep_fn=lambda _: None
+    )
+    stage4 = ExecutionWrapper(
+        _Stage4Exchange(submit_error=error), submit_retry_max_attempts=3, sleep_fn=lambda _: None
+    )
 
     for wrapper, kwargs in (
-        (stage3, {"symbol": "BTCTRY", "side": OrderSide.BUY, "price": Decimal("1"), "quantity": Decimal("1"), "client_order_id": "cid"}),
-        (stage4, {"symbol": "BTCTRY", "side": "buy", "price": Decimal("1"), "qty": Decimal("1"), "client_order_id": "cid"}),
+        (
+            stage3,
+            {
+                "symbol": "BTCTRY",
+                "side": OrderSide.BUY,
+                "price": Decimal("1"),
+                "quantity": Decimal("1"),
+                "client_order_id": "cid",
+            },
+        ),
+        (
+            stage4,
+            {
+                "symbol": "BTCTRY",
+                "side": "buy",
+                "price": Decimal("1"),
+                "qty": Decimal("1"),
+                "client_order_id": "cid",
+            },
+        ),
     ):
         if kind == "raise":
             with pytest.raises(type(error)):
@@ -97,7 +119,9 @@ def test_wrapper_parity_stage3_stage4(error, kind, retry_calls) -> None:
 def test_wrapper_metrics_attempts_and_uncertain(monkeypatch) -> None:
     fake_metrics = _FakeInstrumentation()
     monkeypatch.setattr(wrapper_module, "get_instrumentation", lambda: fake_metrics)
-    wrapper = ExecutionWrapper(_Stage3Exchange(submit_error=TimeoutError("uncertain")), sleep_fn=lambda _: None)
+    wrapper = ExecutionWrapper(
+        _Stage3Exchange(submit_error=TimeoutError("uncertain")), sleep_fn=lambda _: None
+    )
 
     result = wrapper.submit_limit_order(
         symbol="BTCTRY",

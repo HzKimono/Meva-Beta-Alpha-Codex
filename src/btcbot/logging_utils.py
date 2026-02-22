@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -57,7 +58,7 @@ def _resolve_named_level_from_env(env_name: str, default_level: int) -> int:
 
 
 def setup_logging(level: str | int | None = None) -> None:
-    handler = logging.StreamHandler()
+    handler = logging.StreamHandler(stream=sys.__stderr__)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers.clear()

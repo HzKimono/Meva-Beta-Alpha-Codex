@@ -11,12 +11,11 @@ from btcbot.accounting.models import PortfolioAccountingState
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.risk_mode_codec import parse_risk_mode
-from btcbot.domain.stage4 import PnLSnapshot
-from btcbot.domain.stage4 import Position
+from btcbot.domain.stage4 import PnLSnapshot, Position
 from btcbot.observability_decisions import emit_decision
+from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.risk.budget import RiskBudgetPolicy, RiskBudgetView
 from btcbot.services.ledger_service import PnlReport
-from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -246,7 +245,11 @@ class RiskBudgetService:
 
         missing_marks: list[str] = []
         if live_mode:
-            candidates = tradable_symbols if tradable_symbols is not None else [position.symbol for position in positions]
+            candidates = (
+                tradable_symbols
+                if tradable_symbols is not None
+                else [position.symbol for position in positions]
+            )
             for symbol in candidates:
                 mark = mark_prices.get(symbol)
                 if mark is None or mark <= 0:
@@ -436,7 +439,9 @@ class RiskBudgetService:
         fees_today: Decimal,
         fees_day: date,
     ) -> None:
-        persisted_decision = decision.risk_decision if isinstance(decision, BudgetDecision) else decision
+        persisted_decision = (
+            decision.risk_decision if isinstance(decision, BudgetDecision) else decision
+        )
         if self.uow_factory is not None:
             with self.uow_factory() as uow:
                 uow.risk.save_risk_decision(
@@ -534,7 +539,9 @@ class RiskBudgetService:
         if len(equities) < 6:
             return "normal", None
 
-        returns = [math.log(curr / prev) for prev, curr in zip(equities, equities[1:], strict=False)]
+        returns = [
+            math.log(curr / prev) for prev, curr in zip(equities, equities[1:], strict=False)
+        ]
         if len(returns) < 5:
             return "normal", None
 

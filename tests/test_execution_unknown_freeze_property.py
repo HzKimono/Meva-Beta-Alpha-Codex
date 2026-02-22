@@ -114,7 +114,13 @@ def _intent(cycle_id: str) -> OrderIntent:
     )
 
 
-@given(st.lists(st.sampled_from(["unknown_on", "unknown_off", "submit", "reconcile_fail", "reconcile_ok"]), min_size=1, max_size=25))
+@given(
+    st.lists(
+        st.sampled_from(["unknown_on", "unknown_off", "submit", "reconcile_fail", "reconcile_ok"]),
+        min_size=1,
+        max_size=25,
+    )
+)
 def test_submit_never_reaches_exchange_when_unknown_present(tmp_path, events) -> None:
     exchange = _FakeExchange()
     service = ExecutionService(
@@ -157,7 +163,9 @@ def test_submit_never_reaches_exchange_when_unknown_present(tmp_path, events) ->
             continue
 
         if event == "reconcile_fail":
-            exchange.get_open_orders = lambda _pair_symbol: (_ for _ in ()).throw(ExchangeError("status=429"))
+            exchange.get_open_orders = lambda _pair_symbol: (_ for _ in ()).throw(
+                ExchangeError("status=429")
+            )
             service.refresh_order_lifecycle(["BTC_TRY"])
             continue
 

@@ -34,7 +34,9 @@ class FakeExchange:
         del symbol
         return list(self.open_orders)
 
-    def submit_limit_order(self, symbol: str, side: str, price: Decimal, qty: Decimal, client_order_id: str) -> OrderAck:
+    def submit_limit_order(
+        self, symbol: str, side: str, price: Decimal, qty: Decimal, client_order_id: str
+    ) -> OrderAck:
         del symbol, side, price, qty
         self.submits.append(client_order_id)
         return OrderAck(exchange_order_id=f"ex-{client_order_id}", status="submitted")
@@ -123,7 +125,12 @@ class FakeStateStore:
         )
 
     def is_order_terminal(self, client_order_id: str) -> bool:
-        return self.orders[client_order_id].status in {"canceled", "filled", "rejected", "unknown_closed"}
+        return self.orders[client_order_id].status in {
+            "canceled",
+            "filled",
+            "rejected",
+            "unknown_closed",
+        }
 
     def get_stage4_order_by_client_id(self, client_order_id: str):
         return self.orders.get(client_order_id)
@@ -139,7 +146,17 @@ class FakeStateStore:
     def get_replace_tx(self, replace_tx_id: str):
         return self.replace.get(replace_tx_id)
 
-    def upsert_replace_tx(self, *, replace_tx_id: str, symbol: str, side: str, old_client_order_ids: list[str], new_client_order_id: str, state: str, last_error: str | None = None) -> None:
+    def upsert_replace_tx(
+        self,
+        *,
+        replace_tx_id: str,
+        symbol: str,
+        side: str,
+        old_client_order_ids: list[str],
+        new_client_order_id: str,
+        state: str,
+        last_error: str | None = None,
+    ) -> None:
         current = self.replace.get(replace_tx_id)
         if current is None:
             self.replace[replace_tx_id] = Txn(
@@ -151,7 +168,9 @@ class FakeStateStore:
                 last_error=last_error,
             )
 
-    def update_replace_tx_state(self, *, replace_tx_id: str, state: str, last_error: str | None = None) -> None:
+    def update_replace_tx_state(
+        self, *, replace_tx_id: str, state: str, last_error: str | None = None
+    ) -> None:
         current = self.replace[replace_tx_id]
         self.replace[replace_tx_id] = Txn(
             state=state,

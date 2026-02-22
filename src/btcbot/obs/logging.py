@@ -14,7 +14,9 @@ _RUN_ID = str(uuid.uuid4())
 _CYCLE_ID: ContextVar[str | None] = ContextVar("cycle_id", default=None)
 _MODE_BASE: ContextVar[str | None] = ContextVar("mode_base", default=None)
 _MODE_FINAL: ContextVar[str | None] = ContextVar("mode_final", default=None)
-_PROCESS_ROLE: ContextVar[str] = ContextVar("process_role", default=get_process_role_from_env().value)
+_PROCESS_ROLE: ContextVar[str] = ContextVar(
+    "process_role", default=get_process_role_from_env().value
+)
 _STATE_DB_PATH: ContextVar[str | None] = ContextVar("state_db_path", default=None)
 
 
@@ -50,7 +52,9 @@ def get_logger(component: str) -> logging.LoggerAdapter:
     return _ContextAdapter(logging.getLogger(component), extra={})
 
 
-def set_base_context(*, process_role: str | ProcessRole | None = None, state_db_path: str | None = None) -> None:
+def set_base_context(
+    *, process_role: str | ProcessRole | None = None, state_db_path: str | None = None
+) -> None:
     if process_role is not None:
         _PROCESS_ROLE.set(coerce_process_role(process_role).value)
     if state_db_path is not None:

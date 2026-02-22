@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import sqlite3
-from typing import Callable
+from dataclasses import dataclass
 
 from btcbot.persistence.sqlite.metrics_repo import SqliteMetricsRepo
 from btcbot.persistence.sqlite.orders_repo import SqliteOrdersRepo

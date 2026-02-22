@@ -367,6 +367,7 @@ def test_submit_limit_order_live_requires_exchangeinfo_and_blocks_post() -> None
     assert calls["post"] == 0
     client.close()
 
+
 def test_place_limit_order_live_requires_exchangeinfo_and_blocks_post() -> None:
     calls = {"get": 0, "post": 0}
 

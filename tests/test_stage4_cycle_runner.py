@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-
-import httpx
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
+
+import httpx
 
 from btcbot.adapters.btcturk_http import BtcturkHttpClient
 from btcbot.config import Settings
@@ -477,7 +477,6 @@ def test_bootstrap_intents_skip_when_open_buy_order_exists() -> None:
     assert drop_reasons.get("skipped_due_to_open_orders") == 1
 
 
-
 def _read_latest_cycle_counts(db_path) -> dict[str, int]:
     store = StateStore(str(db_path))
     with store._connect() as conn:
@@ -587,7 +586,9 @@ class _AdapterBackedExchange:
         self.client.close()
 
 
-def test_stage4_stale_data_blocks_with_btcturk_adapter_timestamp_cache(monkeypatch, tmp_path) -> None:
+def test_stage4_stale_data_blocks_with_btcturk_adapter_timestamp_cache(
+    monkeypatch, tmp_path
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,

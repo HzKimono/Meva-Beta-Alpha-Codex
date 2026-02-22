@@ -138,7 +138,9 @@ class TokenBucketRateLimiter:
                 return
 
             fallback_cooldown = min(1.5, max(0.25, 1.0 / budget.rps))
-            state["cooldown_until"] = max(state["cooldown_until"], self._clock() + fallback_cooldown)
+            state["cooldown_until"] = max(
+                state["cooldown_until"], self._clock() + fallback_cooldown
+            )
 
 
 class AsyncTokenBucketRateLimiter:

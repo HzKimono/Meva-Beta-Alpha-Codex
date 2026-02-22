@@ -686,12 +686,12 @@ def run_with_optional_loop(
         return last_rc
 
 
-
 def _build_state_store(db_path: str, *, strict_instance_lock: bool) -> StateStore:
     try:
         return StateStore(db_path=db_path, strict_instance_lock=strict_instance_lock)
     except TypeError:
         return StateStore(db_path=db_path)
+
 
 def run_stage3_runtime(
     settings: Settings,
@@ -722,12 +722,16 @@ def run_stage3_runtime(
             )
             logger.info(
                 "state_store_runtime_owner",
-                extra={"extra": {
-                    "db_path": getattr(runtime_state_store, "db_path_abs", settings.state_db_path),
-                    "instance_id": getattr(runtime_state_store, "instance_id", ""),
-                    "strict_lock": strict_lock,
-                    "heartbeat_interval_seconds": max(1, cycle_seconds),
-                }},
+                extra={
+                    "extra": {
+                        "db_path": getattr(
+                            runtime_state_store, "db_path_abs", settings.state_db_path
+                        ),
+                        "instance_id": getattr(runtime_state_store, "instance_id", ""),
+                        "strict_lock": strict_lock,
+                        "heartbeat_interval_seconds": max(1, cycle_seconds),
+                    }
+                },
             )
             return run_with_optional_loop(
                 command="run",
@@ -962,12 +966,16 @@ def run_canary(
             )
             logger.info(
                 "state_store_runtime_owner",
-                extra={"extra": {
-                    "db_path": getattr(runtime_state_store, "db_path_abs", settings.state_db_path),
-                    "instance_id": getattr(runtime_state_store, "instance_id", ""),
-                    "strict_lock": True,
-                    "heartbeat_interval_seconds": max(1, cycle_seconds),
-                }},
+                extra={
+                    "extra": {
+                        "db_path": getattr(
+                            runtime_state_store, "db_path_abs", settings.state_db_path
+                        ),
+                        "instance_id": getattr(runtime_state_store, "instance_id", ""),
+                        "strict_lock": True,
+                        "heartbeat_interval_seconds": max(1, cycle_seconds),
+                    }
+                },
             )
             started_at = datetime.now(UTC)
             cycles_run = 0
@@ -1198,16 +1206,18 @@ def run_cycle(
                 heartbeat_instance_lock()
             logger.info(
                 "cycle_start",
-                extra={"extra": {
-                    "cycle_id": cycle_id,
-                    "mode": "stage3",
-                    "dry_run": dry_run,
-                    "kill_switch": bool(settings.kill_switch),
-                    "safe_mode": bool(effective_safe_mode),
-                    "live_trading": bool(settings.live_trading),
-                    "armed": bool((not dry_run) and live_policy.allowed),
-                    "db_instance_id": getattr(resolved_state_store, "instance_id", ""),
-                }},
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "mode": "stage3",
+                        "dry_run": dry_run,
+                        "kill_switch": bool(settings.kill_switch),
+                        "safe_mode": bool(effective_safe_mode),
+                        "live_trading": bool(settings.live_trading),
+                        "armed": bool((not dry_run) and live_policy.allowed),
+                        "db_instance_id": getattr(resolved_state_store, "instance_id", ""),
+                    }
+                },
             )
             if settings.kill_switch or effective_safe_mode:
                 logger.warning(
@@ -1247,7 +1257,9 @@ def run_cycle(
                     live_trading_ack=settings.live_trading_ack == "I_UNDERSTAND",
                     safe_mode=effective_safe_mode,
                 )
-                accounting_service = AccountingService(exchange=exchange, state_store=resolved_state_store)
+                accounting_service = AccountingService(
+                    exchange=exchange, state_store=resolved_state_store
+                )
                 strategy_service = StrategyService(
                     strategy=ProfitAwareStrategyV1(),
                     settings=settings,
@@ -1389,7 +1401,9 @@ def run_cycle(
                 raw_intents = strategy_service.generate(
                     cycle_id=cycle_id, symbols=settings.symbols, balances=balances
                 )
-                refresh_order_lifecycle = getattr(execution_service, "refresh_order_lifecycle", None)
+                refresh_order_lifecycle = getattr(
+                    execution_service, "refresh_order_lifecycle", None
+                )
                 scoped_symbols = {
                     normalize_symbol(getattr(intent, "symbol", ""))
                     for intent in raw_intents
@@ -1416,7 +1430,9 @@ def run_cycle(
                 scoped_symbols = sorted(symbol for symbol in scoped_symbols if symbol)
                 if callable(refresh_order_lifecycle) and scoped_symbols:
                     lifecycle_summary = refresh_order_lifecycle(scoped_symbols)
-                    mark_lifecycle_refreshed = getattr(execution_service, "mark_lifecycle_refreshed", None)
+                    mark_lifecycle_refreshed = getattr(
+                        execution_service, "mark_lifecycle_refreshed", None
+                    )
                     if callable(mark_lifecycle_refreshed):
                         mark_lifecycle_refreshed(cycle_id=cycle_id)
 
@@ -1435,7 +1451,9 @@ def run_cycle(
                             "action": "SUPPRESS",
                             "scope": "global",
                             "backoff_429_count": backoff_count,
-                            "impacted_endpoints": list(lifecycle_summary.get("backoff_endpoints", [])),
+                            "impacted_endpoints": list(
+                                lifecycle_summary.get("backoff_endpoints", [])
+                            ),
                         },
                     )
 
@@ -1455,7 +1473,11 @@ def run_cycle(
                 )
 
                 submit_started = time.monotonic()
-                placed = 0 if backoff_degraded_observe_only else execution_service.execute_intents(approved_intents, cycle_id=cycle_id)
+                placed = (
+                    0
+                    if backoff_degraded_observe_only
+                    else execution_service.execute_intents(approved_intents, cycle_id=cycle_id)
+                )
                 instrumentation.histogram(
                     "order_submit_latency_ms",
                     (time.monotonic() - submit_started) * 1000,
@@ -1475,11 +1497,17 @@ def run_cycle(
                         planned_spend_try += Decimal(str(qty)) * Decimal(str(limit_price))
                 resolved_state_store.set_last_cycle_id(cycle_id)
                 blocked_by_gate = (
-                    len(approved_intents) if (settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only) else 0
+                    len(approved_intents)
+                    if (
+                        settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only
+                    )
+                    else 0
                 )
                 suppressed_dry_run = len(approved_intents) if dry_run else 0
                 rejected_by_risk = max(0, len(raw_intents) - len(approved_intents))
-                execution_summary = dict(getattr(execution_service, "last_execute_summary", {}) or {})
+                execution_summary = dict(
+                    getattr(execution_service, "last_execute_summary", {}) or {}
+                )
                 rejected_local = int(execution_summary.get("rejected_intents", 0))
                 rejected_precheck = int(execution_summary.get("intents_rejected_precheck", 0))
                 failed_exchange = int(execution_summary.get("orders_failed_exchange", 0))
@@ -1487,7 +1515,9 @@ def run_cycle(
                 if failed_exchange > attempted_exchange_calls:
                     failed_exchange = attempted_exchange_calls
                 rejected_total = rejected_by_risk + rejected_local
-                blocked_events = list(getattr(getattr(risk_service, "risk_policy", None), "last_blocked_events", []))
+                blocked_events = list(
+                    getattr(getattr(risk_service, "risk_policy", None), "last_blocked_events", [])
+                )
                 reject_counts: dict[str, int] = {}
                 for event in blocked_events:
                     code = str(event.get("error_code") or event.get("reason_code") or "")
@@ -1496,15 +1526,30 @@ def run_cycle(
                     reject_counts[code] = reject_counts.get(code, 0) + 1
                 lifecycle_error_code = str(lifecycle_summary.get("error_code") or "")
                 if lifecycle_error_code:
-                    reject_counts[lifecycle_error_code] = reject_counts.get(lifecycle_error_code, 0) + 1
+                    reject_counts[lifecycle_error_code] = (
+                        reject_counts.get(lifecycle_error_code, 0) + 1
+                    )
                 top_reject_reasons = [
-                    code for code, _ in sorted(reject_counts.items(), key=lambda item: item[1], reverse=True)
+                    code
+                    for code, _ in sorted(
+                        reject_counts.items(), key=lambda item: item[1], reverse=True
+                    )
                 ][:3]
                 max_open_block = next(
-                    (event for event in blocked_events if str(event.get("error_code")) == "RISK_BLOCK_MAX_OPEN_ORDERS"),
+                    (
+                        event
+                        for event in blocked_events
+                        if str(event.get("error_code")) == "RISK_BLOCK_MAX_OPEN_ORDERS"
+                    ),
                     None,
                 )
-                mode_final = "OBSERVE_ONLY" if (settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only) else "ARMED"
+                mode_final = (
+                    "OBSERVE_ONLY"
+                    if (
+                        settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only
+                    )
+                    else "ARMED"
+                )
                 logger.info(
                     "Cycle completed",
                     extra={
@@ -1530,13 +1575,23 @@ def run_cycle(
                             "fills_inserted": fills_inserted,
                             "positions": len(accounting_service.get_positions()),
                             "dry_run": dry_run,
-                            "kill_switch": bool(settings.kill_switch or effective_safe_mode or backoff_degraded_observe_only),
+                            "kill_switch": bool(
+                                settings.kill_switch
+                                or effective_safe_mode
+                                or backoff_degraded_observe_only
+                            ),
                             "safe_mode": effective_safe_mode,
                             "mode_final": mode_final,
                             "lifecycle_backoff_429_count": backoff_count,
-                            "lifecycle_impacted_endpoints": list(lifecycle_summary.get("backoff_endpoints", [])),
-                            "open_orders_count_origin": (max_open_block or {}).get("open_orders_count_origin"),
-                            "open_order_identifiers": (max_open_block or {}).get("open_order_identifiers", []),
+                            "lifecycle_impacted_endpoints": list(
+                                lifecycle_summary.get("backoff_endpoints", [])
+                            ),
+                            "open_orders_count_origin": (max_open_block or {}).get(
+                                "open_orders_count_origin"
+                            ),
+                            "open_order_identifiers": (max_open_block or {}).get(
+                                "open_order_identifiers", []
+                            ),
                         }
                     },
                 )

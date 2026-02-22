@@ -13,8 +13,8 @@ import pytest
 from btcbot.adapters.btcturk_http import (
     BtcturkHttpClient,
     BtcturkHttpClientStage4,
-    DryRunExchangeClient,
     ConfigurationError,
+    DryRunExchangeClient,
     _parse_stage4_open_order_item,
     _should_retry,
 )
@@ -401,7 +401,9 @@ def test_private_get_retries_429_using_retry_after_header_and_penalizes_limiter(
             return httpx.Response(200, json={"success": True, "data": []}, request=request)
         return httpx.Response(404, request=request)
 
-    monkeypatch.setattr("btcbot.adapters.btcturk_http.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        "btcbot.adapters.btcturk_http.sleep", lambda seconds: sleeps.append(seconds)
+    )
 
     limiter = SpyLimiter()
     client = BtcturkHttpClient(

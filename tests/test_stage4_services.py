@@ -47,7 +47,6 @@ class FakeExchangeStage4:
             )
         ]
 
-
     def list_open_orders(self, symbol: str) -> list[Order]:
         return list(self.open_orders_by_symbol.get(symbol, []))
 
@@ -692,7 +691,9 @@ def test_execution_report_tracks_only_min_notional_rejections(tmp_path) -> None:
     class MixedRulesService:
         def resolve_boundary(self, symbol: str):
             del symbol
-            return type("R", (), {"rules": None, "resolution": type("D", (), {"status": "missing"})()})()
+            return type(
+                "R", (), {"rules": None, "resolution": type("D", (), {"status": "missing"})()}
+            )()
 
     class MinNotionalRulesService:
         def resolve_boundary(self, symbol: str):
@@ -820,7 +821,9 @@ def test_replace_worst_case_exposure_blocked() -> None:
     )
 
     assert [a.action_type for a in accepted] == [LifecycleActionType.CANCEL]
-    assert any(d.reason == "replace_worst_case_exposure_blocked" and not d.accepted for d in decisions)
+    assert any(
+        d.reason == "replace_worst_case_exposure_blocked" and not d.accepted for d in decisions
+    )
 
 
 def test_risk_replace_worst_case_within_budget_accepts_submit() -> None:
@@ -1002,7 +1005,9 @@ def test_replace_submit_without_old_order_lookup_uses_new_notional_and_global_ex
 
 def test_stage4_uncertain_submit_records_unknown_and_freezes_submits(store: StateStore) -> None:
     class UncertainExchange(FakeExchangeStage4):
-        def submit_limit_order(self, symbol: str, side: str, price: Decimal, qty: Decimal, client_order_id: str):
+        def submit_limit_order(
+            self, symbol: str, side: str, price: Decimal, qty: Decimal, client_order_id: str
+        ):
             raise TimeoutError("submit-uncertain")
 
     exchange = UncertainExchange()
@@ -1068,7 +1073,6 @@ def test_stage4_uncertain_submit_records_unknown_and_freezes_submits(store: Stat
     )
     cancel_report = svc.execute_with_report([cancel])
     assert cancel_report.canceled == 1
-
 
 
 def test_replace_group_detection() -> None:
@@ -1308,7 +1312,10 @@ def test_blocked_reconcile_replace_tx_is_listed_open(store: StateStore) -> None:
         last_error="still_open:old-1",
     )
     open_txs = store.list_open_replace_txs()
-    assert any(item.replace_tx_id == "rpl:block-1" and item.state == "BLOCKED_RECONCILE" for item in open_txs)
+    assert any(
+        item.replace_tx_id == "rpl:block-1" and item.state == "BLOCKED_RECONCILE"
+        for item in open_txs
+    )
 
 
 def test_replace_multiple_submit_actions_coalesced_to_last(store: StateStore) -> None:
@@ -1384,7 +1391,6 @@ def test_replace_multiple_submit_actions_coalesced_to_last(store: StateStore) ->
     assert exchange.submits[0][0] == "BTC_TRY"
     assert store.get_stage4_order_by_client_id("new-multi-1") is None
     assert store.get_stage4_order_by_client_id("new-multi-2") is not None
-
 
 
 def test_replace_local_non_terminal_defers_even_when_exchange_cleared(store: StateStore) -> None:
@@ -1523,13 +1529,14 @@ def test_replace_multiple_submit_coalesce_increments_metric(
     svc.execute_with_report(actions)
     assert "replace_multiple_submits_coalesced_total" in svc.instrumentation.calls
     coalesced_events = [
-        event for event in decision_events if event.get("event_name") == "replace_multiple_submits_coalesced"
+        event
+        for event in decision_events
+        if event.get("event_name") == "replace_multiple_submits_coalesced"
     ]
     assert len(coalesced_events) == 1
     payload = coalesced_events[0]["payload"]
     assert payload["submit_count"] == 2
     assert payload["selected_submit_client_order_id"] == "new-metric-2"
-
 
 
 def test_replace_local_missing_record_defers(store: StateStore) -> None:

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-from datetime import UTC, datetime
-from decimal import Decimal
 import json
+from dataclasses import asdict
+from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 
 from btcbot.domain.risk_budget import Mode, RiskDecision
@@ -13,7 +13,9 @@ from btcbot.domain.risk_mode_codec import dump_risk_mode
 class RiskRepoProtocol(Protocol):
     def get_risk_state_current(self) -> dict[str, str | None]: ...
 
-    def save_risk_decision(self, *, cycle_id: str, decision: RiskDecision, prev_mode: Mode | None) -> None: ...
+    def save_risk_decision(
+        self, *, cycle_id: str, decision: RiskDecision, prev_mode: Mode | None
+    ) -> None: ...
 
     def upsert_risk_state_current(
         self,
@@ -24,7 +26,6 @@ class RiskRepoProtocol(Protocol):
         fees_try_today: Decimal,
         fees_day: str,
     ) -> None: ...
-
 
 
 def serialize_risk_payload(value: object) -> str:

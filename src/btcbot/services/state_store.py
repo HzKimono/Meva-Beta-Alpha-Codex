@@ -21,8 +21,8 @@ from btcbot.domain.ledger import LedgerEvent, LedgerEventType, ensure_utc
 from btcbot.domain.models import Order, OrderStatus, normalize_symbol
 from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.order_state import OrderEvent, Stage7Order
-from btcbot.domain.risk_mode_codec import dump_risk_mode, parse_risk_mode
 from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
+from btcbot.domain.risk_mode_codec import dump_risk_mode, parse_risk_mode
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
@@ -101,7 +101,6 @@ UNKNOWN_ESCALATION_ATTEMPTS = 8
 logger = logging.getLogger(__name__)
 
 
-
 REPLACE_TX_STATE_ORDER = {
     "INIT": 0,
     "CANCEL_SENT": 1,
@@ -114,7 +113,11 @@ REPLACE_TX_TERMINAL_STATES = {"SUBMIT_CONFIRMED", "FAILED"}
 
 
 def _is_replace_tx_forward_transition(current_state: str, new_state: str) -> bool:
-    known_states = set(REPLACE_TX_STATE_ORDER) | REPLACE_TX_RETRYABLE_BLOCKED_STATES | REPLACE_TX_TERMINAL_STATES
+    known_states = (
+        set(REPLACE_TX_STATE_ORDER)
+        | REPLACE_TX_RETRYABLE_BLOCKED_STATES
+        | REPLACE_TX_TERMINAL_STATES
+    )
     if current_state not in known_states:
         raise ValueError(f"unknown current replace_tx state: {current_state}")
     if new_state not in known_states:
@@ -139,6 +142,7 @@ def _is_replace_tx_terminal(state: str) -> bool:
 
 def _is_replace_tx_retryable_open(state: str) -> bool:
     return not _is_replace_tx_terminal(state)
+
 
 @dataclass(frozen=True)
 class SubmitDedupeDecision:
@@ -189,8 +193,6 @@ class ReplaceTxRecord:
     last_error: str | None
     created_at: datetime
     last_updated_at: datetime
-
-
 
 
 def _serialize_decimal_for_db(value: Decimal, *, field_name: str) -> str:
@@ -1656,7 +1658,8 @@ class StateStore:
             """
         )
         replace_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage4_replace_transactions)")
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(stage4_replace_transactions)")
         }
         required_replace_columns = {
             "replace_tx_id",
@@ -2268,12 +2271,13 @@ class StateStore:
                 ).fetchone()
                 if row is None:
                     raise
-                if str(row["payload_hash"]) != payload_hash:
-                    raise IdempotencyConflictError(
-                        f"idempotency key conflict for {action_type}:{key}: "
-                        f"existing={row['payload_hash']} incoming={payload_hash}"
-                    ) from exc
                 status = str(row["status"]).upper()
+                if str(row["payload_hash"]) != payload_hash:
+                    if not (allow_promote_simulated and status == "SIMULATED"):
+                        raise IdempotencyConflictError(
+                            f"idempotency key conflict for {action_type}:{key}: "
+                            f"existing={row['payload_hash']} incoming={payload_hash}"
+                        ) from exc
                 age_seconds = max(0, now_epoch - int(row["created_at_epoch"]))
                 if status == "PENDING" and age_seconds > PENDING_GRACE_SECONDS:
                     if row["action_id"] is None and row["client_order_id"] is None:
@@ -2297,11 +2301,16 @@ class StateStore:
                                 f"failed to mark stale idempotency key failed {action_type}:{key}"
                             ) from exc
                         status = str(row["status"]).upper()
-                if allow_promote_simulated and status == "SIMULATED":
+                if (
+                    allow_promote_simulated
+                    and status == "SIMULATED"
+                    and int(row["expires_at_epoch"]) > now_epoch
+                ):
                     conn.execute(
                         """
                         UPDATE idempotency_keys
                         SET status = 'PENDING',
+                            payload_hash = ?,
                             created_at_epoch = ?,
                             expires_at_epoch = ?,
                             action_id = NULL,
@@ -2311,7 +2320,7 @@ class StateStore:
                             next_recovery_at_epoch = NULL
                         WHERE action_type = ? AND key = ?
                         """,
-                        (now_epoch, expires_at, action_type, key),
+                        (payload_hash, now_epoch, expires_at, action_type, key),
                     )
                     promoted = conn.execute(
                         """
@@ -2642,7 +2651,6 @@ class StateStore:
                 ),
             )
 
-
     def get_order(self, order_id: str) -> StoredOrder | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -2678,17 +2686,25 @@ class StateStore:
             reconciled=bool(row["reconciled"]),
             exchange_status_raw=row["exchange_status_raw"],
             unknown_first_seen_at=(
-                int(row["unknown_first_seen_at"]) if row["unknown_first_seen_at"] is not None else None
+                int(row["unknown_first_seen_at"])
+                if row["unknown_first_seen_at"] is not None
+                else None
             ),
             unknown_last_probe_at=(
-                int(row["unknown_last_probe_at"]) if row["unknown_last_probe_at"] is not None else None
+                int(row["unknown_last_probe_at"])
+                if row["unknown_last_probe_at"] is not None
+                else None
             ),
             unknown_next_probe_at=(
-                int(row["unknown_next_probe_at"]) if row["unknown_next_probe_at"] is not None else None
+                int(row["unknown_next_probe_at"])
+                if row["unknown_next_probe_at"] is not None
+                else None
             ),
             unknown_probe_attempts=attempts,
             unknown_escalated_at=(
-                int(row["unknown_escalated_at"]) if row["unknown_escalated_at"] is not None else None
+                int(row["unknown_escalated_at"])
+                if row["unknown_escalated_at"] is not None
+                else None
             ),
         )
 
@@ -2724,7 +2740,9 @@ class StateStore:
         filtered: list[StoredOrder] = []
         for row in rows:
             created_at = _parse_db_datetime(row["created_at"])
-            updated_at_raw = row["updated_at"] if row["updated_at"] is not None else row["created_at"]
+            updated_at_raw = (
+                row["updated_at"] if row["updated_at"] is not None else row["created_at"]
+            )
             updated_at = _parse_db_datetime(updated_at_raw)
             status = OrderStatus(str(row["status"]))
             if status == OrderStatus.NEW and not include_new_after_grace:
@@ -2733,7 +2751,10 @@ class StateStore:
                     continue
             attempts = int(row["unknown_probe_attempts"] or 0)
             if status == OrderStatus.UNKNOWN and not include_escalated_unknown:
-                if row["unknown_escalated_at"] is not None or attempts >= unknown_escalation_attempts:
+                if (
+                    row["unknown_escalated_at"] is not None
+                    or attempts >= unknown_escalation_attempts
+                ):
                     continue
 
             filtered.append(
@@ -3130,11 +3151,28 @@ class StateStore:
             current_state = str(existing["state"])
             current_error = str(existing["last_error"]) if existing["last_error"] else None
             try:
-                next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
+                next_state = (
+                    state
+                    if _is_replace_tx_forward_transition(current_state, state)
+                    else current_state
+                )
             except ValueError:
-                logger.warning("replace_tx_invalid_transition", extra={"extra": {"replace_tx_id": replace_tx_id, "from_state": current_state, "to_state": state}})
+                logger.warning(
+                    "replace_tx_invalid_transition",
+                    extra={
+                        "extra": {
+                            "replace_tx_id": replace_tx_id,
+                            "from_state": current_state,
+                            "to_state": state,
+                        }
+                    },
+                )
                 next_state = current_state
-            next_error = last_error if next_state != current_state and last_error is not None else current_error
+            next_error = (
+                last_error
+                if next_state != current_state and last_error is not None
+                else current_error
+            )
             conn.execute(
                 """
                 UPDATE stage4_replace_transactions
@@ -3171,9 +3209,22 @@ class StateStore:
             current_state = str(existing["state"])
             current_error = str(existing["last_error"]) if existing["last_error"] else None
             try:
-                next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
+                next_state = (
+                    state
+                    if _is_replace_tx_forward_transition(current_state, state)
+                    else current_state
+                )
             except ValueError:
-                logger.warning("replace_tx_invalid_transition", extra={"extra": {"replace_tx_id": replace_tx_id, "from_state": current_state, "to_state": state}})
+                logger.warning(
+                    "replace_tx_invalid_transition",
+                    extra={
+                        "extra": {
+                            "replace_tx_id": replace_tx_id,
+                            "from_state": current_state,
+                            "to_state": state,
+                        }
+                    },
+                )
                 next_state = current_state
             next_error = last_error if last_error is not None else current_error
             conn.execute(

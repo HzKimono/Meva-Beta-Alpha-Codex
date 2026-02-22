@@ -15,5 +15,5 @@ def test_metric_emission_logs_record(caplog) -> None:
 
     records = [r for r in caplog.records if r.getMessage() == "metric_emit"]
     assert records
-    payload = getattr(records[-1], "extra")
+    payload = records[-1].extra
     assert payload["metric_name"] == "bot_cycle_latency_ms"

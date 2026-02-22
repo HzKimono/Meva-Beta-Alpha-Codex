@@ -102,7 +102,10 @@ def retry_with_backoff(  # noqa: UP047
                 retry_after_s=retry_after_seconds,
             )
             delay_s = delay_ms / 1000.0
-            if max_total_sleep_seconds is not None and (total_sleep_s + delay_s) > max_total_sleep_seconds:
+            if (
+                max_total_sleep_seconds is not None
+                and (total_sleep_s + delay_s) > max_total_sleep_seconds
+            ):
                 raise
             total_sleep_s += delay_s
             if on_retry is not None:
@@ -153,7 +156,10 @@ async def retry_with_backoff_async(  # noqa: UP047
                 retry_after_s=retry_after_seconds,
             )
             delay_s = delay_ms / 1000.0
-            if max_total_sleep_seconds is not None and (total_sleep_s + delay_s) > max_total_sleep_seconds:
+            if (
+                max_total_sleep_seconds is not None
+                and (total_sleep_s + delay_s) > max_total_sleep_seconds
+            ):
                 raise
             total_sleep_s += delay_s
             if on_retry is not None:

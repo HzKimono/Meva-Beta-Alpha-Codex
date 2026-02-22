@@ -1075,7 +1075,15 @@ def test_stage7_repeated_run_uses_incremental_ledger_checkpoint(monkeypatch, tmp
             return [_Pair("BTC_TRY")]
 
         def get_ticker_stats(self):
-            return [{"pairSymbol": "BTC_TRY", "volume": "1000", "last": "100", "high": "101", "low": "99"}]
+            return [
+                {
+                    "pairSymbol": "BTC_TRY",
+                    "volume": "1000",
+                    "last": "100",
+                    "high": "101",
+                    "low": "99",
+                }
+            ]
 
         def get_orderbook(self, symbol):
             del symbol

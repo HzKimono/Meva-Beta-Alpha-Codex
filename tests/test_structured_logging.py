@@ -18,7 +18,7 @@ def test_cycle_context_injects_fields(caplog) -> None:
             logger.info("cycle_log")
 
     record = caplog.records[-1]
-    payload = getattr(record, "extra")
+    payload = record.extra
     assert payload["cycle_id"] == "cycle-123"
     assert payload["process_role"] == "MONITOR"
     assert payload["mode_base"] == "DRY_RUN"
@@ -37,6 +37,6 @@ def test_base_context_uses_app_role_env(monkeypatch, caplog) -> None:
     with caplog.at_level(logging.INFO):
         logger.info("base_context_log")
 
-    payload = getattr(caplog.records[-1], "extra")
+    payload = caplog.records[-1].extra
     assert payload["process_role"] == "LIVE"
     assert payload["state_db_path_hash"]

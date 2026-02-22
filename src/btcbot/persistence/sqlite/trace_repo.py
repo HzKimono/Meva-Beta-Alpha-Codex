@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
 import logging
 import sqlite3
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 

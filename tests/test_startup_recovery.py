@@ -108,8 +108,6 @@ def test_run_with_prices_calls_refresh_and_runs_invariants() -> None:
     assert result.fills_inserted == 2
 
 
-
-
 def test_run_with_do_refresh_lifecycle_true_calls_refresh_and_marks() -> None:
     service = StartupRecoveryService()
     execution = _StubExecutionService()
@@ -132,6 +130,7 @@ def test_run_with_do_refresh_lifecycle_true_calls_refresh_and_marks() -> None:
     assert execution.calls == 1
     assert execution.marked == 1
     assert execution.primed == 1
+
 
 def test_run_without_prices_forces_observe_only_and_skips_refresh() -> None:
     service = StartupRecoveryService()

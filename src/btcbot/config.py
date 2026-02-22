@@ -22,7 +22,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-
     def __init__(self, **values):
         if "_env_file" not in values:
             env_file = os.getenv("SETTINGS_ENV_FILE")
@@ -155,9 +154,7 @@ class Settings(BaseSettings):
     fills_poll_lookback_minutes: int = Field(default=30, alias="FILLS_POLL_LOOKBACK_MINUTES")
     stage4_bootstrap_intents: bool = Field(default=True, alias="STAGE4_BOOTSTRAP_INTENTS")
     stage4_use_planning_kernel: bool = Field(default=False, alias="STAGE4_USE_PLANNING_KERNEL")
-    spot_sell_requires_inventory: bool = Field(
-        default=True, alias="SPOT_SELL_REQUIRES_INVENTORY"
-    )
+    spot_sell_requires_inventory: bool = Field(default=True, alias="SPOT_SELL_REQUIRES_INVENTORY")
 
     stage7_enabled: bool = Field(default=False, alias="STAGE7_ENABLED")
     stage7_slippage_bps: Decimal = Field(default=Decimal("25"), alias="STAGE7_SLIPPAGE_BPS")
@@ -815,9 +812,7 @@ class Settings(BaseSettings):
                 )
 
         if self.stage7_vol_low_threshold > self.stage7_vol_high_threshold:
-            raise ValueError(
-                "STAGE7_VOL_LOW_THRESHOLD must be <= STAGE7_VOL_HIGH_THRESHOLD"
-            )
+            raise ValueError("STAGE7_VOL_LOW_THRESHOLD must be <= STAGE7_VOL_HIGH_THRESHOLD")
 
         self.log_level = self.log_level.strip().upper()
         if self.log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:

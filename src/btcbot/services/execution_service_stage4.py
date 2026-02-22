@@ -77,7 +77,9 @@ class ExecutionService:
                 canceled += self._execute_cancel_action(action=action, live_mode=live_mode)
                 continue
             if action.action_type == LifecycleActionType.SUBMIT:
-                s, sim, rej, rej_min = self._execute_submit_action(action=action, live_mode=live_mode)
+                s, sim, rej, rej_min = self._execute_submit_action(
+                    action=action, live_mode=live_mode
+                )
                 submitted += s
                 simulated += sim
                 rejected += rej
@@ -119,14 +121,22 @@ class ExecutionService:
         )
 
     @staticmethod
-    def _extract_replace_groups(actions: list[LifecycleAction]) -> tuple[list[LifecycleAction], list[ReplaceGroup]]:
+    def _extract_replace_groups(
+        actions: list[LifecycleAction],
+    ) -> tuple[list[LifecycleAction], list[ReplaceGroup]]:
         grouped: dict[tuple[str, str], dict[str, list[LifecycleAction]]] = {}
         for action in actions:
             key = (action.symbol, action.side)
             bucket = grouped.setdefault(key, {"cancel": [], "submit": [], "other": []})
-            if action.action_type == LifecycleActionType.CANCEL and action.reason == "replace_cancel":
+            if (
+                action.action_type == LifecycleActionType.CANCEL
+                and action.reason == "replace_cancel"
+            ):
                 bucket["cancel"].append(action)
-            elif action.action_type == LifecycleActionType.SUBMIT and action.reason == "replace_submit":
+            elif (
+                action.action_type == LifecycleActionType.SUBMIT
+                and action.reason == "replace_submit"
+            ):
                 bucket["submit"].append(action)
             else:
                 bucket["other"].append(action)
@@ -164,7 +174,9 @@ class ExecutionService:
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
         return f"rpl:{digest}"
 
-    def _execute_replace_group(self, *, group: ReplaceGroup, live_mode: bool) -> tuple[int, int, int, int, int]:
+    def _execute_replace_group(
+        self, *, group: ReplaceGroup, live_mode: bool
+    ) -> tuple[int, int, int, int, int]:
         submitted = canceled = simulated = rejected = rejected_min = 0
         replace_tx_id = self._replace_tx_id(group)
         old_ids = [a.client_order_id for a in group.cancel_actions if a.client_order_id]
@@ -274,7 +286,9 @@ class ExecutionService:
             )
             return 0, canceled, 0, 0, 0
 
-        self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="CANCEL_CONFIRMED")
+        self.state_store.update_replace_tx_state(
+            replace_tx_id=replace_tx_id, state="CANCEL_CONFIRMED"
+        )
         self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="SUBMIT_SENT")
         submit_action = LifecycleAction(
             action_type=LifecycleActionType.SUBMIT,
@@ -285,14 +299,18 @@ class ExecutionService:
             reason=group.submit_action.reason,
             client_order_id=group.submit_action.client_order_id,
         )
-        s, sim, rej, rej_min = self._execute_submit_action(action=submit_action, live_mode=live_mode)
+        s, sim, rej, rej_min = self._execute_submit_action(
+            action=submit_action, live_mode=live_mode
+        )
         submitted += s
         simulated += sim
         rejected += rej
         rejected_min += rej_min
 
         if submitted or simulated:
-            self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="SUBMIT_CONFIRMED")
+            self.state_store.update_replace_tx_state(
+                replace_tx_id=replace_tx_id, state="SUBMIT_CONFIRMED"
+            )
             self.instrumentation.counter("replace_tx_committed_total")
             emit_decision(
                 logger,
@@ -335,15 +353,24 @@ class ExecutionService:
             local_order = self.state_store.get_stage4_order_by_client_id(old_id)
             if local_order is None or local_order.status not in TERMINAL_OLD_ORDER_STATUSES:
                 status = "missing" if local_order is None else local_order.status
-                return False, f"local_missing_record:{old_id}" if status == "missing" else f"local_state_not_terminal:{old_id}:{status}"
+                return (
+                    False,
+                    f"local_missing_record:{old_id}"
+                    if status == "missing"
+                    else f"local_state_not_terminal:{old_id}:{status}",
+                )
 
         return True, "confirmed"
 
-    def _execute_submit_action(self, *, action: LifecycleAction, live_mode: bool) -> tuple[int, int, int, int]:
+    def _execute_submit_action(
+        self, *, action: LifecycleAction, live_mode: bool
+    ) -> tuple[int, int, int, int]:
         if self.state_store.stage4_has_unknown_orders():
             logger.warning(
                 "stage4_submit_blocked_due_to_unknown",
-                extra={"extra": {"unknown_orders": self.state_store.stage4_unknown_client_order_ids()}},
+                extra={
+                    "extra": {"unknown_orders": self.state_store.stage4_unknown_client_order_ids()}
+                },
             )
             return 0, 0, 0, 0
         if not action.client_order_id:

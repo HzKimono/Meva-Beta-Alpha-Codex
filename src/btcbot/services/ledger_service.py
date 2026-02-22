@@ -174,7 +174,11 @@ class LedgerService:
             fee_try = notional * (fees_bps / Decimal("10000"))
             fee_ccy = fee_currency.upper()
             fee_amount = fee_try
-            if fee_ccy != "TRY" and fee_currency_to_try_rate is not None and fee_currency_to_try_rate > 0:
+            if (
+                fee_ccy != "TRY"
+                and fee_currency_to_try_rate is not None
+                and fee_currency_to_try_rate > 0
+            ):
                 fee_amount = fee_try / fee_currency_to_try_rate
             id_component = action.client_order_id or action.exchange_order_id or str(idx)
             fill_id = f"s7:{cycle_id}:{id_component}"
@@ -375,7 +379,6 @@ class LedgerService:
             fee_conversion_missing_currencies=tuple(sorted(missing_currencies)),
         )
 
-
     def _compute_fees_try(
         self,
         *,
@@ -408,7 +411,10 @@ class LedgerService:
         cursor = 0
         state = LedgerState()
 
-        if checkpoint is not None and checkpoint.snapshot_version == LEDGER_REDUCER_SNAPSHOT_VERSION:
+        if (
+            checkpoint is not None
+            and checkpoint.snapshot_version == LEDGER_REDUCER_SNAPSHOT_VERSION
+        ):
             try:
                 state = deserialize_ledger_state(checkpoint.snapshot_json)
                 cursor = checkpoint.last_rowid
