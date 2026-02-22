@@ -26,13 +26,13 @@ For each replaced old client order id:
 Any unresolved old id defers replacement submit for the cycle.
 
 ## Multi-submit policy
-If multiple `replace_submit` actions exist in one `(symbol, side)` group, only the latest intent is executed; earlier submits are suppressed and observed.
+Multi-submit is detected once during extracted replace-group formation per `(symbol, side)`. If multiple `replace_submit` actions exist in that group, only the latest submit intent is selected and executed, while earlier submit actions are suppressed from regular execution so they cannot leak outside the envelope.
 
 ## Observability
 Decision events:
 - `replace_deferred_unknown_order_freeze`
 - `replace_deferred_cancel_unconfirmed`
-- `replace_multiple_submits_coalesced`
+- `replace_multiple_submits_coalesced` (includes `replace_tx_id`, `symbol`, `side`, `submit_count`, `selected_submit_client_order_id`)
 - `replace_tx_metadata_mismatch`
 - `replace_committed`
 
