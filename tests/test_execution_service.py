@@ -446,6 +446,29 @@ def test_check_balance_precondition_buy_missing_balances_remains_allowed(tmp_pat
     assert available is None
 
 
+def test_check_balance_precondition_sell_missing_balances_allowed_when_opt_out(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    service = ExecutionService(
+        exchange=RecordingExchange(),
+        state_store=store,
+        spot_sell_requires_inventory=False,
+    )
+
+    for balances in (None, {}):
+        is_sufficient, asset, required, available = service._check_balance_precondition(
+            balances=balances,
+            symbol="ETH_TRY",
+            side=OrderSide.SELL,
+            price=Decimal("100"),
+            quantity=Decimal("0.1"),
+        )
+
+        assert is_sufficient is True
+        assert asset is None
+        assert required is None
+        assert available is None
+
+
 def test_execute_intents_sell_rejects_when_balances_missing_with_reason(tmp_path, caplog) -> None:
     caplog.set_level("INFO")
     store = StateStore(db_path=str(tmp_path / "state.db"))
@@ -484,6 +507,42 @@ def test_execute_intents_sell_rejects_when_balances_missing_with_reason(tmp_path
         precheck_records[-1].__dict__.get("extra", {}).get("precheck_reason")
         == "balances_missing_fail_closed"
     )
+
+
+def test_execute_intents_sell_missing_balances_not_rejected_when_opt_out(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = EmptyBalanceExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+        spot_sell_requires_inventory=False,
+    )
+
+    intent = OrderIntent(
+        symbol="ETH_TRY",
+        side=OrderSide.SELL,
+        price=100.0,
+        quantity=0.1,
+        notional=10.0,
+        cycle_id="sell-missing-balances-opt-out",
+    )
+
+    placed = service.execute_intents([intent])
+
+    assert placed == 1
+    precheck_records = [
+        record
+        for record in caplog.records
+        if record.message == "execution_reject_insufficient_balance_precheck"
+    ]
+    assert precheck_records == []
+    assert service.last_execute_summary["intents_rejected_precheck"] == 0
 
 
 def test_live_mode_saves_order_state(tmp_path) -> None:
