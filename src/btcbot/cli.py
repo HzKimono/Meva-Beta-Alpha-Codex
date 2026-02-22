@@ -35,6 +35,11 @@ from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_repl
 from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
 from btcbot.risk.policy import RiskPolicy
+from btcbot.runtime.guards import (
+    enforce_role_db_convention,
+    normalize_db_path,
+    require_no_dotenv,
+)
 from btcbot.security.redaction import redact_data
 from btcbot.security.secrets import (
     build_default_provider,
@@ -103,8 +108,8 @@ def main() -> int:
         "--env-file",
         default=None,
         help=(
-            "Optional dotenv path for settings bootstrap (e.g. .env.live). "
-            "Default is no dotenv load; you can also set SETTINGS_ENV_FILE."
+            "Dotenv bootstrap is forbidden in production runs. "
+            "Do not pass --env-file; use environment variables instead."
         ),
     )
 
@@ -401,7 +406,9 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+    require_no_dotenv(args.env_file)
     settings = _load_settings(args.env_file)
+    settings = _prepare_runtime(settings, command_name=args.command, env_file_arg=args.env_file)
     setup_logging(settings.log_level)
     if args.command != "run":
         configure_instrumentation(
@@ -527,7 +534,7 @@ def main() -> int:
         resolved_db_path = _resolve_stage7_db_path(
             "doctor",
             db_path=args.db,
-            settings_db_path=settings.state_db_path,
+            settings_db_path=None,
             silent=True,
         )
         return run_doctor(
@@ -553,6 +560,55 @@ def main() -> int:
         )
 
     return 1
+
+
+def _command_touches_state_db(command_name: str) -> bool:
+    return command_name in {
+        "run",
+        "canary",
+        "stage4-run",
+        "stage7-run",
+        "health",
+        "stage7-report",
+        "stage7-export",
+        "stage7-alerts",
+        "stage7-backtest-export",
+        "stage7-backtest-report",
+        "stage7-db-count",
+    }
+
+
+def _prepare_runtime(
+    settings: Settings, *, command_name: str, env_file_arg: str | None
+) -> Settings:
+    require_no_dotenv(env_file_arg)
+    if _command_touches_state_db(command_name):
+        db_path = normalize_db_path(settings.state_db_path)
+        if hasattr(settings, "model_copy"):
+            settings = settings.model_copy(update={"state_db_path": str(db_path)})
+        else:
+            settings.state_db_path = str(db_path)
+        enforce_role_db_convention(
+            getattr(settings, "process_role", ""),
+            bool(getattr(settings, "live_trading", False)),
+            db_path,
+        )
+
+    logger.info(
+        "startup",
+        extra={
+            "extra": {
+                "role": getattr(settings, "process_role", ""),
+                "db_path": getattr(settings, "state_db_path", ""),
+                "live_trading": bool(getattr(settings, "live_trading", False)),
+                "safe_mode": bool(getattr(settings, "safe_mode", False)),
+                "kill_switch": bool(getattr(settings, "kill_switch", False)),
+                "pid": os.getpid(),
+                "command": command_name,
+            }
+        },
+    )
+    return settings
 
 
 def _load_settings(env_file: str | None) -> Settings:
@@ -1736,7 +1792,8 @@ def run_cycle_stage7(
 
 
 def run_health(settings: Settings) -> int:
-    StateStore(db_path=settings.state_db_path)
+    with single_instance_lock(db_path=settings.state_db_path, account_key="health"):
+        StateStore(db_path=settings.state_db_path)
 
     client = BtcturkHttpClient(
         api_key=settings.btcturk_api_key.get_secret_value() if settings.btcturk_api_key else None,
@@ -1887,155 +1944,160 @@ def run_stage7_report(
     )
     if resolved_db_path is None:
         return 2
-    store = StateStore(db_path=resolved_db_path)
-    rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
-    ledger_metrics = store.get_latest_stage7_ledger_metrics()
-    drawdown_ratio = (
-        normalize_drawdown_ratio(
-            ledger_metrics.get("max_drawdown_ratio") if ledger_metrics is not None else None,
-            ledger_metrics.get("max_drawdown_pct") if ledger_metrics is not None else None,
-        )
-        if ledger_metrics is not None
-        else None
-    )
-    enriched_rows: list[dict[str, object]] = []
-    for row in rows:
-        cycle_status, _, _ = evaluate_slo_status_for_rows(
-            settings,
-            [row],
-            drawdown_ratio=normalize_drawdown_ratio(
-                row.get("max_drawdown_ratio"),
-                row.get("max_drawdown_pct"),
-            ),
-        )
-        enriched_rows.append({**row, "slo_status": cycle_status})
 
-    window_status, _, window_notes = evaluate_slo_status_for_rows(
-        settings,
-        rows,
-        drawdown_ratio=drawdown_ratio,
-    )
-
-    if json_output:
-        export_rows = store.fetch_stage7_cycles_for_export(limit=last)
-        by_cycle = {str(item.get("cycle_id")): item for item in export_rows}
-        payload_rows = []
-        for row in enriched_rows:
-            cycle_id = str(row.get("cycle_id"))
-            payload_rows.append({**by_cycle.get(cycle_id, row), "slo_status": row["slo_status"]})
-        print(
-            json.dumps(
-                redact_data(
-                    {
-                        "summary": {
-                            "status": window_status,
-                            "notes": window_notes,
-                            "window_size": len(enriched_rows),
-                        },
-                        "rows": payload_rows,
-                    }
+    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-report"):
+        store = StateStore(db_path=resolved_db_path)
+        rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
+        ledger_metrics = store.get_latest_stage7_ledger_metrics()
+        drawdown_ratio = (
+            normalize_drawdown_ratio(
+                ledger_metrics.get("max_drawdown_ratio") if ledger_metrics is not None else None,
+                ledger_metrics.get("max_drawdown_pct") if ledger_metrics is not None else None,
+            )
+            if ledger_metrics is not None
+            else None
+        )
+        enriched_rows: list[dict[str, object]] = []
+        for row in rows:
+            cycle_status, _, _ = evaluate_slo_status_for_rows(
+                settings,
+                [row],
+                drawdown_ratio=normalize_drawdown_ratio(
+                    row.get("max_drawdown_ratio"),
+                    row.get("max_drawdown_pct"),
                 ),
-                sort_keys=True,
-                default=str,
             )
-        )
-        return 0
+            enriched_rows.append({**row, "slo_status": cycle_status})
 
-    print(
-        "cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason slo_status"
-    )
-    for row in enriched_rows:
-        no_trades_reason = row.get("no_trades_reason") or "-"
-        no_metrics_reason = row.get("no_metrics_reason") or "-"
+        window_status, _, window_notes = evaluate_slo_status_for_rows(
+            settings,
+            rows,
+            drawdown_ratio=drawdown_ratio,
+        )
+
+        if json_output:
+            export_rows = store.fetch_stage7_cycles_for_export(limit=last)
+            by_cycle = {str(item.get("cycle_id")): item for item in export_rows}
+            payload_rows = []
+            for row in enriched_rows:
+                cycle_id = str(row.get("cycle_id"))
+                payload_rows.append(
+                    {**by_cycle.get(cycle_id, row), "slo_status": row["slo_status"]}
+                )
+            print(
+                json.dumps(
+                    redact_data(
+                        {
+                            "summary": {
+                                "status": window_status,
+                                "notes": window_notes,
+                                "window_size": len(enriched_rows),
+                            },
+                            "rows": payload_rows,
+                        }
+                    ),
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+            return 0
+
         print(
-            f"{row['cycle_id']} {row['ts']} {row['mode_final']} "
-            f"{row['net_pnl_try']} {row['max_drawdown_pct']} {row['turnover_try']} "
-            f"{row['intents_planned_count']} {row['oms_rejected_count']} "
-            f"{_as_int(row.get('oms_throttled_count', 0))} {no_trades_reason} {row['slo_status'].upper()}"
+            "cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason slo_status"
         )
-        print(f"  no_metrics_reason={no_metrics_reason}")
-
-        cycle_trace = store.get_stage7_cycle_trace(str(row["cycle_id"]))
-        if cycle_trace is not None:
-            summary = _as_mapping(cycle_trace.get("intents_summary", {}))
-            portfolio_plan = _as_mapping(cycle_trace.get("portfolio_plan", {}))
+        for row in enriched_rows:
+            no_trades_reason = row.get("no_trades_reason") or "-"
+            no_metrics_reason = row.get("no_metrics_reason") or "-"
             print(
-                "  stage7_plan_summary="
-                f"planned={summary.get('order_intents_planned', 0)} "
-                f"skipped={summary.get('order_intents_skipped', 0)} "
-                f"actions={summary.get('order_decisions_total', 0)}"
+                f"{row['cycle_id']} {row['ts']} {row['mode_final']} "
+                f"{row['net_pnl_try']} {row['max_drawdown_pct']} {row['turnover_try']} "
+                f"{row['intents_planned_count']} {row['oms_rejected_count']} "
+                f"{_as_int(row.get('oms_throttled_count', 0))} {no_trades_reason} {row['slo_status'].upper()}"
             )
-            planning_diag = _as_mapping(summary.get("planning_diagnostics"))
-            if planning_diag:
+            print(f"  no_metrics_reason={no_metrics_reason}")
+
+            cycle_trace = store.get_stage7_cycle_trace(str(row["cycle_id"]))
+            if cycle_trace is not None:
+                summary = _as_mapping(cycle_trace.get("intents_summary", {}))
+                portfolio_plan = _as_mapping(cycle_trace.get("portfolio_plan", {}))
                 print(
-                    "  planning_diagnostics="
-                    f"enabled={planning_diag.get('planning_enabled')} "
-                    f"disabled_reason={planning_diag.get('planning_disabled_reason') or '-'} "
-                    f"universe={planning_diag.get('selected_universe_count', 0)} "
-                    f"mark_prices={planning_diag.get('mark_prices_count', 0)} "
-                    f"planned={planning_diag.get('planned_intents_count', 0)} "
-                    f"skipped={planning_diag.get('skipped_intents_count', 0)}"
+                    "  stage7_plan_summary="
+                    f"planned={summary.get('order_intents_planned', 0)} "
+                    f"skipped={summary.get('order_intents_skipped', 0)} "
+                    f"actions={summary.get('order_decisions_total', 0)}"
                 )
-                skip_reasons = _as_mapping(planning_diag.get("skip_reasons"))
-                if skip_reasons:
-                    reason_items = ", ".join(
-                        f"{key}:{value}" for key, value in sorted(skip_reasons.items())
+                planning_diag = _as_mapping(summary.get("planning_diagnostics"))
+                if planning_diag:
+                    print(
+                        "  planning_diagnostics="
+                        f"enabled={planning_diag.get('planning_enabled')} "
+                        f"disabled_reason={planning_diag.get('planning_disabled_reason') or '-'} "
+                        f"universe={planning_diag.get('selected_universe_count', 0)} "
+                        f"mark_prices={planning_diag.get('mark_prices_count', 0)} "
+                        f"planned={planning_diag.get('planned_intents_count', 0)} "
+                        f"skipped={planning_diag.get('skipped_intents_count', 0)}"
                     )
-                    print(f"  planning_skip_reasons={reason_items}")
-            if portfolio_plan:
-                print(
-                    "  portfolio_plan="
-                    f"cash_target_try={portfolio_plan.get('cash_target_try', '-')} "
-                    f"actions={len(_as_list_of_mappings(portfolio_plan.get('actions', [])))}"
-                )
+                    skip_reasons = _as_mapping(planning_diag.get("skip_reasons"))
+                    if skip_reasons:
+                        reason_items = ", ".join(
+                            f"{key}:{value}" for key, value in sorted(skip_reasons.items())
+                        )
+                        print(f"  planning_skip_reasons={reason_items}")
+                if portfolio_plan:
+                    print(
+                        "  portfolio_plan="
+                        f"cash_target_try={portfolio_plan.get('cash_target_try', '-')} "
+                        f"actions={len(_as_list_of_mappings(portfolio_plan.get('actions', [])))}"
+                    )
 
-        allocation_plan = store.get_allocation_plan(str(row["cycle_id"]))
-        plan_source = "cycle_id"
-        if allocation_plan is None:
-            allocation_plan = store.get_latest_allocation_plan()
-            plan_source = "latest"
-        if allocation_plan is not None:
-            plan_items = _as_list_of_mappings(allocation_plan.get("plan") or [])
-            deferred_items = _as_list_of_mappings(allocation_plan.get("deferred") or [])
-            investable_total = allocation_plan.get("investable_total_try") or allocation_plan.get(
-                "investable_try"
-            )
-            unused_budget = allocation_plan.get("unused_budget_try") or allocation_plan.get(
-                "unused_investable_try"
-            )
-            print(
-                "  allocation_plan="
-                f"source={plan_source} "
-                f"cycle_id={allocation_plan.get('cycle_id')} "
-                f"investable_total_try={investable_total} "
-                f"investable_this_cycle_try={allocation_plan.get('investable_this_cycle_try')} "
-                f"deploy_budget_try={allocation_plan.get('deploy_budget_try')} "
-                f"planned_total_try={allocation_plan.get('planned_total_try')} "
-                f"unused_budget_try={unused_budget} "
-                f"usage_reason={allocation_plan.get('usage_reason')}"
-            )
-            print(
-                "  stage4_plan_summary="
-                f"planned_total_try={allocation_plan.get('planned_total_try')} "
-                f"unused_budget_try={unused_budget} "
-                f"actions={len(plan_items)} deferred={len(deferred_items)}"
-            )
-            if plan_items:
-                selected = ", ".join(
-                    f"{item.get('symbol')}:{item.get('notional_try', '-')}"
-                    for item in plan_items[:5]
+            allocation_plan = store.get_allocation_plan(str(row["cycle_id"]))
+            plan_source = "cycle_id"
+            if allocation_plan is None:
+                allocation_plan = store.get_latest_allocation_plan()
+                plan_source = "latest"
+            if allocation_plan is not None:
+                plan_items = _as_list_of_mappings(allocation_plan.get("plan") or [])
+                deferred_items = _as_list_of_mappings(allocation_plan.get("deferred") or [])
+                investable_total = allocation_plan.get(
+                    "investable_total_try"
+                ) or allocation_plan.get("investable_try")
+                unused_budget = allocation_plan.get("unused_budget_try") or allocation_plan.get(
+                    "unused_investable_try"
                 )
-                print(f"  selected_symbols={selected}")
-            if deferred_items:
-                deferred = ", ".join(
-                    f"{item.get('symbol')}:{item.get('reason', 'deferred')}"
-                    for item in deferred_items[:5]
+                print(
+                    "  allocation_plan="
+                    f"source={plan_source} "
+                    f"cycle_id={allocation_plan.get('cycle_id')} "
+                    f"investable_total_try={investable_total} "
+                    f"investable_this_cycle_try={allocation_plan.get('investable_this_cycle_try')} "
+                    f"deploy_budget_try={allocation_plan.get('deploy_budget_try')} "
+                    f"planned_total_try={allocation_plan.get('planned_total_try')} "
+                    f"unused_budget_try={unused_budget} "
+                    f"usage_reason={allocation_plan.get('usage_reason')}"
                 )
-                print(f"  deferred_symbols={deferred}")
-            if no_trades_reason in {"-", None, ""} and plan_items:
-                print("  no_trades_reason=NOT_ARMED")
-    print(f"stage7-report: window_status={window_status.upper()} rows={len(rows)}")
-    return 0
+                print(
+                    "  stage4_plan_summary="
+                    f"planned_total_try={allocation_plan.get('planned_total_try')} "
+                    f"unused_budget_try={unused_budget} "
+                    f"actions={len(plan_items)} deferred={len(deferred_items)}"
+                )
+                if plan_items:
+                    selected = ", ".join(
+                        f"{item.get('symbol')}:{item.get('notional_try', '-')}"
+                        for item in plan_items[:5]
+                    )
+                    print(f"  selected_symbols={selected}")
+                if deferred_items:
+                    deferred = ", ".join(
+                        f"{item.get('symbol')}:{item.get('reason', 'deferred')}"
+                        for item in deferred_items[:5]
+                    )
+                    print(f"  deferred_symbols={deferred}")
+                if no_trades_reason in {"-", None, ""} and plan_items:
+                    print("  no_trades_reason=NOT_ARMED")
+
+        print(f"stage7-report: window_status={window_status.upper()} rows={len(rows)}")
+        return 0
 
 
 def run_stage7_export(
@@ -2046,8 +2108,9 @@ def run_stage7_export(
     )
     if resolved_db_path is None:
         return 2
-    store = StateStore(db_path=resolved_db_path)
-    rows = store.fetch_stage7_cycles_for_export(limit=last)
+    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-export"):
+        store = StateStore(db_path=resolved_db_path)
+        rows = store.fetch_stage7_cycles_for_export(limit=last)
     if export_format == "jsonl":
         with open(out_path, "w", encoding="utf-8") as handle:
             for row in rows:
@@ -2070,8 +2133,9 @@ def run_stage7_alerts(settings: Settings, db_path: str | None, last: int) -> int
     )
     if resolved_db_path is None:
         return 2
-    store = StateStore(db_path=resolved_db_path)
-    rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
+    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-alerts"):
+        store = StateStore(db_path=resolved_db_path)
+        rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
     print("cycle_id ts alerts")
     for row in rows:
         alerts = _as_mapping(row.get("alert_flags", {}))
@@ -2242,8 +2306,9 @@ def run_stage7_backtest_export(
     if resolved_db_path is None:
         return 2
 
-    store = StateStore(db_path=resolved_db_path)
-    rows = store.fetch_stage7_cycles_for_export(limit=last)
+    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-backtest-export"):
+        store = StateStore(db_path=resolved_db_path)
+        rows = store.fetch_stage7_cycles_for_export(limit=last)
     if export_format == "jsonl":
         with open(out_path, "w", encoding="utf-8") as handle:
             for row in rows:
@@ -2316,18 +2381,19 @@ def run_stage7_db_count(*, settings: Settings, db_path: str | None) -> int:
         "stage7_params_active",
     ]
 
-    with sqlite3.connect(resolved_db_path) as connection:
-        cursor = connection.cursor()
-        for table_name in tracked_tables:
-            exists = cursor.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-                (table_name,),
-            ).fetchone()
-            if exists is None:
-                print(f"{table_name}: n/a")
-                continue
-            count = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-            print(f"{table_name}: {count}")
+    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-db-count"):
+        with sqlite3.connect(resolved_db_path) as connection:
+            cursor = connection.cursor()
+            for table_name in tracked_tables:
+                exists = cursor.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                    (table_name,),
+                ).fetchone()
+                if exists is None:
+                    print(f"{table_name}: n/a")
+                    continue
+                count = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                print(f"{table_name}: {count}")
     return 0
 
 
@@ -2383,7 +2449,11 @@ def run_doctor(
     dataset_path: str | None,
     json_output: bool = False,
 ) -> int:
-    report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)
+    if db_path:
+        with single_instance_lock(db_path=db_path, account_key="doctor"):
+            report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)
+    else:
+        report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)
     status = doctor_status(report)
 
     if json_output:

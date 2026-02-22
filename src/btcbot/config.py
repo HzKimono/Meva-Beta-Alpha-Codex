@@ -22,12 +22,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    def __init__(self, **values):
-        if "_env_file" not in values:
-            env_file = os.getenv("SETTINGS_ENV_FILE")
-            values["_env_file"] = env_file if env_file else None
-        super().__init__(**values)
-
     btcturk_api_key: SecretStr | None = Field(default=None, alias="BTCTURK_API_KEY")
     btcturk_api_secret: SecretStr | None = Field(default=None, alias="BTCTURK_API_SECRET")
     btcturk_api_scopes: Annotated[list[str], NoDecode] = Field(

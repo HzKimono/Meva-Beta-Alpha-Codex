@@ -138,7 +138,9 @@ def test_execute_intents_quantizes_before_submit(tmp_path) -> None:
     placed = service.execute_intents([_intent()])
 
     assert placed == 1
-    assert exchange.placed == [("BTCTRY", OrderSide.BUY, Decimal("100.00"), Decimal("0.1000"), exchange.placed[0][4])]
+    assert exchange.placed == [
+        ("BTCTRY", OrderSide.BUY, Decimal("100.00"), Decimal("0.1000"), exchange.placed[0][4])
+    ]
     assert exchange.placed[0][4] is not None
 
 
