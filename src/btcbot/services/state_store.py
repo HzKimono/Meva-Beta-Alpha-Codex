@@ -3946,7 +3946,7 @@ class StateStore:
 
         return [self._row_to_ledger_event(row) for row in rows]
 
-    def load_ledger_events_after_rowid(self, last_rowid: int) -> list[LedgerEvent]:
+    def load_ledger_events_after_rowid(self, last_rowid: int) -> tuple[list[LedgerEvent], int]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -3959,7 +3959,9 @@ class StateStore:
                 (last_rowid,),
             ).fetchall()
 
-        return [self._row_to_ledger_event(row) for row in rows]
+        events = [self._row_to_ledger_event(row) for row in rows]
+        batch_max_rowid = int(rows[-1]["rowid"]) if rows else last_rowid
+        return events, batch_max_rowid
 
     def get_latest_ledger_event_rowid(self) -> int:
         with self._connect() as conn:

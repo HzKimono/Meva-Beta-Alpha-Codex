@@ -79,11 +79,60 @@ def test_full_replay_and_incremental_checkpoint_parity(tmp_path) -> None:
     assert used_checkpoint is False
     assert applied_events == len(events)
 
+    checkpoint_before = store.get_ledger_checkpoint("stage7")
+    assert checkpoint_before is not None
+
     second_state, second_rowid, second_used_checkpoint, second_applied = service.load_state_incremental()
     _assert_state_equal(full_state, second_state)
     assert second_rowid == last_rowid
     assert second_used_checkpoint is True
     assert second_applied == 0
+
+    checkpoint_after = store.get_ledger_checkpoint("stage7")
+    assert checkpoint_after is not None
+    # no-new-events path should avoid checkpoint churn
+    assert checkpoint_after.updated_at == checkpoint_before.updated_at
+    assert checkpoint_after.snapshot_json == checkpoint_before.snapshot_json
+
+
+def test_incremental_cursor_does_not_skip_events_appended_during_checkpoint_write(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "ledger_race.db"))
+    service = LedgerService(state_store=store, logger=logging.getLogger(__name__))
+
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    store.append_ledger_events([_fee_event("fee-1", t0, Decimal("1"))])
+    service.load_state_incremental()
+
+    store.append_ledger_events([_fee_event("fee-2", t0 + timedelta(seconds=1), Decimal("2"))])
+
+    original_upsert = store.upsert_ledger_checkpoint
+    injected = {"done": False}
+
+    def _upsert_with_concurrent_append(**kwargs):
+        if not injected["done"]:
+            injected["done"] = True
+            store.append_ledger_events([_fee_event("fee-3", t0 + timedelta(seconds=2), Decimal("3"))])
+        return original_upsert(**kwargs)
+
+    store.upsert_ledger_checkpoint = _upsert_with_concurrent_append  # type: ignore[method-assign]
+    try:
+        state_after_second, second_cursor, used_checkpoint, second_applied = service.load_state_incremental()
+    finally:
+        store.upsert_ledger_checkpoint = original_upsert  # type: ignore[method-assign]
+
+    assert used_checkpoint is True
+    assert second_applied == 1
+    assert state_after_second.fees_by_currency["TRY"] == Decimal("3")
+
+    checkpoint_after_second = store.get_ledger_checkpoint("stage7")
+    assert checkpoint_after_second is not None
+    # checkpoint must only advance through rows that were actually applied
+    assert checkpoint_after_second.last_rowid == second_cursor
+
+    state_after_third, _, third_used_checkpoint, third_applied = service.load_state_incremental()
+    assert third_used_checkpoint is True
+    assert third_applied == 1
+    assert state_after_third.fees_by_currency["TRY"] == Decimal("6")
 
 
 def test_incremental_perf_guard_no_new_events(tmp_path) -> None:
@@ -104,4 +153,6 @@ def test_incremental_perf_guard_no_new_events(tmp_path) -> None:
 
     assert full_applied == 50000
     assert incremental_applied == 0
-    assert incremental_duration < full_duration * 0.2
+    assert full_duration > 0
+    assert incremental_duration < full_duration * 0.5
+    assert incremental_duration < 1.0

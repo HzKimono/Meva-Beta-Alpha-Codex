@@ -193,7 +193,7 @@ def deserialize_ledger_state(payload: str) -> LedgerState:
                 symbol=symbol,
                 qty=Decimal(str(lot["qty"])),
                 unit_cost=Decimal(str(lot["unit_cost"])),
-                opened_at=datetime.fromisoformat(str(lot["opened_at"])),
+                opened_at=ensure_utc(datetime.fromisoformat(str(lot["opened_at"]))),
             )
             for lot in symbol_payload.get("lots", [])
         )

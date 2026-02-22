@@ -419,11 +419,16 @@ class LedgerService:
                     extra={"extra": {"scope_id": scope_id, "last_rowid": checkpoint.last_rowid}},
                 )
 
-        new_events = self.state_store.load_ledger_events_after_rowid(cursor)
+        new_events, batch_max_rowid = self.state_store.load_ledger_events_after_rowid(cursor)
         if new_events:
             state = apply_events(state, new_events)
 
-        new_last_rowid = self.state_store.get_latest_ledger_event_rowid()
+        applied_events = len(new_events)
+        if applied_events == 0 and checkpoint is not None and used_checkpoint:
+            self.last_reduce_delta_events = 0
+            return state, cursor, True, 0
+
+        new_last_rowid = batch_max_rowid if applied_events > 0 else cursor
         self.state_store.upsert_ledger_checkpoint(
             scope_id=scope_id,
             last_rowid=new_last_rowid,
@@ -431,8 +436,8 @@ class LedgerService:
             snapshot_version=LEDGER_REDUCER_SNAPSHOT_VERSION,
             updated_at=ensure_utc(datetime.now(UTC)).isoformat(),
         )
-        self.last_reduce_delta_events = len(new_events)
-        return state, new_last_rowid, used_checkpoint, len(new_events)
+        self.last_reduce_delta_events = applied_events
+        return state, new_last_rowid, used_checkpoint, applied_events
 
     def _compute_turnover_try(self) -> Decimal:
         with self.state_store._connect() as conn:
