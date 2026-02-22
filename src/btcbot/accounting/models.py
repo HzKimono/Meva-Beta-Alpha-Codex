@@ -2,20 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-MONEY_QUANT = Decimal("0.00000001")
-QTY_QUANT = Decimal("0.00000001")
+from btcbot.domain.money_policy import (
+    DEFAULT_MONEY_POLICY,
+    MoneyMathPolicy,
+    round_qty,
+    round_quote,
+)
+
+def quantize_money(value: Decimal, policy: MoneyMathPolicy | None = None) -> Decimal:
+    """Centralized quote normalization to avoid execution/accounting drift."""
+
+    effective_policy = policy or DEFAULT_MONEY_POLICY
+    return round_quote(value, effective_policy)
 
 
-def quantize_money(value: Decimal) -> Decimal:
-    return value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
-
-
-def quantize_qty(value: Decimal) -> Decimal:
-    return value.quantize(QTY_QUANT, rounding=ROUND_HALF_UP)
+def quantize_qty(value: Decimal, policy: MoneyMathPolicy | None = None) -> Decimal:
+    effective_policy = policy or DEFAULT_MONEY_POLICY
+    return round_qty(value, effective_policy)
 
 
 class AccountingEventType(StrEnum):

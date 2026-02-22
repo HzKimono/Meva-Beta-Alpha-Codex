@@ -5,7 +5,16 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
+
+from btcbot.domain.money_policy import (
+    DEFAULT_MONEY_POLICY,
+    MoneyMathPolicy,
+    round_fee,
+    round_price,
+    round_qty,
+    round_quote,
+)
 
 
 class LedgerEventType(StrEnum):
@@ -79,11 +88,16 @@ def _sort_events(events: list[LedgerEvent]) -> list[LedgerEvent]:
     return sorted(events, key=lambda event: (ensure_utc(event.ts), event.event_id))
 
 
-def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
+def apply_events(
+    state: LedgerState,
+    events: list[LedgerEvent],
+    policy_resolver: Callable[[str], MoneyMathPolicy] | None = None,
+) -> LedgerState:
     symbol_state = dict(state.symbols)
     fees = dict(state.fees_by_currency)
 
     for event in _sort_events(events):
+        policy = policy_resolver(event.symbol) if policy_resolver is not None else DEFAULT_MONEY_POLICY
         current = symbol_state.get(event.symbol, SymbolLedger(symbol=event.symbol))
         lots = list(current.lots)
         realized = current.realized_pnl
@@ -93,23 +107,25 @@ def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
             and event.price is not None
             and event.side is not None
         ):
+            qty = round_qty(event.qty, policy)
+            price = round_price(event.price, policy)
             if event.side.upper() == "BUY":
                 lots.append(
                     PositionLot(
                         symbol=event.symbol,
-                        qty=event.qty,
-                        unit_cost=event.price,
+                        qty=qty,
+                        unit_cost=price,
                         opened_at=event.ts,
                     )
                 )
             elif event.side.upper() == "SELL":
-                remaining = event.qty
+                remaining = qty
                 while remaining > 0 and lots:
                     lot = lots[0]
                     matched = min(remaining, lot.qty)
-                    realized += (event.price - lot.unit_cost) * matched
-                    remaining -= matched
-                    leftover = lot.qty - matched
+                    realized = round_quote(realized + ((price - lot.unit_cost) * matched), policy)
+                    remaining = round_qty(remaining - matched, policy)
+                    leftover = round_qty(lot.qty - matched, policy)
                     if leftover <= 0:
                         lots.pop(0)
                     else:
@@ -134,7 +150,8 @@ def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
                     f"qty={event.qty} price={event.price}"
                 )
             currency = event.fee_currency.upper()
-            fees[currency] = fees.get(currency, Decimal("0")) + event.fee
+            fee_policy = policy if currency == "TRY" else DEFAULT_MONEY_POLICY
+            fees[currency] = round_fee(fees.get(currency, Decimal("0")) + event.fee, fee_policy)
 
         if event.type == LedgerEventType.ADJUSTMENT and event.fee is not None:
             realized += event.fee
@@ -209,19 +226,37 @@ def deserialize_ledger_state(payload: str) -> LedgerState:
     return LedgerState(symbols=symbols, fees_by_currency=fees_by_currency)
 
 
-def compute_realized_pnl(state: LedgerState) -> Decimal:
-    return sum((symbol.realized_pnl for symbol in state.symbols.values()), Decimal("0"))
+def compute_realized_pnl(
+    state: LedgerState,
+    policy_resolver: Callable[[str], MoneyMathPolicy] | None = None,
+) -> Decimal:
+    total = sum((symbol.realized_pnl for symbol in state.symbols.values()), Decimal("0"))
+    policy = DEFAULT_MONEY_POLICY
+    if policy_resolver is not None and state.symbols:
+        first_symbol = next(iter(state.symbols))
+        policy = policy_resolver(first_symbol)
+    return round_quote(total, policy)
 
 
-def compute_unrealized_pnl(state: LedgerState, mark_prices: dict[str, Decimal]) -> Decimal:
+def compute_unrealized_pnl(
+    state: LedgerState,
+    mark_prices: dict[str, Decimal],
+    policy_resolver: Callable[[str], MoneyMathPolicy] | None = None,
+) -> Decimal:
     total = Decimal("0")
     for symbol, symbol_state in state.symbols.items():
         mark = mark_prices.get(symbol)
         if mark is None:
             continue
+        policy = policy_resolver(symbol) if policy_resolver is not None else DEFAULT_MONEY_POLICY
+        mark = round_price(mark, policy)
         for lot in symbol_state.lots:
-            total += (mark - lot.unit_cost) * lot.qty
-    return total
+            total = round_quote(total + ((mark - lot.unit_cost) * lot.qty), policy)
+    policy = DEFAULT_MONEY_POLICY
+    if policy_resolver is not None and state.symbols:
+        first_symbol = next(iter(state.symbols))
+        policy = policy_resolver(first_symbol)
+    return round_quote(total, policy)
 
 
 def equity_curve(points: list[tuple[datetime, Decimal]]) -> list[tuple[datetime, Decimal]]:
