@@ -3615,6 +3615,31 @@ class StateStore:
                 ),
             )
 
+    def list_pnl_snapshots_recent(self, limit: int) -> list[PnLSnapshot]:
+        safe_limit = max(0, int(limit))
+        if safe_limit == 0:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT ts, total_equity_try, realized_today_try, realized_total_try, drawdown_pct
+                FROM pnl_snapshots
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [
+            PnLSnapshot(
+                total_equity_try=Decimal(str(row["total_equity_try"])),
+                realized_today_try=Decimal(str(row["realized_today_try"])),
+                realized_total_try=Decimal(str(row["realized_total_try"])),
+                drawdown_pct=Decimal(str(row["drawdown_pct"])),
+                ts=datetime.fromisoformat(str(row["ts"])),
+            )
+            for row in rows
+        ]
+
     def realized_total_at_day_start(self, day_start: datetime) -> Decimal:
         with self._connect() as conn:
             row = conn.execute(
