@@ -80,6 +80,15 @@ class AppendResult:
     ignored: int
 
 
+@dataclass(frozen=True)
+class LedgerReducerCheckpoint:
+    scope_id: str
+    last_rowid: int
+    snapshot_json: str
+    snapshot_version: int
+    updated_at: datetime
+
+
 class IdempotencyConflictError(ValueError):
     """Raised when an idempotency key is re-used with a conflicting payload."""
 
@@ -1549,6 +1558,17 @@ class StateStore:
               AND client_order_id IS NOT NULL
               AND side IS NOT NULL
               AND price IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ledger_reducer_checkpoints (
+                scope_id TEXT PRIMARY KEY,
+                last_rowid INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                snapshot_version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
             """
         )
 
@@ -3924,38 +3944,96 @@ class StateStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
 
-        events: list[LedgerEvent] = []
-        for row in rows:
-            events.append(
-                LedgerEvent(
-                    event_id=str(row["event_id"]),
-                    ts=datetime.fromisoformat(str(row["ts"])),
-                    symbol=str(row["symbol"]),
-                    type=LedgerEventType(str(row["type"])),
-                    side=(str(row["side"]) if row["side"] is not None else None),
-                    qty=Decimal(str(row["qty"])),
-                    price=(Decimal(str(row["price"])) if row["price"] is not None else None),
-                    fee=(Decimal(str(row["fee"])) if row["fee"] is not None else None),
-                    fee_currency=(
-                        str(row["fee_currency"]) if row["fee_currency"] is not None else None
-                    ),
-                    exchange_trade_id=(
-                        str(row["exchange_trade_id"])
-                        if row["exchange_trade_id"] is not None
-                        else None
-                    ),
-                    exchange_order_id=(
-                        str(row["exchange_order_id"])
-                        if row["exchange_order_id"] is not None
-                        else None
-                    ),
-                    client_order_id=(
-                        str(row["client_order_id"]) if row["client_order_id"] is not None else None
-                    ),
-                    meta=json.loads(str(row["meta_json"])),
-                )
+        return [self._row_to_ledger_event(row) for row in rows]
+
+    def load_ledger_events_after_rowid(self, last_rowid: int) -> list[LedgerEvent]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT rowid, event_id, ts, symbol, type, side, qty, price, fee, fee_currency,
+                       exchange_trade_id, exchange_order_id, client_order_id, meta_json
+                FROM ledger_events
+                WHERE rowid > ?
+                ORDER BY rowid ASC
+                """,
+                (last_rowid,),
+            ).fetchall()
+
+        return [self._row_to_ledger_event(row) for row in rows]
+
+    def get_latest_ledger_event_rowid(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT MAX(rowid) AS max_rowid FROM ledger_events").fetchone()
+        if row is None or row["max_rowid"] is None:
+            return 0
+        return int(row["max_rowid"])
+
+    def get_ledger_checkpoint(self, scope_id: str) -> LedgerReducerCheckpoint | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT scope_id, last_rowid, snapshot_json, snapshot_version, updated_at
+                FROM ledger_reducer_checkpoints
+                WHERE scope_id = ?
+                """,
+                (scope_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return LedgerReducerCheckpoint(
+            scope_id=str(row["scope_id"]),
+            last_rowid=int(row["last_rowid"]),
+            snapshot_json=str(row["snapshot_json"]),
+            snapshot_version=int(row["snapshot_version"]),
+            updated_at=_parse_db_datetime(row["updated_at"]),
+        )
+
+    def upsert_ledger_checkpoint(
+        self,
+        *,
+        scope_id: str,
+        last_rowid: int,
+        snapshot_json: str,
+        snapshot_version: int,
+        updated_at: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ledger_reducer_checkpoints(
+                    scope_id, last_rowid, snapshot_json, snapshot_version, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(scope_id) DO UPDATE SET
+                    last_rowid=excluded.last_rowid,
+                    snapshot_json=excluded.snapshot_json,
+                    snapshot_version=excluded.snapshot_version,
+                    updated_at=excluded.updated_at
+                """,
+                (scope_id, last_rowid, snapshot_json, snapshot_version, updated_at),
             )
-        return events
+
+    def _row_to_ledger_event(self, row: sqlite3.Row) -> LedgerEvent:
+        return LedgerEvent(
+            event_id=str(row["event_id"]),
+            ts=datetime.fromisoformat(str(row["ts"])),
+            symbol=str(row["symbol"]),
+            type=LedgerEventType(str(row["type"])),
+            side=(str(row["side"]) if row["side"] is not None else None),
+            qty=Decimal(str(row["qty"])),
+            price=(Decimal(str(row["price"])) if row["price"] is not None else None),
+            fee=(Decimal(str(row["fee"])) if row["fee"] is not None else None),
+            fee_currency=(str(row["fee_currency"]) if row["fee_currency"] is not None else None),
+            exchange_trade_id=(
+                str(row["exchange_trade_id"]) if row["exchange_trade_id"] is not None else None
+            ),
+            exchange_order_id=(
+                str(row["exchange_order_id"]) if row["exchange_order_id"] is not None else None
+            ),
+            client_order_id=(
+                str(row["client_order_id"]) if row["client_order_id"] is not None else None
+            ),
+            meta=json.loads(str(row["meta_json"])),
+        )
 
     def get_cursor(self, key: str) -> str | None:
         with self._connect() as conn:

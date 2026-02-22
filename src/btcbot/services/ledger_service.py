@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,11 +17,16 @@ from btcbot.domain.ledger import (
     compute_max_drawdown,
     compute_realized_pnl,
     compute_unrealized_pnl,
+    deserialize_ledger_state,
+    ensure_utc,
+    serialize_ledger_state,
 )
 from btcbot.domain.models import normalize_symbol
 from btcbot.domain.stage4 import Fill, LifecycleAction, LifecycleActionType
 from btcbot.ports_price_conversion import FeeConversionRateError, PriceConverter
 from btcbot.services.state_store import StateStore
+
+LEDGER_REDUCER_SNAPSHOT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -88,9 +94,6 @@ class LedgerService:
     def __init__(self, state_store: StateStore, logger: logging.Logger) -> None:
         self.state_store = state_store
         self.logger = logger
-        self._cached_state: LedgerState | None = None
-        self._cached_event_count = 0
-        self._cached_last_event_id: str | None = None
         self.last_reduce_delta_events = 0
 
     def ingest_exchange_updates(self, fills: list[Fill]) -> LedgerIngestResult:
@@ -243,8 +246,9 @@ class LedgerService:
         cash_try: Decimal,
         price_for_fee_conversion: PriceConverter | None = None,
         slippage_try: Decimal = Decimal("0"),
+        ledger_state: LedgerState | None = None,
     ) -> FinancialBreakdown:
-        events, state = self._load_state_incremental()
+        state = ledger_state or self.load_state_incremental()[0]
         realized = compute_realized_pnl(state)
         normalized_marks = {
             normalize_symbol(symbol): value for symbol, value in mark_prices.items()
@@ -256,10 +260,7 @@ class LedgerService:
             price_for_fee_conversion=price_for_fee_conversion,
         )
 
-        turnover = Decimal("0")
-        for event in events:
-            if event.type == LedgerEventType.FILL and event.price is not None:
-                turnover += abs(event.price * event.qty)
+        turnover = self._compute_turnover_try()
 
         gross = realized + unrealized
         net = gross - fees_try - slippage_try
@@ -287,12 +288,14 @@ class LedgerService:
         price_for_fee_conversion: PriceConverter | None = None,
         slippage_try: Decimal = Decimal("0"),
         ts: datetime | None = None,
+        ledger_state: LedgerState | None = None,
     ) -> LedgerSnapshot:
         breakdown = self.financial_breakdown(
             mark_prices=mark_prices,
             cash_try=cash_try,
             price_for_fee_conversion=price_for_fee_conversion,
             slippage_try=slippage_try,
+            ledger_state=ledger_state,
         )
 
         with self.state_store._connect() as conn:
@@ -328,8 +331,9 @@ class LedgerService:
         mark_prices: dict[str, Decimal],
         cash_try: Decimal = Decimal("0"),
         price_for_fee_conversion: PriceConverter | None = None,
+        ledger_state: LedgerState | None = None,
     ) -> PnlReport:
-        events, state = self._load_state_incremental()
+        state = ledger_state or self.load_state_incremental()[0]
 
         normalized_marks = {
             normalize_symbol(symbol): value for symbol, value in mark_prices.items()
@@ -396,47 +400,65 @@ class LedgerService:
             fees_try += amount * Decimal(str(converted))
         return fees_try, missing_rates
 
-    def _load_state_incremental(self) -> tuple[list[LedgerEvent], LedgerState]:
-        events = self.state_store.load_ledger_events()
-        if not events:
-            self._cached_state = LedgerState()
-            self._cached_event_count = 0
-            self._cached_last_event_id = None
-            self.last_reduce_delta_events = 0
-            return events, LedgerState()
+    def load_state_incremental(
+        self, scope_id: str = "stage7"
+    ) -> tuple[LedgerState, int, bool, int]:
+        checkpoint = self.state_store.get_ledger_checkpoint(scope_id)
+        used_checkpoint = False
+        cursor = 0
+        state = LedgerState()
 
-        if (
-            self._cached_state is None
-            or self._cached_event_count > len(events)
-            or (
-                self._cached_event_count > 0
-                and self._cached_event_count <= len(events)
-                and self._cached_last_event_id
-                != events[self._cached_event_count - 1].event_id
-            )
-        ):
-            state = apply_events(LedgerState(), events)
-            self.last_reduce_delta_events = len(events)
-        else:
-            delta = events[self._cached_event_count :]
-            if delta:
-                state = apply_events(self._cached_state, delta)
-            else:
-                state = self._cached_state
-            self.last_reduce_delta_events = len(delta)
+        if checkpoint is not None and checkpoint.snapshot_version == LEDGER_REDUCER_SNAPSHOT_VERSION:
+            try:
+                state = deserialize_ledger_state(checkpoint.snapshot_json)
+                cursor = checkpoint.last_rowid
+                used_checkpoint = True
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                self.logger.warning(
+                    "ledger_checkpoint_restore_failed",
+                    extra={"extra": {"scope_id": scope_id, "last_rowid": checkpoint.last_rowid}},
+                )
 
-        self._cached_state = state
-        self._cached_event_count = len(events)
-        self._cached_last_event_id = events[-1].event_id
-        return events, state
+        new_events = self.state_store.load_ledger_events_after_rowid(cursor)
+        if new_events:
+            state = apply_events(state, new_events)
+
+        new_last_rowid = self.state_store.get_latest_ledger_event_rowid()
+        self.state_store.upsert_ledger_checkpoint(
+            scope_id=scope_id,
+            last_rowid=new_last_rowid,
+            snapshot_json=serialize_ledger_state(state),
+            snapshot_version=LEDGER_REDUCER_SNAPSHOT_VERSION,
+            updated_at=ensure_utc(datetime.now(UTC)).isoformat(),
+        )
+        self.last_reduce_delta_events = len(new_events)
+        return state, new_last_rowid, used_checkpoint, len(new_events)
+
+    def _compute_turnover_try(self) -> Decimal:
+        with self.state_store._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(SUM(ABS(CAST(price AS REAL) * CAST(qty AS REAL))), 0) AS turnover
+                FROM ledger_events
+                WHERE type = ? AND price IS NOT NULL
+                """,
+                (LedgerEventType.FILL.value,),
+            ).fetchone()
+        return Decimal(str(row["turnover"])) if row is not None else Decimal("0")
 
     def checkpoint(self) -> LedgerCheckpoint:
-        events, _ = self._load_state_incremental()
-        if not events:
+        self.load_state_incremental()
+        with self.state_store._connect() as conn:
+            event_count_row = conn.execute(
+                "SELECT COUNT(*) AS event_count FROM ledger_events"
+            ).fetchone()
+            last_row = conn.execute(
+                "SELECT ts, event_id FROM ledger_events ORDER BY ts DESC, event_id DESC LIMIT 1"
+            ).fetchone()
+        if last_row is None:
             return LedgerCheckpoint(event_count=0, last_ts=None, last_event_id=None)
-        last = events[-1]
         return LedgerCheckpoint(
-            event_count=len(events),
-            last_ts=last.ts,
-            last_event_id=last.event_id,
+            event_count=int(event_count_row["event_count"]) if event_count_row else 0,
+            last_ts=datetime.fromisoformat(str(last_row["ts"])),
+            last_event_id=str(last_row["event_id"]),
         )

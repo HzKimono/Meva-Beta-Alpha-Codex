@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -145,6 +146,67 @@ def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
         )
 
     return LedgerState(symbols=symbol_state, fees_by_currency=fees)
+
+
+def _serialize_decimal(value: Decimal) -> str:
+    return format(value, "f")
+
+
+def serialize_ledger_state(state: LedgerState) -> str:
+    symbols_payload: dict[str, dict[str, object]] = {}
+    for symbol in sorted(state.symbols):
+        symbol_ledger = state.symbols[symbol]
+        symbols_payload[symbol] = {
+            "lots": [
+                {
+                    "qty": _serialize_decimal(lot.qty),
+                    "unit_cost": _serialize_decimal(lot.unit_cost),
+                    "opened_at": ensure_utc(lot.opened_at).isoformat(),
+                }
+                for lot in symbol_ledger.lots
+            ],
+            "realized_pnl": _serialize_decimal(symbol_ledger.realized_pnl),
+        }
+
+    fees_payload = {
+        currency: _serialize_decimal(state.fees_by_currency[currency])
+        for currency in sorted(state.fees_by_currency)
+    }
+
+    return json.dumps(
+        {"symbols": symbols_payload, "fees_by_currency": fees_payload},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def deserialize_ledger_state(payload: str) -> LedgerState:
+    raw = json.loads(payload)
+    symbols_raw = raw.get("symbols", {})
+    fees_raw = raw.get("fees_by_currency", {})
+
+    symbols: dict[str, SymbolLedger] = {}
+    for symbol in sorted(symbols_raw):
+        symbol_payload = symbols_raw[symbol]
+        lots = tuple(
+            PositionLot(
+                symbol=symbol,
+                qty=Decimal(str(lot["qty"])),
+                unit_cost=Decimal(str(lot["unit_cost"])),
+                opened_at=datetime.fromisoformat(str(lot["opened_at"])),
+            )
+            for lot in symbol_payload.get("lots", [])
+        )
+        symbols[symbol] = SymbolLedger(
+            symbol=symbol,
+            lots=lots,
+            realized_pnl=Decimal(str(symbol_payload.get("realized_pnl", "0"))),
+        )
+
+    fees_by_currency = {
+        str(currency): Decimal(str(amount)) for currency, amount in sorted(fees_raw.items())
+    }
+    return LedgerState(symbols=symbols, fees_by_currency=fees_by_currency)
 
 
 def compute_realized_pnl(state: LedgerState) -> Decimal:
