@@ -1242,20 +1242,6 @@ def test_replace_tx_state_does_not_regress_from_terminal(store: StateStore) -> N
         ),
         rules_service=ExchangeRulesService(exchange),
     )
-    now = now_utc()
-    old = Order(
-        symbol="BTC_TRY",
-        side="buy",
-        type="limit",
-        price=Decimal("100"),
-        qty=Decimal("1"),
-        status="open",
-        created_at=now,
-        updated_at=now,
-        exchange_order_id="ex-old-stable",
-        client_order_id="old-stable",
-        mode="live",
-    )
     exchange.open_orders_by_symbol["BTC_TRY"] = []
     store.record_stage4_order_submitted(
         symbol="BTC_TRY",
@@ -1519,3 +1505,47 @@ def test_replace_multiple_submit_coalesce_increments_metric(store: StateStore) -
     ]
     svc.execute_with_report(actions)
     assert "replace_multiple_submits_coalesced_total" in svc.instrumentation.calls
+
+
+
+def test_replace_local_missing_record_defers(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    exchange.open_orders_by_symbol["BTC_TRY"] = []
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            SAFE_MODE=False,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    actions = [
+        LifecycleAction(
+            action_type=LifecycleActionType.CANCEL,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            reason="replace_cancel",
+            client_order_id="old-missing",
+            exchange_order_id="ex-old-missing",
+        ),
+        LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("101"),
+            qty=Decimal("1"),
+            reason="replace_submit",
+            client_order_id="new-missing",
+            replace_for_client_order_id="old-missing",
+        ),
+    ]
+    report = svc.execute_with_report(actions)
+    assert report.submitted == 0

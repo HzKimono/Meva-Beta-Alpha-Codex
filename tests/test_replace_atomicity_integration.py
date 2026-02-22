@@ -8,8 +8,8 @@ from btcbot.adapters.exchange_stage4 import OrderAck
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Order
-from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.exchange_rules_service import ExchangeRulesService
+from btcbot.services.execution_service_stage4 import ExecutionService
 
 
 class FakeExchange:

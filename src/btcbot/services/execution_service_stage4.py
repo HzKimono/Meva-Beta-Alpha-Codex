@@ -6,12 +6,12 @@ from dataclasses import dataclass
 
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
-from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Order, Quantizer
+from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Quantizer
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.client_order_id_service import build_exchange_client_id
-from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
 from btcbot.services.exchange_rules_service import ExchangeRulesService
+from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -160,7 +160,7 @@ class ExecutionService:
         old_ids = [a.client_order_id for a in group.cancel_actions if a.client_order_id]
         new_id = group.submit_action.client_order_id
         if not new_id or not old_ids:
-            self.instrumentation.counter("replace_tx_failed")
+            self.instrumentation.counter("replace_tx_failed_total")
             return 0, 0, 0, 0, 0
 
         existing_tx = self.state_store.get_replace_tx(replace_tx_id)
@@ -173,7 +173,7 @@ class ExecutionService:
                 new_client_order_id=new_id,
                 state="INIT",
             )
-            self.instrumentation.counter("replace_tx_started")
+            self.instrumentation.counter("replace_tx_started_total")
             current_state = "INIT"
         else:
             current_state = existing_tx.state
@@ -215,7 +215,7 @@ class ExecutionService:
                 state="BLOCKED_UNKNOWN",
                 last_error="unknown_order_freeze",
             )
-            self.instrumentation.counter("replace_tx_blocked_unknown")
+            self.instrumentation.counter("replace_tx_blocked_unknown_total")
             emit_decision(
                 logger,
                 {
@@ -244,7 +244,7 @@ class ExecutionService:
                 state="BLOCKED_RECONCILE",
                 last_error=reason,
             )
-            self.instrumentation.counter("replace_tx_deferred")
+            self.instrumentation.counter("replace_tx_deferred_total")
             emit_decision(
                 logger,
                 {
@@ -258,6 +258,7 @@ class ExecutionService:
                         "old_client_order_ids": old_ids,
                         "new_client_order_id": new_id,
                         "detail": reason,
+                        "reason_code": reason.split(":", 1)[0],
                     },
                 },
             )
@@ -282,7 +283,7 @@ class ExecutionService:
 
         if submitted or simulated:
             self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="SUBMIT_CONFIRMED")
-            self.instrumentation.counter("replace_tx_committed")
+            self.instrumentation.counter("replace_tx_committed_total")
             emit_decision(
                 logger,
                 {
@@ -304,7 +305,7 @@ class ExecutionService:
                 state="FAILED",
                 last_error="submit_rejected",
             )
-            self.instrumentation.counter("replace_tx_failed")
+            self.instrumentation.counter("replace_tx_failed_total")
 
         return submitted, canceled, simulated, rejected, rejected_min
 
@@ -320,11 +321,11 @@ class ExecutionService:
             if not old_id:
                 continue
             if old_id in open_client_ids:
-                return False, f"still_open:{old_id}"
+                return False, f"old_id_still_open:{old_id}"
             local_order = self.state_store.get_stage4_order_by_client_id(old_id)
             if local_order is None or local_order.status not in TERMINAL_OLD_ORDER_STATUSES:
                 status = "missing" if local_order is None else local_order.status
-                return False, f"local_state_not_terminal:{old_id}:{status}"
+                return False, f"local_missing_record:{old_id}" if status == "missing" else f"local_state_not_terminal:{old_id}:{status}"
 
         return True, "confirmed"
 

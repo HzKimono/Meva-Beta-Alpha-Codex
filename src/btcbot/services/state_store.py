@@ -1649,7 +1649,7 @@ class StateStore:
             missing = ",".join(sorted(missing_replace_columns))
             raise RuntimeError(
                 f"Incompatible stage4_replace_transactions schema; missing columns: {missing}. "
-                "Refusing destructive migration."
+                "Refusing destructive migration. Run an explicit migration tool, use a new DB path, or contact operator support."
             )
         conn.execute(
             """
@@ -3242,6 +3242,20 @@ class StateStore:
                 new_id=new_client_order_id,
             ):
                 mismatch_error = "replace_tx_metadata_mismatch"
+                logger.warning(
+                    "replace_tx_metadata_mismatch",
+                    extra={
+                        "extra": {
+                            "replace_tx_id": replace_tx_id,
+                            "existing_symbol": str(existing["symbol"]),
+                            "existing_side": str(existing["side"]),
+                            "existing_new_client_order_id": str(existing["new_client_order_id"]),
+                            "incoming_symbol": normalize_symbol(symbol),
+                            "incoming_side": side,
+                            "incoming_new_client_order_id": new_client_order_id,
+                        }
+                    },
+                )
                 conn.execute(
                     """
                     UPDATE stage4_replace_transactions
@@ -3257,6 +3271,7 @@ class StateStore:
             try:
                 next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
             except ValueError:
+                logger.warning("replace_tx_invalid_transition", extra={"extra": {"replace_tx_id": replace_tx_id, "from_state": current_state, "to_state": state}})
                 next_state = current_state
             next_error = last_error if next_state != current_state and last_error is not None else current_error
             conn.execute(
