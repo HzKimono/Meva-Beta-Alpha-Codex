@@ -12,6 +12,7 @@ from time import monotonic
 from typing import Protocol
 
 from btcbot.adapters.btcturk.instrumentation import MetricsSink
+from btcbot.obs.metrics import inc_counter
 from btcbot.observability import get_instrumentation
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ class BtcturkWsClient:
                         raise err
             except Exception:
                 self.metrics.inc("ws_drops")
+                inc_counter("bot_ws_disconnects_total", labels={"exchange": "btcturk", "process_role": "LIVE"})
                 logger.exception("BTCTurk websocket disconnected")
             finally:
                 await self._cancel_tasks()
