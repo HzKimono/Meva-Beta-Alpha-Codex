@@ -21,6 +21,7 @@ from btcbot.domain.ledger import (
     ensure_utc,
     serialize_ledger_state,
 )
+from btcbot.domain.money_policy import DEFAULT_MONEY_POLICY, round_quote
 from btcbot.domain.models import normalize_symbol
 from btcbot.domain.stage4 import Fill, LifecycleAction, LifecycleActionType
 from btcbot.ports_price_conversion import FeeConversionRateError, PriceConverter
@@ -400,7 +401,10 @@ class LedgerService:
             except FeeConversionRateError:
                 missing_rates.add(normalized)
                 continue
-            fees_try += amount * Decimal(str(converted))
+            fees_try += round_quote(
+                amount * Decimal(str(converted)),
+                DEFAULT_MONEY_POLICY,
+            )
         return fees_try, missing_rates
 
     def load_state_incremental(

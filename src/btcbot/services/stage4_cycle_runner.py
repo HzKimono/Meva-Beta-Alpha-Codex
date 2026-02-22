@@ -128,6 +128,23 @@ class Stage4CycleRunner:
                 }
 
         process_role = coerce_process_role(getattr(settings, "process_role", None)).value
+        metadata_optional_mode = (
+            settings.dry_run or settings.safe_mode or process_role == Mode.MONITOR.value
+        )
+        if not pair_info:
+            if live_mode and not metadata_optional_mode:
+                raise Stage4ExchangeError("missing_exchange_metadata")
+            logger.warning(
+                "stage4_exchange_metadata_missing",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "live_mode": live_mode,
+                        "metadata_optional_mode": metadata_optional_mode,
+                        "reason_code": "missing_exchange_metadata",
+                    }
+                },
+            )
 
         envelope = {
             "cycle_id": cycle_id,
@@ -162,9 +179,12 @@ class Stage4CycleRunner:
                 ),
                 max_gross_exposure_try=Decimal(str(settings.risk_max_gross_exposure_try)),
             )
-            risk_budget_service = RiskBudgetService(
-                state_store=state_store, uow_factory=uow_factory
-            )
+            try:
+                risk_budget_service = RiskBudgetService(
+                    state_store=state_store, uow_factory=uow_factory
+                )
+            except TypeError:
+                risk_budget_service = RiskBudgetService(state_store=state_store)
             execution_service = ExecutionService(
                 exchange=exchange,
                 state_store=state_store,
@@ -891,7 +911,7 @@ class Stage4CycleRunner:
             metrics_persisted = False
             try:
                 with state_store.transaction():
-                    metrics_service.persist_cycle_metrics_with_uow(uow_factory, cycle_metrics)
+                    metrics_service.persist_cycle_metrics(state_store, cycle_metrics)
                 metrics_persisted = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
