@@ -21,8 +21,8 @@ from btcbot.domain.ledger import (
     ensure_utc,
     serialize_ledger_state,
 )
-from btcbot.domain.money_policy import DEFAULT_MONEY_POLICY, round_quote
 from btcbot.domain.models import normalize_symbol
+from btcbot.domain.money_policy import DEFAULT_MONEY_POLICY, round_quote
 from btcbot.domain.stage4 import Fill, LifecycleAction, LifecycleActionType
 from btcbot.ports_price_conversion import FeeConversionRateError, PriceConverter
 from btcbot.services.state_store import StateStore
