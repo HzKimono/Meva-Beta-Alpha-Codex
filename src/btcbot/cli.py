@@ -419,6 +419,20 @@ def main() -> int:
         )
     settings = _apply_effective_universe(settings)
     set_base_context(process_role=settings.process_role, state_db_path=settings.state_db_path)
+    logger.info(
+        "startup",
+        extra={
+            "extra": {
+                "role": settings.process_role,
+                "db_path": settings.state_db_path,
+                "live_trading": bool(settings.live_trading),
+                "safe_mode": bool(getattr(settings, "safe_mode", False)),
+                "kill_switch": bool(settings.kill_switch),
+                "pid": os.getpid(),
+                "command": args.command,
+            }
+        },
+    )
 
     if args.command in {"run", "stage4-run"}:
         _print_effective_side_effects_state(
