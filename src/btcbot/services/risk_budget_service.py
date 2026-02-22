@@ -16,6 +16,7 @@ from btcbot.domain.stage4 import Position
 from btcbot.observability_decisions import emit_decision
 from btcbot.risk.budget import RiskBudgetPolicy, RiskBudgetView
 from btcbot.services.ledger_service import PnlReport
+from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -65,11 +66,13 @@ class RiskBudgetService:
         settings: Settings | None = None,
         now_provider: Callable[[], datetime] | None = None,
         budget_policy: RiskBudgetPolicy | None = None,
+        uow_factory: UnitOfWorkFactory | None = None,
     ) -> None:
         self.state_store = state_store
         self.settings = settings or Settings()
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
         self.budget_policy = budget_policy or RiskBudgetPolicy()
+        self.uow_factory = uow_factory
 
     def apply_self_financing_checkpoint(
         self,
@@ -224,7 +227,11 @@ class RiskBudgetService:
         live_mode: bool = False,
         tradable_symbols: list[str] | None = None,
     ) -> tuple[BudgetDecision, Mode | None, Decimal, Decimal, date]:
-        current = self.state_store.get_risk_state_current()
+        if self.uow_factory is not None:
+            with self.uow_factory() as uow:
+                current = uow.risk.get_risk_state_current()
+        else:
+            current = self.state_store.get_risk_state_current()
         prev_mode_raw = current.get("current_mode")
         prev_mode = parse_risk_mode(prev_mode_raw)
 
@@ -429,9 +436,25 @@ class RiskBudgetService:
         fees_today: Decimal,
         fees_day: date,
     ) -> None:
+        persisted_decision = decision.risk_decision if isinstance(decision, BudgetDecision) else decision
+        if self.uow_factory is not None:
+            with self.uow_factory() as uow:
+                uow.risk.save_risk_decision(
+                    cycle_id=cycle_id,
+                    decision=persisted_decision,
+                    prev_mode=prev_mode,
+                )
+                uow.risk.upsert_risk_state_current(
+                    risk_mode=decision.mode,
+                    peak_equity_try=peak_equity,
+                    peak_equity_date=peak_day.isoformat(),
+                    fees_try_today=fees_today,
+                    fees_day=fees_day.isoformat(),
+                )
+            return
         self.state_store.persist_risk(
             cycle_id=cycle_id,
-            decision=(decision.risk_decision if isinstance(decision, BudgetDecision) else decision),
+            decision=persisted_decision,
             prev_mode=prev_mode,
             risk_mode=decision.mode,
             peak_equity_try=peak_equity,
