@@ -133,7 +133,7 @@ def test_main_stage7_backtest_report_alias(monkeypatch, tmp_path: Path) -> None:
     class FakeSettings:
         log_level = "INFO"
         process_role = "MONITOR"
-        state_db_path = "state.db"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 

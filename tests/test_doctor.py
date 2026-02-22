@@ -554,6 +554,8 @@ def test_main_doctor_without_stage7_db_is_warn(monkeypatch, capsys) -> None:
             ]
         ),
     )
+    monkeypatch.setenv("STATE_DB_PATH", "/tmp/monitor_state.db")
+    monkeypatch.setenv("PROCESS_ROLE", "MONITOR")
     monkeypatch.setattr(sys, "argv", ["btcbot", "doctor", "--json"])
 
     code = cli.main()
