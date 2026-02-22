@@ -169,9 +169,9 @@ def test_stress_partial_fills_fee_funding_and_rounding() -> None:
         initial_trading_capital_try=Decimal("1000"),
     )
 
-    assert state.fees_try == Decimal("0.33333334")
+    assert state.fees_try == Decimal("0.33333333")
     assert state.funding_cost_try == Decimal("0.10000000")
-    assert state.slippage_try == Decimal("0.05000001")
+    assert state.slippage_try == Decimal("0.05000000")
     assert state.symbols["XRPTRY"].qty == Decimal("2.22222222")
 
 

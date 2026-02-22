@@ -26,9 +26,10 @@ from btcbot.domain.stage4 import (
     Quantizer,
 )
 from btcbot.domain.strategy_core import OrderBookSummary, PositionSummary
-from btcbot.observability_decisions import emit_decision
 from btcbot.obs.metrics import observe_histogram, set_gauge
 from btcbot.obs.process_role import coerce_process_role
+from btcbot.observability_decisions import emit_decision
+from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.planning_kernel import ExecutionPort, Plan
 from btcbot.services import metrics_service
 from btcbot.services.account_snapshot_service import AccountSnapshotService
@@ -48,7 +49,6 @@ from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_budget_service import CapitalPolicyError, RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.stage4_planning_kernel_integration import build_stage4_kernel_plan
-from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -162,7 +162,9 @@ class Stage4CycleRunner:
                 ),
                 max_gross_exposure_try=Decimal(str(settings.risk_max_gross_exposure_try)),
             )
-            risk_budget_service = RiskBudgetService(state_store=state_store, uow_factory=uow_factory)
+            risk_budget_service = RiskBudgetService(
+                state_store=state_store, uow_factory=uow_factory
+            )
             execution_service = ExecutionService(
                 exchange=exchange,
                 state_store=state_store,
@@ -685,7 +687,11 @@ class Stage4CycleRunner:
                         and ledger_ingest.events_inserted == 0
                         and ledger_ingest.events_ignored > 0
                     )
-                    if before_value is not None and before_value == after_value and not dedupe_only_cycle:
+                    if (
+                        before_value is not None
+                        and before_value == after_value
+                        and not dedupe_only_cycle
+                    ):
                         cursor_stall_by_symbol[symbol] = prev + 1
                     else:
                         cursor_stall_by_symbol[symbol] = 0
@@ -726,11 +732,13 @@ class Stage4CycleRunner:
 
             final_mode = combine_modes(risk_decision.mode, degrade_decision.mode_override)
             gated_actions = self._gate_actions_by_mode(accepted_actions, final_mode)
-            prefiltered_actions, prefilter_min_notional_dropped = self._prefilter_submit_actions_min_notional(
-                actions=gated_actions,
-                pair_info=pair_info,
-                min_order_notional_try=Decimal(str(settings.min_order_notional_try)),
-                cycle_id=cycle_id,
+            prefiltered_actions, prefilter_min_notional_dropped = (
+                self._prefilter_submit_actions_min_notional(
+                    actions=gated_actions,
+                    pair_info=pair_info,
+                    min_order_notional_try=Decimal(str(settings.min_order_notional_try)),
+                    cycle_id=cycle_id,
+                )
             )
             if final_mode == Mode.OBSERVE_ONLY:
                 logger.info(
@@ -742,7 +750,9 @@ class Stage4CycleRunner:
             self._assert_execution_invariant(execution_report)
 
             cycle_ended_at = datetime.now(UTC)
-            updated_cycle_duration_ms = int((cycle_ended_at - cycle_started_at).total_seconds() * 1000)
+            updated_cycle_duration_ms = int(
+                (cycle_ended_at - cycle_started_at).total_seconds() * 1000
+            )
             observe_histogram(
                 "bot_cycle_latency_ms",
                 updated_cycle_duration_ms,
@@ -1404,7 +1414,14 @@ class Stage4CycleRunner:
         return mapped
 
     def _assert_execution_invariant(self, report: object) -> None:
-        for field in ("executed_total", "submitted", "canceled", "simulated", "rejected", "rejected_min_notional"):
+        for field in (
+            "executed_total",
+            "submitted",
+            "canceled",
+            "simulated",
+            "rejected",
+            "rejected_min_notional",
+        ):
             if not hasattr(report, field):
                 raise Stage4InvariantError(f"execution_report_missing_{field}")
             value = getattr(report, field)
@@ -1429,7 +1446,6 @@ class Stage4CycleRunner:
                     gated.append(action)
             return gated
         return actions
-
 
     def _prefilter_submit_actions_min_notional(
         self,

@@ -6,7 +6,8 @@ from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
-from btcbot.domain.stage4 import ExchangeRules as Stage4ExchangeRules, Quantizer
+from btcbot.domain.stage4 import ExchangeRules as Stage4ExchangeRules
+from btcbot.domain.stage4 import Quantizer
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 
 

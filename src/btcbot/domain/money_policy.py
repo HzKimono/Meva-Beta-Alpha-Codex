@@ -80,4 +80,3 @@ def policy_for_symbol(symbol_info: object) -> MoneyMathPolicy:
         base_precision=int(getattr(symbol_info, "qty_precision", 8)),
         fee_precision=int(getattr(symbol_info, "fee_precision", 8)),
     )
-

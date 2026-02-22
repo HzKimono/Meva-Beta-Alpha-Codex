@@ -152,7 +152,6 @@ def _sanitize_request_json(payload: dict[str, object] | None) -> dict[str, objec
     return sanitize_mapping(payload)
 
 
-
 def _fmt_decimal(value: Decimal) -> str:
     normalized = format(value, "f")
     if "." in normalized:
@@ -208,7 +207,9 @@ class BtcturkHttpClient(ExchangeClient):
         self._orderbook_cache_ttl_s = max(0.0, orderbook_cache_ttl_s)
         self._orderbook_inflight_wait_timeout_s = max(0.1, orderbook_inflight_wait_timeout_s)
         self._live_rules_require_exchangeinfo = live_rules_require_exchangeinfo
-        self._orderbook_cache: dict[tuple[str, int | None], tuple[float, tuple[Decimal, Decimal], datetime]] = {}
+        self._orderbook_cache: dict[
+            tuple[str, int | None], tuple[float, tuple[Decimal, Decimal], datetime]
+        ] = {}
         self._orderbook_inflight: dict[tuple[str, int | None], Event] = {}
         self._orderbook_lock = Lock()
 
@@ -248,7 +249,9 @@ class BtcturkHttpClient(ExchangeClient):
         state.consecutive_429 += 1
         self._rate_limiter.penalize_on_429(group, retry_after_s)
         if state.consecutive_429 >= self._breaker_429_consecutive_threshold:
-            cooldown = retry_after_s if retry_after_s is not None else self._breaker_cooldown_seconds
+            cooldown = (
+                retry_after_s if retry_after_s is not None else self._breaker_cooldown_seconds
+            )
             state.open_until = max(state.open_until, monotonic() + cooldown)
             get_instrumentation().counter("breaker_open_total", 1, attrs={"group": group})
 
@@ -259,8 +262,12 @@ class BtcturkHttpClient(ExchangeClient):
         def _call() -> dict:
             self._check_breaker(group)
             waited = self._rate_limiter.acquire(group)
-            get_instrumentation().histogram("rate_limiter_wait_seconds", waited, attrs={"group": group})
-            with get_instrumentation().trace("rest_call", attrs={"method": "GET", "path": path, "group": group}):
+            get_instrumentation().histogram(
+                "rate_limiter_wait_seconds", waited, attrs={"group": group}
+            )
+            with get_instrumentation().trace(
+                "rest_call", attrs={"method": "GET", "path": path, "group": group}
+            ):
                 response = self.client.get(
                     path,
                     params=params,
@@ -298,7 +305,9 @@ class BtcturkHttpClient(ExchangeClient):
             return response.headers.get("Retry-After")
 
         def _on_retry(attempt: object) -> None:
-            get_instrumentation().counter("rest_retry_total", 1, attrs={"group": group, "path": path})
+            get_instrumentation().counter(
+                "rest_retry_total", 1, attrs={"group": group, "path": path}
+            )
 
         try:
             return retry_with_backoff(
@@ -321,7 +330,9 @@ class BtcturkHttpClient(ExchangeClient):
             if exc.response.status_code == 429:
                 retry_after_s = parse_retry_after_seconds(exc.response.headers.get("Retry-After"))
                 self._record_429(group, retry_after_s)
-                get_instrumentation().counter("rest_429_total", 1, attrs={"group": group, "path": path})
+                get_instrumentation().counter(
+                    "rest_429_total", 1, attrs={"group": group, "path": path}
+                )
             raise
 
     def _safe_sleep(self, seconds: float) -> None:
@@ -356,7 +367,9 @@ class BtcturkHttpClient(ExchangeClient):
         def _call() -> dict:
             self._check_breaker(group)
             waited = self._rate_limiter.acquire(group)
-            get_instrumentation().histogram("rate_limiter_wait_seconds", waited, attrs={"group": group})
+            get_instrumentation().histogram(
+                "rate_limiter_wait_seconds", waited, attrs={"group": group}
+            )
             headers = build_auth_headers(
                 api_key=self.api_key or "",
                 api_secret=self.api_secret or "",
@@ -456,7 +469,9 @@ class BtcturkHttpClient(ExchangeClient):
             return response.headers.get("Retry-After")
 
         def _on_retry(_attempt: object) -> None:
-            get_instrumentation().counter("rest_retry_total", 1, attrs={"group": group, "path": path})
+            get_instrumentation().counter(
+                "rest_retry_total", 1, attrs={"group": group, "path": path}
+            )
 
         try:
             return retry_with_backoff(
@@ -466,7 +481,11 @@ class BtcturkHttpClient(ExchangeClient):
                 max_delay_ms=int(_RETRY_MAX_DELAY_SECONDS * 1000),
                 max_total_sleep_seconds=_RETRY_TOTAL_WAIT_CAP_SECONDS,
                 jitter_seed=23,
-                retry_on_exceptions=(_RetryableRequestError, httpx.TimeoutException, httpx.TransportError),
+                retry_on_exceptions=(
+                    _RetryableRequestError,
+                    httpx.TimeoutException,
+                    httpx.TransportError,
+                ),
                 retry_after_getter=_retry_after,
                 on_retry=_on_retry,
                 sleep_fn=self._safe_sleep,
@@ -626,9 +645,13 @@ class BtcturkHttpClient(ExchangeClient):
             cached = self._orderbook_cache.get(key)
             now = monotonic()
             if cached is not None and cached[0] > now:
-                get_instrumentation().counter("orderbook_cache_hits_total", 1, attrs={"pair_symbol": pair_symbol})
+                get_instrumentation().counter(
+                    "orderbook_cache_hits_total", 1, attrs={"pair_symbol": pair_symbol}
+                )
                 return cached[1]
-            get_instrumentation().counter("orderbook_cache_misses_total", 1, attrs={"pair_symbol": pair_symbol})
+            get_instrumentation().counter(
+                "orderbook_cache_misses_total", 1, attrs={"pair_symbol": pair_symbol}
+            )
             inflight = self._orderbook_inflight.get(key)
             if inflight is None:
                 inflight = Event()
@@ -636,7 +659,9 @@ class BtcturkHttpClient(ExchangeClient):
                 leader = True
             else:
                 leader = False
-                get_instrumentation().counter("orderbook_inflight_joins_total", 1, attrs={"pair_symbol": pair_symbol})
+                get_instrumentation().counter(
+                    "orderbook_inflight_joins_total", 1, attrs={"pair_symbol": pair_symbol}
+                )
 
         if not leader:
             if not inflight.wait(timeout=self._orderbook_inflight_wait_timeout_s):
@@ -656,7 +681,9 @@ class BtcturkHttpClient(ExchangeClient):
             payload = self._get(path, params=params)
             data = payload.get("data")
             if not isinstance(data, dict):
-                raise ValueError(f"Malformed orderbook payload for {symbol}: data must be an object")
+                raise ValueError(
+                    f"Malformed orderbook payload for {symbol}: data must be an object"
+                )
 
             best_bid = _parse_best_price(data.get("bids"), side="bid", symbol=symbol)
             best_ask = _parse_best_price(data.get("asks"), side="ask", symbol=symbol)
@@ -709,7 +736,9 @@ class BtcturkHttpClient(ExchangeClient):
             payload = self._get("/api/v2/orderbook", params=params)
             data = payload.get("data")
             if not isinstance(data, dict):
-                raise ValueError(f"Malformed orderbook payload for {symbol}: data must be an object")
+                raise ValueError(
+                    f"Malformed orderbook payload for {symbol}: data must be an object"
+                )
             best_bid = _parse_best_price(data.get("bids"), side="bid", symbol=symbol)
             best_ask = _parse_best_price(data.get("asks"), side="ask", symbol=symbol)
             fetched_at = datetime.now(UTC)
@@ -833,7 +862,9 @@ class BtcturkHttpClient(ExchangeClient):
     def _resolve_pair_symbol(self, item: dict[str, object]) -> str:
         raw_symbol = item.get("pairSymbol")
         if raw_symbol is None:
-            raw_symbol = item.get("name") or item.get("pairSymbolNormalized") or item.get("nameNormalized")
+            raw_symbol = (
+                item.get("name") or item.get("pairSymbolNormalized") or item.get("nameNormalized")
+            )
         if raw_symbol is None:
             keys = sorted(item.keys())
             raise ValueError(
@@ -996,9 +1027,7 @@ class BtcturkHttpClient(ExchangeClient):
             if not isinstance(raw, dict):
                 raise ValueError("Malformed balances payload item")
             item = self._to_balance_item(raw)
-            parsed.append(
-                Balance(asset=item.asset, free=item.free, locked=item.locked)
-            )
+            parsed.append(Balance(asset=item.asset, free=item.free, locked=item.locked))
         return parsed
 
     def get_open_orders(self, pair_symbol: str) -> OpenOrders:

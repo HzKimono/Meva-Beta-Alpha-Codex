@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from btcbot.obs.metric_registry import MetricDef, MetricType, REGISTRY, validate_registry
+from btcbot.obs.metric_registry import REGISTRY, MetricDef, MetricType, validate_registry
 from btcbot.obs.metrics import emit_metric
 
 

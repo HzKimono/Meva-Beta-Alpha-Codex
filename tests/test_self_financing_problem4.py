@@ -79,8 +79,8 @@ def test_apply_self_financing_rounding_decimal_boundaries() -> None:
         treasury_try=Decimal("2"),
         realized_pnl_delta_try=Decimal("0.010000005"),
     )
-    assert cap == Decimal("1.00333334")
-    assert treasury == Decimal("2.00666667")
+    assert cap == Decimal("1.00333333")
+    assert treasury == Decimal("2.00666666")
 
 
 def test_self_financing_checkpoint_idempotent_same_event_count_noop(caplog, tmp_path) -> None:

@@ -13,6 +13,7 @@ from btcbot.domain.money_policy import (
     round_quote,
 )
 
+
 def quantize_money(value: Decimal, policy: MoneyMathPolicy | None = None) -> Decimal:
     """Centralized quote normalization to avoid execution/accounting drift."""
 

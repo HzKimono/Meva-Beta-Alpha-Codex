@@ -5,7 +5,6 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any
 
 from btcbot.observability import get_instrumentation
@@ -82,8 +81,13 @@ class ExecutionWrapper:
                     1,
                     attrs={"action": action, "category": category.value},
                 )
-                if category in {ExecutionErrorCategory.RATE_LIMIT, ExecutionErrorCategory.TRANSIENT}:
-                    raise _RetryableExecutionError(action=action, category=category, error=exc) from exc
+                if category in {
+                    ExecutionErrorCategory.RATE_LIMIT,
+                    ExecutionErrorCategory.TRANSIENT,
+                }:
+                    raise _RetryableExecutionError(
+                        action=action, category=category, error=exc
+                    ) from exc
                 raise
 
         try:
@@ -103,11 +107,36 @@ class ExecutionWrapper:
                 ),
             )
         except _RetryableExecutionError as exc:
-            raise exc.error
+            underlying_error = exc.error
+            category = classify_exchange_error(underlying_error)
+            if category == ExecutionErrorCategory.UNCERTAIN:
+                get_instrumentation().counter(
+                    "execution_uncertain_total", 1, attrs={"action": action}
+                )
+                logger.warning("execution_uncertain", extra={"extra": {"action": action}})
+                return UncertainResult(action=action, category=category, error=underlying_error)
+            if category == ExecutionErrorCategory.REJECT:
+                get_instrumentation().counter("execution_reject_total", 1, attrs={"action": action})
+                raise underlying_error from exc
+            if category in {ExecutionErrorCategory.RATE_LIMIT, ExecutionErrorCategory.TRANSIENT}:
+                get_instrumentation().counter(
+                    "execution_retry_exhausted_total", 1, attrs={"action": action}
+                )
+                if action == "cancel":
+                    logger.warning("execution_uncertain", extra={"extra": {"action": action}})
+                    return UncertainResult(
+                        action=action,
+                        category=ExecutionErrorCategory.UNCERTAIN,
+                        error=underlying_error,
+                    )
+                raise underlying_error from exc
+            raise underlying_error from exc
         except Exception as exc:  # noqa: BLE001
             category = classify_exchange_error(exc)
             if category == ExecutionErrorCategory.UNCERTAIN:
-                get_instrumentation().counter("execution_uncertain_total", 1, attrs={"action": action})
+                get_instrumentation().counter(
+                    "execution_uncertain_total", 1, attrs={"action": action}
+                )
                 logger.warning("execution_uncertain", extra={"extra": {"action": action}})
                 return UncertainResult(action=action, category=category, error=exc)
             if category == ExecutionErrorCategory.REJECT:
@@ -132,4 +161,3 @@ class ExecutionWrapper:
             if match is not None:
                 return match.group(1)
         return None
-

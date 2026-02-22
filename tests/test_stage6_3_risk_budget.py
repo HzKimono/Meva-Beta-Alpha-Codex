@@ -286,7 +286,14 @@ def test_runner_mode_gating(monkeypatch, tmp_path) -> None:
             return type(
                 "ER",
                 (),
-                {"executed_total": 0, "submitted": 0, "canceled": 0, "simulated": 0, "rejected": 0, "rejected_min_notional": 0},
+                {
+                    "executed_total": 0,
+                    "submitted": 0,
+                    "canceled": 0,
+                    "simulated": 0,
+                    "rejected": 0,
+                    "rejected_min_notional": 0,
+                },
             )()
 
     class FakeRiskBudgetService:
@@ -460,6 +467,7 @@ def test_risk_budget_live_missing_mark_price_fail_closed(tmp_path) -> None:
 
     assert decision.mode == Mode.OBSERVE_ONLY
     assert decision.risk_decision.reasons == ["mark_price_missing_fail_closed"]
+
 
 def test_risk_budget_live_non_positive_mark_price_fail_closed(tmp_path) -> None:
     db = StateStore(str(tmp_path / "risk_non_positive_mark.sqlite"))

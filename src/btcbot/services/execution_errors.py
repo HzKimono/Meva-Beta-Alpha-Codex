@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from enum import Enum
 
 import httpx
@@ -25,6 +26,12 @@ def classify_exchange_error(exc: Exception) -> ExecutionErrorCategory:
         status = int(exc.response.status_code)
     elif isinstance(exc, ExchangeError):
         status = int(exc.status_code) if exc.status_code is not None else None
+        if status is None:
+            for candidate in (str(exc), exc.response_body or ""):
+                match = re.search(r"(?:status|code)\s*[=:]\s*(\d{3})", candidate)
+                if match is not None:
+                    status = int(match.group(1))
+                    break
     else:
         status = None
 
@@ -41,4 +48,3 @@ def classify_exchange_error(exc: Exception) -> ExecutionErrorCategory:
     if isinstance(exc, TimeoutError):
         return ExecutionErrorCategory.UNCERTAIN
     return ExecutionErrorCategory.FATAL
-

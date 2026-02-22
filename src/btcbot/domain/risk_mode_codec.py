@@ -34,4 +34,3 @@ def dump_risk_mode(mode: Mode | None) -> str | None:
     if mode is None:
         return None
     return mode.value
-

@@ -56,7 +56,6 @@ class _Store:
         del intent, now
 
 
-
 def _intent() -> Intent:
     return Intent.create(
         cycle_id="c1",
@@ -87,7 +86,11 @@ def test_risk_service_phantom_unknown_is_closed_after_threshold_and_not_counted(
     approved = service.filter("c1", [_intent()])
 
     assert len(approved) == 1
-    assert ("unknown-1", OrderStatus.CANCELED, "reconciled_missing_from_exchange_open_orders") in store.updated
+    assert (
+        "unknown-1",
+        OrderStatus.CANCELED,
+        "reconciled_missing_from_exchange_open_orders",
+    ) in store.updated
     assert policy.context.open_orders_by_symbol.get("BTCTRY", 0) == 0
 
 
@@ -115,9 +118,7 @@ def test_risk_service_late_fill_safety_does_not_close_on_first_missing_observati
 
 
 def test_risk_service_counts_reconciled_open_orders_and_identifiers() -> None:
-    store = _Store(
-        [_StoredOrder("open-1", "BTC_TRY", "cid-open", OrderStatus.OPEN, "open")]
-    )
+    store = _Store([_StoredOrder("open-1", "BTC_TRY", "cid-open", OrderStatus.OPEN, "open")])
     policy = _CapturePolicy()
     service = RiskService(policy, store)  # type: ignore[arg-type]
 

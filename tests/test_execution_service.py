@@ -379,7 +379,7 @@ def test_live_mode_saves_order_state(tmp_path) -> None:
     placed = service.execute_intents([_intent(cycle_id="cycle-live")])
 
     assert placed == 1
-    assert exchange.placed[0][:4] == ("BTCTRY", OrderSide.BUY, 100.0, 0.1)
+    assert exchange.placed[0][:4] == ("BTCTRY", OrderSide.BUY, 100.0, Decimal("0.1000"))
     assert exchange.placed[0][4].startswith("meva2-")
 
 
@@ -1068,18 +1068,49 @@ def test_refresh_order_lifecycle_missing_transitions(tmp_path) -> None:
             updated_at=now - timedelta(seconds=120),
         )
     )
-    store.save_order(Order(order_id="o-open", client_order_id="cid-open", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.OPEN, created_at=now, updated_at=now))
-    store.save_order(Order(order_id="o-unk", client_order_id="cid-unk", symbol="BTC_TRY", side=OrderSide.BUY, price=100.0, quantity=0.1, status=OrderStatus.UNKNOWN, created_at=now, updated_at=now))
+    store.save_order(
+        Order(
+            order_id="o-open",
+            client_order_id="cid-open",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=100.0,
+            quantity=0.1,
+            status=OrderStatus.OPEN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.save_order(
+        Order(
+            order_id="o-unk",
+            client_order_id="cid-unk",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=100.0,
+            quantity=0.1,
+            status=OrderStatus.UNKNOWN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
 
     exchange = RecordingExchange()
     svc = ExecutionService(exchange=exchange, state_store=store)
     svc.refresh_order_lifecycle(["BTC_TRY"])
 
-    rows = {o.order_id: o for o in store.find_open_or_unknown_orders(["BTCTRY"], include_new_after_grace=True, include_escalated_unknown=True)}
+    rows = {
+        o.order_id: o
+        for o in store.find_open_or_unknown_orders(
+            ["BTCTRY"], include_new_after_grace=True, include_escalated_unknown=True
+        )
+    }
     assert "o-open" not in rows
     assert rows["o-unk"].unknown_next_probe_at is not None
     with store._connect() as conn:
-        rej = conn.execute("SELECT status, exchange_status_raw FROM orders WHERE order_id='o-new'").fetchone()
+        rej = conn.execute(
+            "SELECT status, exchange_status_raw FROM orders WHERE order_id='o-new'"
+        ).fetchone()
     assert rej is not None
     assert rej["status"] == "rejected"
     assert "missing_on_exchange_after_grace" in str(rej["exchange_status_raw"])
@@ -1100,7 +1131,11 @@ def test_submit_400_logs_request_and_response(tmp_path, caplog) -> None:
     placed = service.execute_intents([_intent(cycle_id="c-400")])
     assert placed == 0
     assert "exchange_submit_failed" in caplog.text
-    payloads = [getattr(record, "extra", {}) for record in caplog.records if record.message == "exchange_submit_failed"]
+    payloads = [
+        getattr(record, "extra", {})
+        for record in caplog.records
+        if record.message == "exchange_submit_failed"
+    ]
     assert payloads
     assert payloads[-1].get("request_json") == {"quantity": "0"}
     assert "invalid qty" in str(payloads[-1].get("response_body"))
@@ -1122,7 +1157,9 @@ def test_submit_rejected_order_id_unique_per_failure(tmp_path) -> None:
     service.execute_intents([i1])
     service.execute_intents([i2])
     with store._connect() as conn:
-        rows = conn.execute("SELECT order_id FROM orders WHERE status='rejected' ORDER BY created_at").fetchall()
+        rows = conn.execute(
+            "SELECT order_id FROM orders WHERE status='rejected' ORDER BY created_at"
+        ).fetchall()
     ids = [str(r["order_id"]) for r in rows]
     assert len(ids) >= 2
     assert len(set(ids)) == len(ids)
@@ -1149,7 +1186,9 @@ def test_refresh_order_lifecycle_throttles_symbols_without_local_orders(tmp_path
     assert exchange.open_orders_calls == 1
 
 
-def test_refresh_order_lifecycle_summary_includes_call_and_throttle_counts(tmp_path, caplog) -> None:
+def test_refresh_order_lifecycle_summary_includes_call_and_throttle_counts(
+    tmp_path, caplog
+) -> None:
     class CountingExchange(RecordingExchange):
         def __init__(self) -> None:
             super().__init__()
@@ -1200,7 +1239,9 @@ def test_reconcile_snapshot_missing_side_does_not_default_to_buy(tmp_path) -> No
     assert row is None
 
 
-def test_place_order_idempotency_is_stable_across_cycles_but_changes_on_material_intent(tmp_path) -> None:
+def test_place_order_idempotency_is_stable_across_cycles_but_changes_on_material_intent(
+    tmp_path,
+) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))
     exchange = RecordingExchange()
     service = ExecutionService(
@@ -1258,7 +1299,9 @@ def test_settings_env_file_opt_in_only(monkeypatch, tmp_path) -> None:
     assert opted_in.target_try == 999
 
 
-def test_exchange_submit_failure_increments_orders_failed_exchange_only_when_attempted(tmp_path) -> None:
+def test_exchange_submit_failure_increments_orders_failed_exchange_only_when_attempted(
+    tmp_path,
+) -> None:
     class SubmitFailExchange(RecordingExchange):
         def place_limit_order(
             self,

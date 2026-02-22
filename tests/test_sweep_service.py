@@ -216,8 +216,12 @@ def test_sweep_rounding_matches_tick_and_step_sizes(tmp_path):
     )
 
     assert len(intents) == 1
-    assert abs((intents[0].price / Decimal("0.05")) - round(intents[0].price / Decimal("0.05"))) < Decimal("1e-9")
-    assert abs((intents[0].quantity / Decimal("0.003")) - round(intents[0].quantity / Decimal("0.003"))) < Decimal("1e-9")
+    assert abs(
+        (intents[0].price / Decimal("0.05")) - round(intents[0].price / Decimal("0.05"))
+    ) < Decimal("1e-9")
+    assert abs(
+        (intents[0].quantity / Decimal("0.003")) - round(intents[0].quantity / Decimal("0.003"))
+    ) < Decimal("1e-9")
 
 
 def test_sweep_offset_reduces_price_before_rounding(tmp_path):

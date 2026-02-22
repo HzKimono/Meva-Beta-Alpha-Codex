@@ -10,7 +10,8 @@ import pytest
 from btcbot.domain.models import Order, OrderSide, OrderStatus
 from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.order_state import Stage7Order
-from btcbot.domain.risk_budget import Mode, RiskDecision as BudgetRiskDecision, RiskLimits, RiskSignals
+from btcbot.domain.risk_budget import Mode, RiskLimits, RiskSignals
+from btcbot.domain.risk_budget import RiskDecision as BudgetRiskDecision
 from btcbot.domain.risk_models import RiskDecision, RiskMode
 from btcbot.services import state_store as state_store_module
 from btcbot.services.parity import compute_run_fingerprint
@@ -34,8 +35,6 @@ def test_risk_state_current_table_is_created_on_fresh_db(tmp_path) -> None:
         "fees_try_today": None,
         "fees_day": None,
     }
-
-
 
 
 def test_state_store_mode_persistence(tmp_path) -> None:
@@ -74,8 +73,12 @@ def test_state_store_mode_persistence(tmp_path) -> None:
     )
 
     with sqlite3.connect(str(tmp_path / "state.db")) as conn:
-        row = conn.execute("SELECT mode, prev_mode FROM risk_decisions WHERE decision_id='c1'").fetchone()
-        current = conn.execute("SELECT current_mode FROM risk_state_current WHERE state_id=1").fetchone()
+        row = conn.execute(
+            "SELECT mode, prev_mode FROM risk_decisions WHERE decision_id='c1'"
+        ).fetchone()
+        current = conn.execute(
+            "SELECT current_mode FROM risk_state_current WHERE state_id=1"
+        ).fetchone()
 
     assert row == ("REDUCE_RISK_ONLY", "NORMAL")
     assert current == ("REDUCE_RISK_ONLY",)
@@ -84,6 +87,7 @@ def test_state_store_mode_persistence(tmp_path) -> None:
         conn.execute("UPDATE risk_decisions SET mode='normal' WHERE decision_id='c1'")
 
     assert store.get_latest_risk_mode() == Mode.NORMAL
+
 
 def test_orders_unknown_retry_columns_are_added_for_legacy_db(tmp_path) -> None:
     db_path = tmp_path / "legacy.db"
@@ -126,8 +130,6 @@ def test_record_action_returns_action_id_and_dedupes(tmp_path) -> None:
     assert second.action_count("sweep_plan", "hash-1") == 1
 
 
-
-
 def test_state_store_strict_instance_lock_fails_on_active_conflict(tmp_path) -> None:
     db_path = str(tmp_path / "strict.db")
     store = StateStore(db_path=db_path)
@@ -149,6 +151,7 @@ def test_state_store_strict_instance_lock_fails_on_active_conflict(tmp_path) -> 
 
     with pytest.raises(RuntimeError, match="STATE_DB_LOCK_CONFLICT"):
         StateStore(db_path=db_path, strict_instance_lock=True)
+
 
 def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "state.db"))

@@ -92,7 +92,10 @@ def validate_registry(registry: dict[str, MetricDef] | None = None) -> None:
             raise ValueError(f"invalid metric name format: {metric.name}")
         if not metric.name.startswith("bot_"):
             raise ValueError(f"metric name must use bot_ namespace: {metric.name}")
-        if metric.type in {MetricType.COUNTER, MetricType.GAUGE, MetricType.HISTOGRAM} and not metric.required_labels:
+        if (
+            metric.type in {MetricType.COUNTER, MetricType.GAUGE, MetricType.HISTOGRAM}
+            and not metric.required_labels
+        ):
             raise ValueError(f"required_labels must be non-empty for {metric.name}")
 
 

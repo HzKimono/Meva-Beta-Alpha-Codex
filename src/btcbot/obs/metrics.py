@@ -5,14 +5,15 @@ import os
 from decimal import Decimal
 from typing import Protocol
 
-from btcbot.obs.metric_registry import MetricDef, MetricType, REGISTRY
+from btcbot.obs.metric_registry import REGISTRY, MetricDef, MetricType
 
 logger = logging.getLogger(__name__)
 
 
 class MetricsSink(Protocol):
-    def emit(self, defn: MetricDef, value: float | int | Decimal, labels: dict[str, str]) -> None:
-        ...
+    def emit(
+        self, defn: MetricDef, value: float | int | Decimal, labels: dict[str, str]
+    ) -> None: ...
 
 
 class LoggingMetricsSink:

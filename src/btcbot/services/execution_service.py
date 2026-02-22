@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import re
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -32,13 +31,13 @@ from btcbot.domain.models import (
     validate_order,
 )
 from btcbot.domain.symbols import split_symbol
-from btcbot.observability import get_instrumentation
-from btcbot.observability_decisions import emit_decision
 from btcbot.obs.metrics import inc_counter
 from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
-from btcbot.services.market_data_service import MarketDataService
+from btcbot.observability import get_instrumentation
+from btcbot.observability_decisions import emit_decision
 from btcbot.services.execution_errors import ExecutionErrorCategory, classify_exchange_error
 from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
+from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.services.trading_policy import policy_reason_to_code, validate_live_side_effects_policy
 from btcbot.services.unknown_order_registry import UnknownOrderRecord, UnknownOrderRegistry
@@ -114,7 +113,9 @@ class ExecutionService:
         self.unknown_reprobe_escalation_attempts = max(1, unknown_reprobe_escalation_attempts)
         self.unknown_reprobe_force_observe_only = unknown_reprobe_force_observe_only
         self.unknown_reprobe_force_kill_switch = unknown_reprobe_force_kill_switch
-        self.process_role = coerce_process_role(process_role or get_process_role_from_env().value).value
+        self.process_role = coerce_process_role(
+            process_role or get_process_role_from_env().value
+        ).value
         self.unknown_reprobe_max_lookback_seconds = max(
             60 * 60, unknown_reprobe_max_lookback_seconds
         )
@@ -157,7 +158,9 @@ class ExecutionService:
         self._sync_unknown_registry_from_store(allow_clear=True)
         self._emit_unknown_freeze_metrics()
 
-    def _emit_unknown_freeze_metrics(self, *, submit_blocked: bool = False, reconcile_run: bool = False) -> None:
+    def _emit_unknown_freeze_metrics(
+        self, *, submit_blocked: bool = False, reconcile_run: bool = False
+    ) -> None:
         metrics = get_instrumentation()
         metrics.gauge(
             "unknown_order_present",
@@ -197,7 +200,9 @@ class ExecutionService:
     def was_lifecycle_refreshed(self, *, cycle_id: str | None) -> bool:
         return bool(cycle_id and str(cycle_id) in self._lifecycle_refreshed_cycles)
 
-    def refresh_order_lifecycle(self, symbols: list[str], *, skip_non_essential: bool = False) -> dict[str, object]:
+    def refresh_order_lifecycle(
+        self, symbols: list[str], *, skip_non_essential: bool = False
+    ) -> dict[str, object]:
         """Reconcile local lifecycle state against exchange open-orders truth for scoped symbols."""
         normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols})
         summary: dict[str, object] = {
@@ -239,7 +244,9 @@ class ExecutionService:
         if now_mono < self._lifecycle_backoff_until:
             summary["skipped_due_to_backoff_cooldown"] = True
             summary["error_code"] = "EXCHANGE_429_BACKOFF"
-            summary["backoff_remaining_seconds"] = max(0.0, self._lifecycle_backoff_until - now_mono)
+            summary["backoff_remaining_seconds"] = max(
+                0.0, self._lifecycle_backoff_until - now_mono
+            )
             logger.warning("order_reconcile_summary", extra={"extra": summary})
             self.last_lifecycle_refresh_summary = dict(summary)
             self._emit_unknown_freeze_metrics()
@@ -277,7 +284,13 @@ class ExecutionService:
                     )
                 logger.exception(
                     "Lifecycle refresh failed to load open orders",
-                    extra={"extra": {"symbol": symbol, "db_path": self.state_store.db_path_abs, "instance_id": self.state_store.instance_id}},
+                    extra={
+                        "extra": {
+                            "symbol": symbol,
+                            "db_path": self.state_store.db_path_abs,
+                            "instance_id": self.state_store.instance_id,
+                        }
+                    },
                 )
                 reconcile_failed = True
                 continue
@@ -289,7 +302,11 @@ class ExecutionService:
                 mapped = self._map_exchange_status(snapshot.status)
                 is_external_open = self.state_store.get_order(snapshot.order_id) is None
                 exchange_status_raw = snapshot.status_raw
-                if is_external_open and mapped in {OrderStatus.NEW, OrderStatus.OPEN, OrderStatus.PARTIAL}:
+                if is_external_open and mapped in {
+                    OrderStatus.NEW,
+                    OrderStatus.OPEN,
+                    OrderStatus.PARTIAL,
+                }:
                     exchange_status_raw = "external_open:exchange_reconcile"
                     summary["imported_external_open"] += 1
                 self._save_reconciled_snapshot(snapshot, exchange_status_raw=exchange_status_raw)
@@ -313,7 +330,10 @@ class ExecutionService:
                 if open_match is not None:
                     summary["matched_on_exchange"] += 1
                     mapped_open = self._map_exchange_status(open_match.status)
-                    if local.order_id.startswith("unknown:") and local.order_id != open_match.order_id:
+                    if (
+                        local.order_id.startswith("unknown:")
+                        and local.order_id != open_match.order_id
+                    ):
                         self._emit_reconcile_confirmed(local, open_match.order_id)
                         self.state_store.update_order_status(
                             order_id=local.order_id,
@@ -324,7 +344,9 @@ class ExecutionService:
                         )
                     continue
 
-                if local.status == OrderStatus.UNKNOWN and not self._is_unknown_probe_due(local.unknown_next_probe_at, now_ms):
+                if local.status == OrderStatus.UNKNOWN and not self._is_unknown_probe_due(
+                    local.unknown_next_probe_at, now_ms
+                ):
                     continue
 
                 if recent is None:
@@ -334,7 +356,9 @@ class ExecutionService:
                         summary["all_orders_calls_count"] += 1
                         recent = self.exchange.get_all_orders(
                             pair_symbol=symbol,
-                            start_ms=self._compute_all_orders_start_ms(now_ms=now_ms, due_unknown_orders=due_unknown_orders),
+                            start_ms=self._compute_all_orders_start_ms(
+                                now_ms=now_ms, due_unknown_orders=due_unknown_orders
+                            ),
                             end_ms=now_ms,
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -345,11 +369,22 @@ class ExecutionService:
                                 endpoints.append("all_orders")
                             logger.warning(
                                 "EXCHANGE_429_BACKOFF",
-                                extra={"extra": {"symbol": symbol, "cycle_scope": "order_lifecycle_all_orders"}},
+                                extra={
+                                    "extra": {
+                                        "symbol": symbol,
+                                        "cycle_scope": "order_lifecycle_all_orders",
+                                    }
+                                },
                             )
                         logger.exception(
                             "Lifecycle refresh failed to load all orders",
-                            extra={"extra": {"symbol": symbol, "db_path": self.state_store.db_path_abs, "instance_id": self.state_store.instance_id}},
+                            extra={
+                                "extra": {
+                                    "symbol": symbol,
+                                    "db_path": self.state_store.db_path_abs,
+                                    "instance_id": self.state_store.instance_id,
+                                }
+                            },
                         )
                         reconcile_failed = True
                         continue
@@ -393,7 +428,11 @@ class ExecutionService:
                 summary["matched_on_exchange"] += 1
                 if mapped in {OrderStatus.CANCELED, OrderStatus.FILLED, OrderStatus.REJECTED}:
                     summary["closed"] += 1
-                if local.order_id.startswith("unknown:") and local.client_order_id and local.order_id != matched.order_id:
+                if (
+                    local.order_id.startswith("unknown:")
+                    and local.client_order_id
+                    and local.order_id != matched.order_id
+                ):
                     self._emit_reconcile_confirmed(local, matched.order_id)
                     self.state_store.update_order_status(
                         order_id=local.order_id,
@@ -417,7 +456,9 @@ class ExecutionService:
         self._emit_unknown_freeze_metrics()
         return summary
 
-    def _remember_cycle_balance_snapshot(self, *, cycle_id: str, balances: dict[str, Decimal]) -> None:
+    def _remember_cycle_balance_snapshot(
+        self, *, cycle_id: str, balances: dict[str, Decimal]
+    ) -> None:
         normalized = str(cycle_id)
         self._cycle_balance_cache[normalized] = dict(balances)
         if normalized in self._cycle_balance_order:
@@ -1012,7 +1053,13 @@ class ExecutionService:
                 )
             logger.warning(
                 "submit_blocked_due_to_unknown_order",
-                extra={"extra": {"unknown_orders": [record.order_id for record in self.unknown_order_registry.snapshot()]}},
+                extra={
+                    "extra": {
+                        "unknown_orders": [
+                            record.order_id for record in self.unknown_order_registry.snapshot()
+                        ]
+                    }
+                },
             )
             raise SubmitBlockedDueToUnknownError("submit blocked while unknown orders exist")
 
@@ -1079,7 +1126,9 @@ class ExecutionService:
                         {
                             "cycle_id": intent.cycle_id,
                             "decision_layer": "execution",
-                            "reason_code": str(ReasonCode.EXECUTION_REJECT_INSUFFICIENT_BALANCE_PRECHECK),
+                            "reason_code": str(
+                                ReasonCode.EXECUTION_REJECT_INSUFFICIENT_BALANCE_PRECHECK
+                            ),
                             "action": "REJECT",
                             "scope": "per_intent",
                             "intent_id": (raw_intent.intent_id if raw_intent else None),
@@ -1207,7 +1256,7 @@ class ExecutionService:
             attempted_exchange_calls += 1
             try:
                 order = self._submit_limit_order(
-                    symbol=symbol,
+                    symbol=symbol_normalized,
                     side=intent.side,
                     price=price,
                     quantity=quantity,
@@ -1258,7 +1307,7 @@ class ExecutionService:
                             }
                         },
                     )
-                    rejected_order_id = f"rejected:{client_order_id}:{idempotency_key[:12]}:{int(datetime.now(UTC).timestamp()*1000)}"
+                    rejected_order_id = f"rejected:{client_order_id}:{idempotency_key[:12]}:{int(datetime.now(UTC).timestamp() * 1000)}"
                     self.state_store.save_order(
                         Order(
                             order_id=rejected_order_id,
@@ -1448,6 +1497,18 @@ class ExecutionService:
                     )
                     self._emit_unknown_freeze_metrics()
                     continue
+                now_utc = datetime.now(UTC)
+                order = Order(
+                    order_id=outcome.order_id,
+                    client_order_id=client_order_id,
+                    symbol=symbol_normalized,
+                    side=intent.side,
+                    price=price,
+                    quantity=quantity,
+                    status=OrderStatus.OPEN,
+                    created_at=now_utc,
+                    updated_at=now_utc,
+                )
 
             self.state_store.save_order(
                 order,
@@ -1482,7 +1543,11 @@ class ExecutionService:
         if orders_failed_exchange > 0:
             inc_counter(
                 "bot_orders_failed_total",
-                labels={"symbol": "multi", "reason": "exchange_error", "process_role": self.process_role},
+                labels={
+                    "symbol": "multi",
+                    "reason": "exchange_error",
+                    "process_role": self.process_role,
+                },
                 delta=orders_failed_exchange,
             )
 
@@ -1529,7 +1594,9 @@ class ExecutionService:
                 "submit_blocked_due_to_unknown_order",
                 extra={
                     "extra": {
-                        "unknown_orders": [record.order_id for record in self.unknown_order_registry.snapshot()],
+                        "unknown_orders": [
+                            record.order_id for record in self.unknown_order_registry.snapshot()
+                        ],
                     }
                 },
             )
@@ -1906,7 +1973,12 @@ class ExecutionService:
         }.get(status, OrderStatus.UNKNOWN)
 
     def _is_uncertain_error(self, exc: Exception) -> bool:
-        return classify_exchange_error(exc) == ExecutionErrorCategory.UNCERTAIN
+        category = classify_exchange_error(exc)
+        return category in {
+            ExecutionErrorCategory.UNCERTAIN,
+            ExecutionErrorCategory.TRANSIENT,
+            ExecutionErrorCategory.RATE_LIMIT,
+        }
 
     def _was_submitted_in_cycle(self, *, cycle_id: str, order: Order) -> bool:
         with self.state_store._connect() as conn:

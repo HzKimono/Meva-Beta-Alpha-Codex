@@ -40,7 +40,9 @@ class RiskPolicy:
             else max_position_notional_try
         )
         self.max_gross_exposure_try = (
-            max_gross_exposure_try if max_gross_exposure_try is not None else max_position_notional_try
+            max_gross_exposure_try
+            if max_gross_exposure_try is not None
+            else max_position_notional_try
         )
 
     def filter_actions(
@@ -93,7 +95,8 @@ class RiskPolicy:
             action_notional = action.price * action.qty
             if action.side.lower() == "buy":
                 is_replace_submit = (
-                    action.reason == "replace_submit" or action.replace_for_client_order_id is not None
+                    action.reason == "replace_submit"
+                    or action.replace_for_client_order_id is not None
                 )
                 if is_replace_submit:
                     old_notional = Decimal("0")

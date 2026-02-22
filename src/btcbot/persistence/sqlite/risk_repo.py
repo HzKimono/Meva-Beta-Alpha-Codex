@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from decimal import Decimal
+import json
 import logging
 import sqlite3
-import json
+from datetime import UTC, datetime
+from decimal import Decimal
 
 from btcbot.domain.risk_budget import Mode, RiskDecision
 from btcbot.domain.risk_mode_codec import dump_risk_mode
@@ -35,13 +35,21 @@ class SqliteRiskRepo:
             }
         return {
             "current_mode": (str(row["current_mode"]) if row["current_mode"] is not None else None),
-            "peak_equity_try": (str(row["peak_equity_try"]) if row["peak_equity_try"] is not None else None),
-            "peak_equity_date": (str(row["peak_equity_date"]) if row["peak_equity_date"] is not None else None),
-            "fees_try_today": (str(row["fees_try_today"]) if row["fees_try_today"] is not None else None),
+            "peak_equity_try": (
+                str(row["peak_equity_try"]) if row["peak_equity_try"] is not None else None
+            ),
+            "peak_equity_date": (
+                str(row["peak_equity_date"]) if row["peak_equity_date"] is not None else None
+            ),
+            "fees_try_today": (
+                str(row["fees_try_today"]) if row["fees_try_today"] is not None else None
+            ),
             "fees_day": str(row["fees_day"]) if row["fees_day"] is not None else None,
         }
 
-    def save_risk_decision(self, *, cycle_id: str, decision: RiskDecision, prev_mode: Mode | None) -> None:
+    def save_risk_decision(
+        self, *, cycle_id: str, decision: RiskDecision, prev_mode: Mode | None
+    ) -> None:
         self._ensure_writable()
         self._conn.execute(
             """

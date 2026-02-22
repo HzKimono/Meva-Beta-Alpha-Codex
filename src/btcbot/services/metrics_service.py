@@ -7,8 +7,8 @@ from decimal import Decimal
 
 from btcbot.domain.execution_quality import compute_execution_quality
 from btcbot.domain.stage4 import Fill, PnLSnapshot
-from btcbot.services.ledger_service import LedgerIngestResult, PnlReport
 from btcbot.persistence.uow import UnitOfWorkFactory
+from btcbot.services.ledger_service import LedgerIngestResult, PnlReport
 from btcbot.services.state_store import StateStore
 
 
@@ -122,7 +122,9 @@ def persist_cycle_metrics(state_store: StateStore, cycle_metrics: CycleMetrics) 
     )
 
 
-def persist_cycle_metrics_with_uow(uow_factory: UnitOfWorkFactory, cycle_metrics: CycleMetrics) -> None:
+def persist_cycle_metrics_with_uow(
+    uow_factory: UnitOfWorkFactory, cycle_metrics: CycleMetrics
+) -> None:
     with uow_factory() as uow:
         uow.metrics.save_cycle_metrics(
             cycle_id=cycle_metrics.cycle_id,
