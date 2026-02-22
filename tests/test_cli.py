@@ -1784,8 +1784,8 @@ def test_run_cycle_uses_single_cash_snapshot_for_risk_and_summary(monkeypatch, c
             return Result()
 
     class StaticRulesProvider:
-        def __init__(self, market_data_service) -> None:
-            del market_data_service
+        def __init__(self, market_data_service, **kwargs) -> None:
+            del market_data_service, kwargs
 
         def get_rules(self, symbol: str):
             del symbol
