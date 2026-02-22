@@ -8,6 +8,7 @@ from decimal import Decimal
 from btcbot.domain.execution_quality import compute_execution_quality
 from btcbot.domain.stage4 import Fill, PnLSnapshot
 from btcbot.services.ledger_service import LedgerIngestResult, PnlReport
+from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.services.state_store import StateStore
 
 
@@ -119,3 +120,23 @@ def persist_cycle_metrics(state_store: StateStore, cycle_metrics: CycleMetrics) 
         pnl_json=json.dumps(cycle_metrics.pnl, sort_keys=True),
         meta_json=json.dumps(cycle_metrics.meta, sort_keys=True),
     )
+
+
+def persist_cycle_metrics_with_uow(uow_factory: UnitOfWorkFactory, cycle_metrics: CycleMetrics) -> None:
+    with uow_factory() as uow:
+        uow.metrics.save_cycle_metrics(
+            cycle_id=cycle_metrics.cycle_id,
+            ts_start=cycle_metrics.ts_start.isoformat(),
+            ts_end=cycle_metrics.ts_end.isoformat(),
+            mode=cycle_metrics.mode,
+            fills_count=cycle_metrics.fills_count,
+            orders_submitted=cycle_metrics.orders_submitted,
+            orders_canceled=cycle_metrics.orders_canceled,
+            rejects_count=cycle_metrics.rejects_count,
+            fill_rate=cycle_metrics.fills_per_submitted_order,
+            avg_time_to_fill=cycle_metrics.avg_time_to_fill,
+            slippage_bps_avg=cycle_metrics.slippage_bps_avg,
+            fees_json=json.dumps(cycle_metrics.fees, sort_keys=True),
+            pnl_json=json.dumps(cycle_metrics.pnl, sort_keys=True),
+            meta_json=json.dumps(cycle_metrics.meta, sort_keys=True),
+        )

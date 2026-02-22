@@ -46,6 +46,7 @@ from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_budget_service import CapitalPolicyError, RiskBudgetService
 from btcbot.services.risk_policy import RiskPolicy
 from btcbot.services.stage4_planning_kernel_integration import build_stage4_kernel_plan
+from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ class Stage4CycleRunner:
         exchange = build_exchange_stage4(settings, dry_run=settings.dry_run)
         live_mode = settings.is_live_trading_enabled() and not settings.dry_run
         state_store = StateStore(db_path=settings.state_db_path)
+        uow_factory = UnitOfWorkFactory(settings.state_db_path)
         if live_mode and state_store.get_latest_stage7_ledger_metrics() is not None:
             logger.warning(
                 "stage4_live_stage7_data_present",
@@ -156,7 +158,7 @@ class Stage4CycleRunner:
                 ),
                 max_gross_exposure_try=Decimal(str(settings.risk_max_gross_exposure_try)),
             )
-            risk_budget_service = RiskBudgetService(state_store=state_store)
+            risk_budget_service = RiskBudgetService(state_store=state_store, uow_factory=uow_factory)
             execution_service = ExecutionService(
                 exchange=exchange,
                 state_store=state_store,
@@ -865,7 +867,7 @@ class Stage4CycleRunner:
             metrics_persisted = False
             try:
                 with state_store.transaction():
-                    metrics_service.persist_cycle_metrics(state_store, cycle_metrics)
+                    metrics_service.persist_cycle_metrics_with_uow(uow_factory, cycle_metrics)
                 metrics_persisted = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -959,9 +961,13 @@ class Stage4CycleRunner:
                     for key, value in dict(bootstrap_drop_reasons).items()
                 }
             )
-            state_store.record_cycle_audit(
-                cycle_id=cycle_id, counts=counts, decisions=decisions, envelope=envelope
-            )
+            with uow_factory() as uow:
+                uow.trace.record_cycle_audit(
+                    cycle_id=cycle_id,
+                    counts=counts,
+                    decisions=decisions,
+                    envelope=envelope,
+                )
             state_store.set_last_cycle_id(cycle_id)
 
             logger.info(
