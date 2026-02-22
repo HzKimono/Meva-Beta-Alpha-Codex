@@ -7,6 +7,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from btcbot.domain.money_policy import DEFAULT_MONEY_POLICY, round_fee, round_price, round_qty
+
 
 class LedgerEventType(StrEnum):
     ORDER_PLACED = "ORDER_PLACED"
@@ -93,23 +95,25 @@ def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
             and event.price is not None
             and event.side is not None
         ):
+            qty = round_qty(event.qty, DEFAULT_MONEY_POLICY)
+            price = round_price(event.price, DEFAULT_MONEY_POLICY)
             if event.side.upper() == "BUY":
                 lots.append(
                     PositionLot(
                         symbol=event.symbol,
-                        qty=event.qty,
-                        unit_cost=event.price,
+                        qty=qty,
+                        unit_cost=price,
                         opened_at=event.ts,
                     )
                 )
             elif event.side.upper() == "SELL":
-                remaining = event.qty
+                remaining = qty
                 while remaining > 0 and lots:
                     lot = lots[0]
                     matched = min(remaining, lot.qty)
-                    realized += (event.price - lot.unit_cost) * matched
-                    remaining -= matched
-                    leftover = lot.qty - matched
+                    realized = round_fee(realized + ((price - lot.unit_cost) * matched), DEFAULT_MONEY_POLICY)
+                    remaining = round_qty(remaining - matched, DEFAULT_MONEY_POLICY)
+                    leftover = round_qty(lot.qty - matched, DEFAULT_MONEY_POLICY)
                     if leftover <= 0:
                         lots.pop(0)
                     else:
@@ -134,7 +138,10 @@ def apply_events(state: LedgerState, events: list[LedgerEvent]) -> LedgerState:
                     f"qty={event.qty} price={event.price}"
                 )
             currency = event.fee_currency.upper()
-            fees[currency] = fees.get(currency, Decimal("0")) + event.fee
+            fees[currency] = round_fee(
+                fees.get(currency, Decimal("0")) + round_fee(event.fee, DEFAULT_MONEY_POLICY),
+                DEFAULT_MONEY_POLICY,
+            )
 
         if event.type == LedgerEventType.ADJUSTMENT and event.fee is not None:
             realized += event.fee
@@ -210,7 +217,7 @@ def deserialize_ledger_state(payload: str) -> LedgerState:
 
 
 def compute_realized_pnl(state: LedgerState) -> Decimal:
-    return sum((symbol.realized_pnl for symbol in state.symbols.values()), Decimal("0"))
+    return round_fee(sum((symbol.realized_pnl for symbol in state.symbols.values()), Decimal("0")), DEFAULT_MONEY_POLICY)
 
 
 def compute_unrealized_pnl(state: LedgerState, mark_prices: dict[str, Decimal]) -> Decimal:
@@ -219,8 +226,9 @@ def compute_unrealized_pnl(state: LedgerState, mark_prices: dict[str, Decimal]) 
         mark = mark_prices.get(symbol)
         if mark is None:
             continue
+        mark = round_price(mark, DEFAULT_MONEY_POLICY)
         for lot in symbol_state.lots:
-            total += (mark - lot.unit_cost) * lot.qty
+            total = round_fee(total + ((mark - lot.unit_cost) * lot.qty), DEFAULT_MONEY_POLICY)
     return total
 
 

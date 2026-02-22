@@ -4,10 +4,11 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 
 from btcbot.domain.decision_codes import ReasonCode, map_risk_reason
 from btcbot.domain.intent import Intent
+from btcbot.domain.money_policy import MoneyMathPolicy, round_price, round_qty
 from btcbot.domain.models import OrderSide, normalize_symbol
 from btcbot.observability_decisions import emit_decision
 from btcbot.risk.exchange_rules import (
@@ -122,7 +123,10 @@ class RiskPolicy:
                 )
                 continue
             if self.max_notional_per_order_try > 0 and notional > self.max_notional_per_order_try:
-                capped_qty = _quantize(self.max_notional_per_order_try / price, rules.qty_step)
+                capped_qty = round_qty(
+                    self.max_notional_per_order_try / price,
+                    MoneyMathPolicy(price_tick=rules.price_tick, qty_step=rules.qty_step),
+                )
                 if capped_qty <= 0:
                     self._log_block(
                         normalized,
@@ -223,8 +227,9 @@ class RiskPolicy:
                 },
             )
             return None
-        q_price = _quantize(intent.limit_price, rules.price_tick)
-        q_qty = _quantize(intent.qty, rules.qty_step)
+        policy = MoneyMathPolicy(price_tick=rules.price_tick, qty_step=rules.qty_step)
+        q_price = round_price(intent.limit_price, policy)
+        q_qty = round_qty(intent.qty, policy)
         if q_price <= 0 or q_qty <= 0:
             self._log_block(intent, map_risk_reason("non_positive_after_quantize"), context=context)
             return None
@@ -318,9 +323,3 @@ class RiskPolicy:
         )
         self.last_blocked_events.append(dict(extra_payload))
         emit_decision(logger, extra_payload)
-
-
-def _quantize(value: Decimal, step: Decimal) -> Decimal:
-    if step <= 0:
-        return value
-    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step

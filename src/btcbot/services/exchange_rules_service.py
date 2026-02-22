@@ -4,11 +4,12 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from typing import Literal
 
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.config import Settings
+from btcbot.domain.money_policy import policy_for_symbol, round_price, round_qty
 from btcbot.domain.stage4 import ExchangeRules
 
 logger = logging.getLogger(__name__)
@@ -507,21 +508,13 @@ class ExchangeRulesService:
         rules = self.get_rules(symbol)
         if price <= 0:
             raise ValueError("price must be > 0")
-        if rules.tick_size > 0:
-            steps = (price / rules.tick_size).to_integral_value(rounding=ROUND_DOWN)
-            return steps * rules.tick_size
-        quantum = Decimal("1").scaleb(-rules.price_precision)
-        return price.quantize(quantum, rounding=ROUND_DOWN)
+        return round_price(price, policy_for_symbol(rules))
 
     def quantize_qty(self, symbol: str, qty: Decimal) -> Decimal:
         rules = self.get_rules(symbol)
         if qty <= 0:
             raise ValueError("qty must be > 0")
-        if rules.lot_size > 0:
-            steps = (qty / rules.lot_size).to_integral_value(rounding=ROUND_DOWN)
-            return steps * rules.lot_size
-        quantum = Decimal("1").scaleb(-rules.qty_precision)
-        return qty.quantize(quantum, rounding=ROUND_DOWN)
+        return round_qty(qty, policy_for_symbol(rules))
 
     def validate_notional(self, symbol: str, price: Decimal, qty: Decimal) -> tuple[bool, str]:
         rules = self.get_rules(symbol)
