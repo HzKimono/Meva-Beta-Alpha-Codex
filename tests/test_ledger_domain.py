@@ -10,6 +10,8 @@ from btcbot.domain.ledger import (
     apply_events,
     compute_realized_pnl,
     compute_unrealized_pnl,
+    deserialize_ledger_state,
+    serialize_ledger_state,
 )
 
 
@@ -108,3 +110,22 @@ def test_sorting_normalizes_naive_utc_ts() -> None:
     ]
     state = apply_events(LedgerState(), events)
     assert compute_realized_pnl(state) == Decimal("5")
+
+
+def test_ledger_state_snapshot_round_trip_is_deterministic() -> None:
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    state = apply_events(
+        LedgerState(),
+        [
+            _event("b", ts, "ETHTRY", LedgerEventType.FILL, "BUY", "2", "50"),
+            _event("a", ts, "BTCTRY", LedgerEventType.FILL, "BUY", "1", "100"),
+            _event("c", ts, "BTCTRY", LedgerEventType.FEE, None, "0", None, fee="1", fee_currency="TRY"),
+        ],
+    )
+
+    payload1 = serialize_ledger_state(state)
+    payload2 = serialize_ledger_state(state)
+    restored = deserialize_ledger_state(payload1)
+
+    assert payload1 == payload2
+    assert restored == state
