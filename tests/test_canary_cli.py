@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from btcbot import cli
 from btcbot.config import Settings
 
@@ -172,48 +174,20 @@ def test_canary_loop_hard_stops_on_doctor_fail_midway(monkeypatch, tmp_path: Pat
     assert calls["run_cycle"] == 5
 
 
-def test_canary_requires_db_path(monkeypatch, capsys, tmp_path: Path) -> None:
-    settings = Settings(
-        STATE_DB_PATH="",
-        UNIVERSE_SYMBOLS='["BTCTRY"]',
-        LIVE_TRADING=True,
-        LIVE_TRADING_ACK="I_UNDERSTAND",
-        BTCTURK_API_KEY="test-key",
-        BTCTURK_API_SECRET="test-secret",
-        DRY_RUN=False,
-        KILL_SWITCH=False,
-        SAFE_MODE=False,
-    )
-    called = {"run_cycle": 0}
+def test_canary_requires_db_path(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+        process_role = "LIVE"
+        live_trading = True
+        kill_switch = False
+        safe_mode = False
+        state_db_path = ""
 
-    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: settings)
-    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
-    monkeypatch.setattr(cli, "configure_instrumentation", lambda **kwargs: None)
-    monkeypatch.setattr(cli, "_apply_effective_universe", lambda s: s)
-    monkeypatch.setattr(
-        cli, "run_cycle", lambda *args, **kwargs: called.__setitem__("run_cycle", 1) or 0
-    )
-    monkeypatch.setattr(
-        cli.sys,
-        "argv",
-        [
-            "btcbot",
-            "canary",
-            "once",
-            "--symbol",
-            "BTCTRY",
-            "--notional-try",
-            "150",
-            "--ttl-seconds",
-            "30",
-        ],
-    )
+    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: FakeSettings())
+    monkeypatch.setattr(cli.sys, "argv", ["btcbot", "canary", "once", "--symbol", "BTCTRY"])
 
-    rc = cli.main()
-
-    assert rc == 2
-    assert "missing DB path" in capsys.readouterr().out
-    assert called["run_cycle"] == 0
+    with pytest.raises(ValueError, match="STATE_DB_PATH is required"):
+        cli.main()
 
 
 def test_canary_acquires_single_instance_lock(monkeypatch, tmp_path: Path) -> None:

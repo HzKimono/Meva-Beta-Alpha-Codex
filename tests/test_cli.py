@@ -1090,8 +1090,8 @@ def test_run_cycle_stage4_classifies_capital_invariant_error(monkeypatch, tmp_pa
 def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 
@@ -1129,8 +1129,8 @@ def test_main_stage7_backtest_accepts_dataset_and_out_aliases(monkeypatch) -> No
 def test_main_stage7_backtest_passes_include_adaptation(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 
@@ -1168,8 +1168,8 @@ def test_main_stage7_backtest_passes_include_adaptation(monkeypatch) -> None:
 def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 
@@ -1195,8 +1195,8 @@ def test_main_stage7_run_passes_include_adaptation(monkeypatch) -> None:
 def test_main_run_lock_failure_happens_before_instrumentation(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
         state_db_path = "./btcbot_state.db"
 
     called = {"configured": False}
@@ -1313,8 +1313,8 @@ def test_run_with_optional_loop_negative_one_means_infinite_until_interrupt() ->
 def test_main_stage7_run_accepts_db_flag(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 
@@ -1340,8 +1340,8 @@ def test_main_stage7_run_accepts_db_flag(monkeypatch) -> None:
 def test_main_stage7_report_accepts_db_flag(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 
@@ -1368,8 +1368,8 @@ def test_main_stage7_report_accepts_db_flag(monkeypatch) -> None:
 def test_main_stage7_db_count_supports_env_fallback(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 
@@ -1388,38 +1388,23 @@ def test_main_stage7_db_count_supports_env_fallback(monkeypatch) -> None:
     assert captured["db_path"] is None
 
 
-def test_main_supports_env_file_override(monkeypatch) -> None:
-    class FakeSettings:
-        log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
-        state_db_path = "btcbot_state.db"
-
-    captured: dict[str, object] = {}
-
-    def _fake_settings(**kwargs):
-        captured.update(kwargs)
-        return FakeSettings()
-
-    monkeypatch.setattr(cli, "Settings", _fake_settings)
-    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
-    monkeypatch.setattr(cli, "run_cycle", lambda settings, force_dry_run=False, state_store=None: 0)
+def test_main_rejects_env_file_override(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
         ["btcbot", "--env-file", ".env.live", "run", "--once"],
     )
 
-    assert cli.main() == 0
-    assert captured["_env_file"] == ".env.live"
+    with pytest.raises(ValueError, match="Dotenv bootstrap is disabled"):
+        cli.main()
 
 
 def test_main_run_accepts_sleep_seconds_alias(monkeypatch) -> None:
     class FakeSettings:
         log_level = "INFO"
-        process_role = "test"
-        state_db_path = ":memory:"
-        state_db_path = "btcbot_state.db"
+        process_role = "MONITOR"
+        state_db_path = "/tmp/monitor_state.db"
+        state_db_path = "/tmp/monitor_state.db"
 
     captured: dict[str, object] = {}
 
@@ -2511,12 +2496,36 @@ def test_cycle_end_log_contains_standardized_reject_reasons_and_open_order_conte
     assert payload["open_order_identifiers"] == ["cid-1", "cid-2"]
 
 
-def test_help_text_env_file_reflects_opt_in_dotenv(monkeypatch, capsys) -> None:
+def test_main_rejects_settings_env_file(monkeypatch) -> None:
+    monkeypatch.setenv("SETTINGS_ENV_FILE", ".env.live")
+    monkeypatch.setattr(sys, "argv", ["btcbot", "run", "--once"])
+
+    with pytest.raises(ValueError, match="Dotenv bootstrap is disabled"):
+        cli.main()
+
+
+def test_main_rejects_empty_state_db_path(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+        process_role = "MONITOR"
+        live_trading = False
+        kill_switch = True
+        safe_mode = False
+        state_db_path = ""
+
+    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(sys, "argv", ["btcbot", "health"])
+
+    with pytest.raises(ValueError, match="STATE_DB_PATH is required"):
+        cli.main()
+
+
+def test_help_text_env_file_warns_dotenv_forbidden(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["btcbot", "--help"])
 
     with pytest.raises(SystemExit):
         cli.main()
 
     output = capsys.readouterr().out
-    assert "Default is no dotenv load" in output
-    assert "SETTINGS_ENV_FILE" in output
+    assert "Dotenv bootstrap is forbidden" in output
