@@ -1326,6 +1326,9 @@ def run_cycle(
                     live_trading_enabled=settings.live_trading,
                     live_trading_ack=settings.live_trading_ack == "I_UNDERSTAND",
                     safe_mode=effective_safe_mode,
+                    # Explicit wiring keeps execution-side inventory gating aligned with config;
+                    # this policy must be enforced before any exchange I/O in execute_intents.
+                    spot_sell_requires_inventory=settings.spot_sell_requires_inventory,
                 )
                 accounting_service = AccountingService(
                     exchange=exchange, state_store=resolved_state_store

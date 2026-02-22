@@ -94,6 +94,7 @@ class ExecutionService:
         cancel_retry_max_attempts: int = 2,
         retry_base_delay_ms: int = 250,
         retry_max_delay_ms: int = 4000,
+        spot_sell_requires_inventory: bool = True,
         sleep_fn=None,
     ) -> None:
         self.exchange = exchange
@@ -126,6 +127,7 @@ class ExecutionService:
         self.cancel_retry_max_attempts = max(1, cancel_retry_max_attempts)
         self.retry_base_delay_ms = max(0, retry_base_delay_ms)
         self.retry_max_delay_ms = max(self.retry_base_delay_ms, retry_max_delay_ms)
+        self.spot_sell_requires_inventory = bool(spot_sell_requires_inventory)
         quote_override = os.getenv("EXECUTION_QUOTE_ASSET")
         self.execution_quote_asset_override = (
             quote_override.strip().upper() if quote_override and quote_override.strip() else None
@@ -516,10 +518,13 @@ class ExecutionService:
         price: Decimal,
         quantity: Decimal,
     ) -> tuple[bool, str | None, Decimal | None, Decimal | None]:
+        base_asset, quote_asset = self._derive_symbol_assets(symbol)
         if balances is None or not balances:
+            if side == OrderSide.SELL and self.spot_sell_requires_inventory:
+                required = quantity + (quantity * (self.sell_fee_in_base_bps / Decimal("10000")))
+                return False, base_asset, required, Decimal("0")
             return True, None, None, None
 
-        base_asset, quote_asset = self._derive_symbol_assets(symbol)
         if side == OrderSide.BUY:
             asset = self.execution_quote_asset_override or quote_asset
             notional = price * quantity
@@ -1105,6 +1110,13 @@ class ExecutionService:
                     quantity=quantity,
                 )
                 if not is_sufficient:
+                    precheck_reason = None
+                    if (
+                        intent.side == OrderSide.SELL
+                        and self.spot_sell_requires_inventory
+                        and (cycle_balances is None or not cycle_balances)
+                    ):
+                        precheck_reason = "balances_missing_fail_closed"
                     missing = (required or Decimal("0")) - (available or Decimal("0"))
                     logger.warning(
                         "execution_reject_insufficient_balance_precheck",
@@ -1118,6 +1130,7 @@ class ExecutionService:
                                 "required": str(required),
                                 "available": str(available),
                                 "missing_amount": str(max(missing, Decimal("0"))),
+                                "precheck_reason": precheck_reason,
                             }
                         },
                     )
@@ -1136,6 +1149,7 @@ class ExecutionService:
                             "side": intent.side.value,
                             "asset": asset,
                             "missing_amount": str(max(missing, Decimal("0"))),
+                            "precheck_reason": precheck_reason,
                         },
                     )
                     intents_rejected_precheck += 1
