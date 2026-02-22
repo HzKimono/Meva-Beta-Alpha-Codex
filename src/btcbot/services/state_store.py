@@ -3899,23 +3899,45 @@ class StateStore:
         pnl_json: str,
         meta_json: str,
     ) -> None:
-        # TODO(P2-2): remove facade once all callers migrate to UnitOfWork directly.
-        with self._uow_factory() as uow:
-            uow.metrics.save_cycle_metrics(
-                cycle_id=cycle_id,
-                ts_start=ts_start,
-                ts_end=ts_end,
-                mode=mode,
-                fills_count=fills_count,
-                orders_submitted=orders_submitted,
-                orders_canceled=orders_canceled,
-                rejects_count=rejects_count,
-                fill_rate=fill_rate,
-                avg_time_to_fill=avg_time_to_fill,
-                slippage_bps_avg=slippage_bps_avg,
-                fees_json=fees_json,
-                pnl_json=pnl_json,
-                meta_json=meta_json,
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cycle_metrics(
+                    cycle_id, ts_start, ts_end, mode, fills_count, orders_submitted,
+                    orders_canceled, rejects_count, fill_rate, avg_time_to_fill,
+                    slippage_bps_avg, fees_json, pnl_json, meta_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts_start=excluded.ts_start,
+                    ts_end=excluded.ts_end,
+                    mode=excluded.mode,
+                    fills_count=excluded.fills_count,
+                    orders_submitted=excluded.orders_submitted,
+                    orders_canceled=excluded.orders_canceled,
+                    rejects_count=excluded.rejects_count,
+                    fill_rate=excluded.fill_rate,
+                    avg_time_to_fill=excluded.avg_time_to_fill,
+                    slippage_bps_avg=excluded.slippage_bps_avg,
+                    fees_json=excluded.fees_json,
+                    pnl_json=excluded.pnl_json,
+                    meta_json=excluded.meta_json
+                """,
+                (
+                    cycle_id,
+                    ts_start,
+                    ts_end,
+                    mode,
+                    fills_count,
+                    orders_submitted,
+                    orders_canceled,
+                    rejects_count,
+                    fill_rate,
+                    avg_time_to_fill,
+                    slippage_bps_avg,
+                    fees_json,
+                    pnl_json,
+                    meta_json,
+                ),
             )
 
     def get_risk_state_current(self) -> dict[str, str | None]:

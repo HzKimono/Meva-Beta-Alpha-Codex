@@ -132,6 +132,8 @@ def test_stage7_db_count_reports_existing_and_missing_tables(capsys, tmp_path: P
 def test_main_stage7_backtest_report_alias(monkeypatch, tmp_path: Path) -> None:
     class FakeSettings:
         log_level = "INFO"
+        process_role = "MONITOR"
+        state_db_path = "state.db"
 
     captured: dict[str, object] = {}
 

@@ -153,8 +153,13 @@ def apply_events(
                     f"qty={event.qty} price={event.price}"
                 )
             currency = event.fee_currency.upper()
-            fee_policy = policy if currency == "TRY" else DEFAULT_MONEY_POLICY
-            fees[currency] = round_fee(fees.get(currency, Decimal("0")) + event.fee, fee_policy)
+            if currency == "TRY":
+                fees[currency] = round_fee(
+                    fees.get(currency, Decimal("0")) + event.fee,
+                    policy,
+                )
+            else:
+                fees[currency] = fees.get(currency, Decimal("0")) + event.fee
 
         if event.type == LedgerEventType.ADJUSTMENT and event.fee is not None:
             realized += event.fee
