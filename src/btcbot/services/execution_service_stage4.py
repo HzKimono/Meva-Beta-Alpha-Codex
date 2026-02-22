@@ -35,6 +35,9 @@ class ReplaceGroup:
     side: str
     cancel_actions: tuple[LifecycleAction, ...]
     submit_action: LifecycleAction
+    submit_count: int
+    had_multiple_submits: bool
+    selected_submit_client_order_id: str | None
 
 
 class ExecutionService:
@@ -81,18 +84,21 @@ class ExecutionService:
                 rejected_min_notional += rej_min
 
         for group in replace_groups:
-            if sum(1 for a in actions if a.symbol == group.symbol and a.side == group.side and a.action_type == LifecycleActionType.SUBMIT and a.reason == "replace_submit") > 1:
+            if group.had_multiple_submits:
                 self.instrumentation.counter("replace_multiple_submits_coalesced_total")
                 emit_decision(
                     logger,
                     {
+                        "event_name": "replace_multiple_submits_coalesced",
                         "decision_layer": "execution_stage4_replace",
                         "reason_code": "replace_multiple_submits_coalesced",
                         "action": "SUPPRESS",
                         "payload": {
+                            "replace_tx_id": self._replace_tx_id(group),
                             "symbol": group.symbol,
                             "side": group.side,
-                            "new_client_order_id": group.submit_action.client_order_id,
+                            "submit_count": group.submit_count,
+                            "selected_submit_client_order_id": group.selected_submit_client_order_id,
                         },
                     },
                 )
@@ -132,12 +138,16 @@ class ExecutionService:
             submits = bucket["submit"]
             regular_actions.extend(bucket["other"])
             if cancels and submits:
+                selected_submit = submits[-1]
                 replace_groups.append(
                     ReplaceGroup(
                         symbol=symbol,
                         side=side,
                         cancel_actions=tuple(cancels),
-                        submit_action=submits[-1],
+                        submit_action=selected_submit,
+                        submit_count=len(submits),
+                        had_multiple_submits=len(submits) > 1,
+                        selected_submit_client_order_id=selected_submit.client_order_id,
                     )
                 )
             else:

@@ -670,7 +670,6 @@ def test_execution_rejects_and_continues_when_rules_missing(store: StateStore) -
             exchange_order_id="ex-cancel-1",
         ),
     ]
-
     report = svc.execute_with_report(actions)
 
     assert report.rejected == 1
@@ -1098,6 +1097,8 @@ def test_replace_group_detection() -> None:
     assert regular == []
     assert len(groups) == 1
     assert groups[0].submit_action.client_order_id == "new-1"
+    assert groups[0].submit_count == 1
+    assert groups[0].had_multiple_submits is False
 
 
 def test_replace_submit_deferred_until_exchange_confirms_cancel(store: StateStore) -> None:
@@ -1370,6 +1371,13 @@ def test_replace_multiple_submit_actions_coalesced_to_last(store: StateStore) ->
         ),
     ]
 
+    regular_actions, groups = ExecutionService._extract_replace_groups(actions)
+    assert regular_actions == []
+    assert len(groups) == 1
+    assert groups[0].submit_count == 2
+    assert groups[0].had_multiple_submits is True
+    assert groups[0].selected_submit_client_order_id == "new-multi-2"
+
     report = svc.execute_with_report(actions)
     assert report.submitted == 1
     assert len(exchange.submits) == 1
@@ -1432,7 +1440,9 @@ def test_replace_local_non_terminal_defers_even_when_exchange_cleared(store: Sta
     assert report.submitted == 0
 
 
-def test_replace_multiple_submit_coalesce_increments_metric(store: StateStore) -> None:
+def test_replace_multiple_submit_coalesce_increments_metric(
+    store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class SpyMetrics:
         def __init__(self) -> None:
             self.calls: list[str] = []
@@ -1471,6 +1481,13 @@ def test_replace_multiple_submit_coalesce_increments_metric(store: StateStore) -
         rules_service=ExchangeRulesService(exchange),
     )
     svc.instrumentation = SpyMetrics()  # type: ignore[assignment]
+    decision_events: list[dict] = []
+
+    def _capture_decision(_logger, event: dict) -> None:
+        del _logger
+        decision_events.append(event)
+
+    monkeypatch.setattr("btcbot.services.execution_service_stage4.emit_decision", _capture_decision)
     actions = [
         LifecycleAction(
             action_type=LifecycleActionType.CANCEL,
@@ -1505,6 +1522,13 @@ def test_replace_multiple_submit_coalesce_increments_metric(store: StateStore) -
     ]
     svc.execute_with_report(actions)
     assert "replace_multiple_submits_coalesced_total" in svc.instrumentation.calls
+    coalesced_events = [
+        event for event in decision_events if event.get("event_name") == "replace_multiple_submits_coalesced"
+    ]
+    assert len(coalesced_events) == 1
+    payload = coalesced_events[0]["payload"]
+    assert payload["submit_count"] == 2
+    assert payload["selected_submit_client_order_id"] == "new-metric-2"
 
 
 
