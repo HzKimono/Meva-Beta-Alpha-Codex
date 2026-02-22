@@ -116,6 +116,18 @@ class ReservationResult:
     next_recovery_at_epoch: int | None
 
 
+@dataclass(frozen=True)
+class Stage4ReplaceTransaction:
+    new_client_order_id: str
+    old_client_order_id: str
+    symbol: str
+    side: str
+    status: str
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 
 
 def _serialize_decimal_for_db(value: Decimal, *, field_name: str) -> str:
@@ -1549,6 +1561,26 @@ class StateStore:
                 fee_asset TEXT NOT NULL,
                 ts TEXT NOT NULL
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage4_replace_transactions (
+                new_client_order_id TEXT PRIMARY KEY,
+                old_client_order_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stage4_replace_transactions_old
+            ON stage4_replace_transactions(old_client_order_id)
             """
         )
         conn.execute(
@@ -3029,6 +3061,62 @@ class StateStore:
             mode=mode,
             status="rejected",
         )
+
+    def get_stage4_replace_transaction(self, new_client_order_id: str) -> Stage4ReplaceTransaction | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage4_replace_transactions WHERE new_client_order_id=?",
+                (new_client_order_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Stage4ReplaceTransaction(
+            new_client_order_id=str(row["new_client_order_id"]),
+            old_client_order_id=str(row["old_client_order_id"]),
+            symbol=str(row["symbol"]),
+            side=str(row["side"]),
+            status=str(row["status"]),
+            last_error=(str(row["last_error"]) if row["last_error"] else None),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
+
+    def upsert_stage4_replace_transaction(
+        self,
+        *,
+        new_client_order_id: str,
+        old_client_order_id: str,
+        symbol: str,
+        side: str,
+        status: str,
+        last_error: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage4_replace_transactions(
+                    new_client_order_id, old_client_order_id, symbol, side, status, last_error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(new_client_order_id) DO UPDATE SET
+                    old_client_order_id=excluded.old_client_order_id,
+                    symbol=excluded.symbol,
+                    side=excluded.side,
+                    status=excluded.status,
+                    last_error=excluded.last_error,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    new_client_order_id,
+                    old_client_order_id,
+                    normalize_symbol(symbol),
+                    side,
+                    status,
+                    last_error,
+                    now,
+                    now,
+                ),
+            )
 
     def update_stage4_order_exchange_id(self, client_order_id: str, exchange_order_id: str) -> None:
         with self._connect() as conn:

@@ -1064,3 +1064,125 @@ def test_stage4_uncertain_submit_records_unknown_and_freezes_submits(store: Stat
     )
     cancel_report = svc.execute_with_report([cancel])
     assert cancel_report.canceled == 1
+
+def test_replace_submit_waits_until_cancel_confirmed(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            SAFE_MODE=False,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    store.record_stage4_order_submitted(
+        symbol="BTC_TRY",
+        client_order_id="old-repl",
+        exchange_order_id="ex-old-repl",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+    )
+
+    replace_submit = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("101"),
+        qty=Decimal("1"),
+        reason="replace_submit",
+        client_order_id="new-repl",
+        replace_for_client_order_id="old-repl",
+    )
+
+    report_blocked = svc.execute_with_report([replace_submit])
+    txn_pending = store.get_stage4_replace_transaction("new-repl")
+
+    assert report_blocked.executed_total == 0
+    assert txn_pending is not None
+    assert txn_pending.status == "pending_cancel"
+    assert exchange.submits == []
+
+    cancel = LifecycleAction(
+        action_type=LifecycleActionType.CANCEL,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="replace_cancel",
+        client_order_id="old-repl",
+        exchange_order_id="ex-old-repl",
+    )
+    report_cancel = svc.execute_with_report([cancel])
+    report_submit = svc.execute_with_report([replace_submit])
+    txn_submitted = store.get_stage4_replace_transaction("new-repl")
+
+    assert report_cancel.canceled == 1
+    assert report_submit.submitted == 1
+    assert txn_submitted is not None
+    assert txn_submitted.status == "submitted"
+    assert len(exchange.submits) == 1
+
+
+def test_replace_submit_blocked_by_unknown_order_freeze(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            SAFE_MODE=False,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+
+    store.record_stage4_order_error(
+        client_order_id="unknown-1",
+        reason="manual_unknown",
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="unknown",
+    )
+    store.record_stage4_order_submitted(
+        symbol="BTC_TRY",
+        client_order_id="old-repl-freeze",
+        exchange_order_id="ex-old-repl-freeze",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="canceled",
+    )
+
+    replace_submit = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("101"),
+        qty=Decimal("1"),
+        reason="replace_submit",
+        client_order_id="new-repl-freeze",
+        replace_for_client_order_id="old-repl-freeze",
+    )
+    report = svc.execute_with_report([replace_submit])
+    txn = store.get_stage4_replace_transaction("new-repl-freeze")
+
+    assert report.executed_total == 0
+    assert txn is not None
+    assert txn.status == "blocked_unknown"
+    assert exchange.submits == []
