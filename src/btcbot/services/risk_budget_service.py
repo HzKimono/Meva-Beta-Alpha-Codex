@@ -227,11 +227,6 @@ class RiskBudgetService:
         current = self.state_store.get_risk_state_current()
         prev_mode_raw = current.get("current_mode")
         prev_mode = parse_risk_mode(prev_mode_raw)
-        if prev_mode_raw and prev_mode is None:
-            logger.warning(
-                "risk_state_invalid_prev_mode",
-                extra={"extra": {"current_mode_raw": prev_mode_raw}},
-            )
 
         today = self.now_provider().date()
         peak_equity = self._resolve_peak_equity(current, pnl_report.equity_estimate)
