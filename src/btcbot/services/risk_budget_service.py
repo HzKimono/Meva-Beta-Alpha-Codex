@@ -10,6 +10,7 @@ from decimal import Decimal
 from btcbot.accounting.models import PortfolioAccountingState
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
+from btcbot.domain.risk_mode_codec import parse_risk_mode
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position
 from btcbot.observability_decisions import emit_decision
@@ -225,15 +226,12 @@ class RiskBudgetService:
     ) -> tuple[BudgetDecision, Mode | None, Decimal, Decimal, date]:
         current = self.state_store.get_risk_state_current()
         prev_mode_raw = current.get("current_mode")
-        prev_mode = None
-        if prev_mode_raw:
-            try:
-                prev_mode = Mode(prev_mode_raw)
-            except ValueError:
-                logger.warning(
-                    "risk_state_invalid_prev_mode",
-                    extra={"extra": {"current_mode_raw": prev_mode_raw}},
-                )
+        prev_mode = parse_risk_mode(prev_mode_raw)
+        if prev_mode_raw and prev_mode is None:
+            logger.warning(
+                "risk_state_invalid_prev_mode",
+                extra={"extra": {"current_mode_raw": prev_mode_raw}},
+            )
 
         today = self.now_provider().date()
         peak_equity = self._resolve_peak_equity(current, pnl_report.equity_estimate)
@@ -439,8 +437,8 @@ class RiskBudgetService:
         self.state_store.persist_risk(
             cycle_id=cycle_id,
             decision=(decision.risk_decision if isinstance(decision, BudgetDecision) else decision),
-            prev_mode=(prev_mode.value if prev_mode else None),
-            mode=decision.mode,
+            prev_mode=prev_mode,
+            risk_mode=decision.mode,
             peak_equity_try=peak_equity,
             peak_day=peak_day.isoformat(),
             fees_today_try=fees_today,
