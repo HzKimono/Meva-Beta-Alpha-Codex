@@ -10,6 +10,7 @@ import pytest
 from btcbot.domain.models import Order, OrderSide, OrderStatus
 from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.order_state import Stage7Order
+from btcbot.domain.risk_budget import Mode, RiskDecision as BudgetRiskDecision, RiskLimits, RiskSignals
 from btcbot.domain.risk_models import RiskDecision, RiskMode
 from btcbot.services import state_store as state_store_module
 from btcbot.services.parity import compute_run_fingerprint
@@ -34,6 +35,55 @@ def test_risk_state_current_table_is_created_on_fresh_db(tmp_path) -> None:
         "fees_day": None,
     }
 
+
+
+
+def test_state_store_mode_persistence(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    risk_decision = BudgetRiskDecision(
+        mode=Mode.REDUCE_RISK_ONLY,
+        reasons=["test"],
+        limits=RiskLimits(
+            max_daily_drawdown_try=Decimal("100"),
+            max_drawdown_try=Decimal("200"),
+            max_gross_exposure_try=Decimal("300"),
+            max_position_pct=Decimal("0.25"),
+            max_order_notional_try=Decimal("50"),
+        ),
+        signals=RiskSignals(
+            equity_try=Decimal("1000"),
+            peak_equity_try=Decimal("1100"),
+            drawdown_try=Decimal("100"),
+            daily_pnl_try=Decimal("-10"),
+            gross_exposure_try=Decimal("250"),
+            largest_position_pct=Decimal("0.1"),
+            fees_try_today=Decimal("1"),
+        ),
+        decided_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    store.persist_risk(
+        cycle_id="c1",
+        decision=risk_decision,
+        prev_mode=Mode.NORMAL,
+        risk_mode=Mode.REDUCE_RISK_ONLY,
+        peak_equity_try=Decimal("1100"),
+        peak_day="2024-01-01",
+        fees_today_try=Decimal("1"),
+        fees_day="2024-01-01",
+    )
+
+    with sqlite3.connect(str(tmp_path / "state.db")) as conn:
+        row = conn.execute("SELECT mode, prev_mode FROM risk_decisions WHERE decision_id='c1'").fetchone()
+        current = conn.execute("SELECT current_mode FROM risk_state_current WHERE state_id=1").fetchone()
+
+    assert row == ("REDUCE_RISK_ONLY", "NORMAL")
+    assert current == ("REDUCE_RISK_ONLY",)
+
+    with sqlite3.connect(str(tmp_path / "state.db")) as conn:
+        conn.execute("UPDATE risk_decisions SET mode='normal' WHERE decision_id='c1'")
+
+    assert store.get_latest_risk_mode() == Mode.NORMAL
 
 def test_orders_unknown_retry_columns_are_added_for_legacy_db(tmp_path) -> None:
     db_path = tmp_path / "legacy.db"

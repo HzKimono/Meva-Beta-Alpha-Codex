@@ -18,6 +18,7 @@ from btcbot.domain.models import OrderSide as DomainOrderSide
 from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.portfolio_policy_models import PortfolioPlan
 from btcbot.domain.risk_budget import Mode
+from btcbot.domain.risk_mode_codec import dump_risk_mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.logging_context import with_cycle_context
 from btcbot.planning_kernel import ExecutionPort, Plan, PlanningKernel
@@ -426,23 +427,23 @@ class Stage7CycleRunner:
                 "rules_unavailable_details": dict(sorted(rules_unavailable_details.items())),
             }
 
-            base_mode = (
+            base_risk_mode = (
                 Mode.NORMAL if is_backtest_simulation else state_store.get_latest_risk_mode()
             )
-            final_mode = combine_modes(base_mode, None)
-            stage7_mode = Mode(stage7_risk_decision.mode.value)
-            final_mode = combine_modes(final_mode, stage7_mode)
+            final_risk_mode = combine_modes(base_risk_mode, None)
+            stage7_risk_mode = stage7_risk_decision.mode
+            final_risk_mode = combine_modes(final_risk_mode, stage7_risk_mode)
             invalid_policy = settings.stage7_rules_invalid_metadata_policy
             if invalid_policy == "observe_only_cycle" and (
                 rules_invalid_metadata_count > 0 or rules_missing_count > 0 or rules_error_count > 0
             ):
-                final_mode = Mode.OBSERVE_ONLY
+                final_risk_mode = Mode.OBSERVE_ONLY
 
             mode_payload: dict[str, object] = {
-                "base_mode": base_mode.value,
+                "base_mode": dump_risk_mode(base_risk_mode),
                 "override_mode": None,
-                "final_mode": final_mode.value,
-                "risk_mode": stage7_risk_decision.mode.value,
+                "final_mode": dump_risk_mode(final_risk_mode),
+                "risk_mode": dump_risk_mode(stage7_risk_mode),
                 "risk_reasons": stage7_risk_decision.reasons,
                 "risk_cooldown_until": (
                     stage7_risk_decision.cooldown_until.isoformat()
@@ -464,7 +465,7 @@ class Stage7CycleRunner:
                     mark_prices=mark_prices,
                     balances=balances,
                     open_orders=open_orders,
-                    final_mode=final_mode,
+                    final_mode=final_risk_mode,
                     rules_service=rules_service,
                     rules_unavailable=rules_unavailable,
                     selected_universe=universe_result.selected_symbols,
@@ -484,12 +485,12 @@ class Stage7CycleRunner:
             ledger_events_inserted = 0
             positions_updated_count = 0
 
-            if final_mode != Mode.OBSERVE_ONLY:
+            if final_risk_mode != Mode.OBSERVE_ONLY:
                 filtered_actions: list[LifecycleAction] = []
                 skipped_actions: list[dict[str, object]] = []
                 for action in lifecycle_actions:
                     normalized_symbol = normalize_symbol(action.symbol)
-                    if final_mode == Mode.REDUCE_RISK_ONLY and action.side.upper() != "SELL":
+                    if final_risk_mode == Mode.REDUCE_RISK_ONLY and action.side.upper() != "SELL":
                         skipped_actions.append(
                             {
                                 "symbol": normalized_symbol,
@@ -773,7 +774,7 @@ class Stage7CycleRunner:
             no_trades_reason = None
             if planned_count <= 0:
                 no_trades_reason = "NO_TRADE_PLANNING"
-            elif final_mode == Mode.OBSERVE_ONLY:
+            elif final_risk_mode == Mode.OBSERVE_ONLY:
                 no_trades_reason = "MODE_OBSERVE_ONLY"
             elif settings.kill_switch and not is_backtest_simulation:
                 no_trades_reason = "KILL_SWITCH"
@@ -827,8 +828,8 @@ class Stage7CycleRunner:
             run_metrics_base = {
                 "ts": now.isoformat(),
                 "run_id": run_id,
-                "mode_base": base_mode.value,
-                "mode_final": final_mode.value,
+                "mode_base": dump_risk_mode(base_risk_mode),
+                "mode_final": dump_risk_mode(final_risk_mode),
                 "universe_size": len(universe_result.selected_symbols),
                 "intents_planned_count": planned_count,
                 "intents_skipped_count": skipped_count,
