@@ -146,6 +146,14 @@ class BtcturkRestClient:
             if response.status_code == 429:
                 self.metrics.inc("429_count")
                 self.metrics.inc("rest_429_rate")
+                inc_counter(
+                    "bot_api_errors_total",
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": "LIVE",
+                    },
+                )
 
             if response.status_code >= 400:
                 self._raise_http_error(response)
