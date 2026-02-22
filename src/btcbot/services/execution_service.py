@@ -34,6 +34,7 @@ from btcbot.domain.models import (
 from btcbot.domain.symbols import split_symbol
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
+from btcbot.obs.metrics import inc_counter
 from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.execution_errors import ExecutionErrorCategory, classify_exchange_error
 from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
@@ -1469,6 +1470,19 @@ class ExecutionService:
                 status="COMMITTED",
             )
             placed += 1
+        if placed > 0:
+            inc_counter(
+                "bot_orders_submitted_total",
+                labels={"symbol": "multi", "side": "mixed", "process_role": "LIVE"},
+                delta=placed,
+            )
+        if orders_failed_exchange > 0:
+            inc_counter(
+                "bot_orders_failed_total",
+                labels={"symbol": "multi", "reason": "exchange_error", "process_role": "LIVE"},
+                delta=orders_failed_exchange,
+            )
+
         self.last_execute_summary = {
             "orders_submitted": placed,
             "orders_failed_exchange": orders_failed_exchange,

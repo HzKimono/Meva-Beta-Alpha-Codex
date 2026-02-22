@@ -16,6 +16,7 @@ from btcbot.adapters.btcturk.instrumentation import MetricsSink
 from btcbot.adapters.btcturk.rate_limit import AsyncTokenBucket
 from btcbot.adapters.btcturk.retry import RetryDecision, async_retry, compute_delay
 from btcbot.domain.models import ExchangeError
+from btcbot.obs.metrics import inc_counter
 from btcbot.observability import get_instrumentation
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,14 @@ class BtcturkRestClient:
             if response.status_code == 429:
                 self.metrics.inc("429_count")
                 self.metrics.inc("rest_429_rate")
+                inc_counter(
+                    "bot_api_errors_total",
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": "LIVE",
+                    },
+                )
 
             if response.status_code >= 400:
                 self._raise_http_error(response)
@@ -198,6 +207,14 @@ class BtcturkRestClient:
                 classify=_classify,
             )
         except RestRequestError as exc:
+            inc_counter(
+                "bot_api_errors_total",
+                labels={
+                    "exchange": "btcturk",
+                    "endpoint": path,
+                    "process_role": "LIVE",
+                },
+            )
             raise self._to_exchange_error(exc, method=method, path=path) from exc
 
     async def submit_order_safe(
