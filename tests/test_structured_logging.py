@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from btcbot.obs.logging import cycle_context, get_logger
+from btcbot.obs.logging import cycle_context, get_logger, set_base_context
+from btcbot.obs.process_role import get_process_role_from_env
 
 
 def test_cycle_context_injects_fields(caplog) -> None:
@@ -23,4 +24,19 @@ def test_cycle_context_injects_fields(caplog) -> None:
     assert payload["mode_base"] == "DRY_RUN"
     assert payload["mode_final"] == "OBSERVE_ONLY"
     assert payload["run_id"]
+    assert payload["state_db_path_hash"]
+
+
+def test_base_context_uses_app_role_env(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("APP_ROLE", "live")
+    role = get_process_role_from_env()
+    assert role.value == "LIVE"
+
+    set_base_context(process_role=role, state_db_path="/tmp/state.db")
+    logger = get_logger("btcbot.tests.obs.base")
+    with caplog.at_level(logging.INFO):
+        logger.info("base_context_log")
+
+    payload = getattr(caplog.records[-1], "extra")
+    assert payload["process_role"] == "LIVE"
     assert payload["state_db_path_hash"]

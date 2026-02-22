@@ -35,6 +35,7 @@ from btcbot.domain.symbols import split_symbol
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.obs.metrics import inc_counter
+from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
 from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.execution_errors import ExecutionErrorCategory, classify_exchange_error
 from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
@@ -85,6 +86,7 @@ class ExecutionService:
         unknown_reprobe_escalation_attempts: int = 8,
         unknown_reprobe_force_observe_only: bool = False,
         unknown_reprobe_force_kill_switch: bool = False,
+        process_role: str | None = None,
         unknown_reprobe_max_lookback_seconds: int = 24 * 60 * 60,
         pending_recovery_max_attempts: int = 3,
         pending_recovery_backoff_seconds: int = 30,
@@ -112,6 +114,7 @@ class ExecutionService:
         self.unknown_reprobe_escalation_attempts = max(1, unknown_reprobe_escalation_attempts)
         self.unknown_reprobe_force_observe_only = unknown_reprobe_force_observe_only
         self.unknown_reprobe_force_kill_switch = unknown_reprobe_force_kill_switch
+        self.process_role = coerce_process_role(process_role or get_process_role_from_env().value).value
         self.unknown_reprobe_max_lookback_seconds = max(
             60 * 60, unknown_reprobe_max_lookback_seconds
         )
@@ -1473,13 +1476,13 @@ class ExecutionService:
         if placed > 0:
             inc_counter(
                 "bot_orders_submitted_total",
-                labels={"symbol": "multi", "side": "mixed", "process_role": "LIVE"},
+                labels={"symbol": "multi", "side": "mixed", "process_role": self.process_role},
                 delta=placed,
             )
         if orders_failed_exchange > 0:
             inc_counter(
                 "bot_orders_failed_total",
-                labels={"symbol": "multi", "reason": "exchange_error", "process_role": "LIVE"},
+                labels={"symbol": "multi", "reason": "exchange_error", "process_role": self.process_role},
                 delta=orders_failed_exchange,
             )
 

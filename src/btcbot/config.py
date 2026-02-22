@@ -12,6 +12,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from btcbot.domain.anomalies import AnomalyCode
 from btcbot.domain.symbols import canonical_symbol
 from btcbot.domain.universe_models import UniverseKnobs
+from btcbot.obs.process_role import ProcessRole, coerce_process_role
 
 
 class Settings(BaseSettings):
@@ -106,6 +107,10 @@ class Settings(BaseSettings):
     )
 
     state_db_path: str = Field(default="btcbot_state.db", alias="STATE_DB_PATH")
+    process_role: str = Field(
+        default=ProcessRole.MONITOR.value,
+        validation_alias=AliasChoices("APP_ROLE", "PROCESS_ROLE"),
+    )
     state_db_strict_lock: bool = Field(default=True, alias="STATE_DB_STRICT_LOCK")
     dry_run_try_balance: float = Field(default=1000.0, alias="DRY_RUN_TRY_BALANCE")
     max_orders_per_cycle: int = Field(default=2, alias="MAX_ORDERS_PER_CYCLE")
@@ -583,6 +588,12 @@ class Settings(BaseSettings):
         if isinstance(warn_value, Decimal) and value < warn_value:
             raise ValueError("PNL_DIVERGENCE_TRY_ERROR must be >= PNL_DIVERGENCE_TRY_WARN")
         return value
+
+    @field_validator("process_role", mode="before")
+    def validate_process_role(cls, value: object) -> str:
+        if value is None:
+            return ProcessRole.MONITOR.value
+        return coerce_process_role(str(value)).value
 
     @field_validator("market_data_mode")
     def validate_market_data_mode(cls, value: str) -> str:

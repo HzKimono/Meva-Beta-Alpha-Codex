@@ -22,6 +22,7 @@ from btcbot.domain.risk_mode_codec import dump_risk_mode
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.logging_context import with_cycle_context
 from btcbot.obs.metrics import observe_histogram, set_gauge
+from btcbot.obs.process_role import coerce_process_role
 from btcbot.planning_kernel import ExecutionPort, Plan, PlanningKernel
 from btcbot.services.adaptation_service import AdaptationService
 from btcbot.services.exchange_factory import build_exchange_stage4
@@ -173,6 +174,7 @@ class Stage7CycleRunner:
     ) -> int:
         now = now_utc.astimezone(UTC)
         collector = MetricsCollector()
+        process_role = coerce_process_role(getattr(settings, "process_role", None)).value
         collector.set("run_id", run_id)
         collector.set("ts", now.isoformat())
 
@@ -956,12 +958,12 @@ class Stage7CycleRunner:
             observe_histogram(
                 "bot_cycle_latency_ms",
                 float(run_metrics.get("cycle_total_ms", 0) or 0),
-                labels={"process_role": "MONITOR", "mode_final": stage7_risk_decision.mode.value},
+                labels={"process_role": process_role, "mode_final": final_risk_mode.value},
             )
             set_gauge(
                 "bot_killswitch_enabled",
                 1 if bool(settings.kill_switch) else 0,
-                labels={"process_role": "MONITOR"},
+                labels={"process_role": process_role},
             )
             if enable_adaptation:
                 param_change = adaptation_service.evaluate_and_apply(

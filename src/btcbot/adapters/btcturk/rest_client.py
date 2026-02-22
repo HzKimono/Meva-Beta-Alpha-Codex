@@ -17,6 +17,7 @@ from btcbot.adapters.btcturk.rate_limit import AsyncTokenBucket
 from btcbot.adapters.btcturk.retry import RetryDecision, async_retry, compute_delay
 from btcbot.domain.models import ExchangeError
 from btcbot.obs.metrics import inc_counter
+from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
 from btcbot.observability import get_instrumentation
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class BtcturkRestClient:
         reliability: RestReliabilityConfig | None = None,
         operation_policy: OrderOperationPolicy | None = None,
         client: httpx.AsyncClient | None = None,
+        process_role: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -93,6 +95,7 @@ class BtcturkRestClient:
         self.metrics = metrics
         self.reliability = reliability or RestReliabilityConfig()
         self.operation_policy = operation_policy or OrderOperationPolicy()
+        self.process_role = coerce_process_role(process_role or get_process_role_from_env().value).value
         timeout = httpx.Timeout(
             connect=self.reliability.connect_timeout_seconds,
             read=self.reliability.read_timeout_seconds,
@@ -212,7 +215,7 @@ class BtcturkRestClient:
                 labels={
                     "exchange": "btcturk",
                     "endpoint": path,
-                    "process_role": "LIVE",
+                    "process_role": self.process_role,
                 },
             )
             raise self._to_exchange_error(exc, method=method, path=path) from exc

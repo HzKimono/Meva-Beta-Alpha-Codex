@@ -24,6 +24,7 @@ from btcbot.config import Settings
 from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.logging_context import with_logging_context
 from btcbot.logging_utils import setup_logging
+from btcbot.obs.logging import set_base_context
 from btcbot.observability import (
     configure_instrumentation,
     flush_instrumentation,
@@ -410,6 +411,7 @@ def main() -> int:
             prometheus_port=int(getattr(settings, "observability_prometheus_port", 9464)),
         )
     settings = _apply_effective_universe(settings)
+    set_base_context(process_role=settings.process_role, state_db_path=settings.state_db_path)
 
     if args.command in {"run", "stage4-run"}:
         _print_effective_side_effects_state(

@@ -28,6 +28,7 @@ from btcbot.domain.stage4 import (
 from btcbot.domain.strategy_core import OrderBookSummary, PositionSummary
 from btcbot.observability_decisions import emit_decision
 from btcbot.obs.metrics import observe_histogram, set_gauge
+from btcbot.obs.process_role import coerce_process_role
 from btcbot.planning_kernel import ExecutionPort, Plan
 from btcbot.services import metrics_service
 from btcbot.services.account_snapshot_service import AccountSnapshotService
@@ -125,6 +126,8 @@ class Stage4CycleRunner:
                     self.norm(symbol): Decimal(str(score))
                     for symbol, score in selection.scores.items()
                 }
+
+        process_role = coerce_process_role(getattr(settings, "process_role", None)).value
 
         envelope = {
             "cycle_id": cycle_id,
@@ -743,12 +746,12 @@ class Stage4CycleRunner:
             observe_histogram(
                 "bot_cycle_latency_ms",
                 updated_cycle_duration_ms,
-                labels={"process_role": "LIVE", "mode_final": final_mode.value},
+                labels={"process_role": process_role, "mode_final": final_mode.value},
             )
             set_gauge(
                 "bot_killswitch_enabled",
                 1 if bool(settings.kill_switch) else 0,
-                labels={"process_role": "LIVE"},
+                labels={"process_role": process_role},
             )
             updated_anomalies = anomaly_detector.detect(
                 market_data_age_seconds={
