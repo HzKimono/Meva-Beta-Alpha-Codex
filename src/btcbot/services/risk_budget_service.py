@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from btcbot.accounting.models import PortfolioAccountingState
+from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
+from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position
 from btcbot.observability_decisions import emit_decision
 from btcbot.risk.budget import RiskBudgetPolicy, RiskBudgetView
@@ -58,10 +61,12 @@ class RiskBudgetService:
         self,
         state_store: StateStore,
         *,
+        settings: Settings | None = None,
         now_provider: Callable[[], datetime] | None = None,
         budget_policy: RiskBudgetPolicy | None = None,
     ) -> None:
         self.state_store = state_store
+        self.settings = settings or Settings()
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
         self.budget_policy = budget_policy or RiskBudgetPolicy()
 
@@ -322,12 +327,51 @@ class RiskBudgetService:
             slippage_try=Decimal("0"),
             symbols={},
         )
+
+        signal_lookback = max(
+            self.settings.stage7_max_consecutive_losses,
+            self.settings.stage7_vol_lookback,
+        )
+        pnl_snapshots: list[PnLSnapshot] = []
+        list_recent = getattr(self.state_store, "list_pnl_snapshots_recent", None)
+        if callable(list_recent):
+            try:
+                pnl_snapshots = list_recent(signal_lookback)
+            except Exception:
+                logger.exception("risk_budget_signal_fetch_failed")
+        consecutive_loss_streak = self.compute_consecutive_loss_streak(
+            pnl_snapshots,
+            lookback=self.settings.stage7_max_consecutive_losses,
+        )
+        volatility_regime, computed_vol = self.compute_volatility_regime(
+            pnl_snapshots,
+            lookback=self.settings.stage7_vol_lookback,
+            low_threshold=self.settings.stage7_vol_low_threshold,
+            high_threshold=self.settings.stage7_vol_high_threshold,
+        )
+
         budget_view = self.budget_policy.evaluate(
             accounting=accounting,
             peak_equity_try=peak_equity,
             realized_pnl_today_try=realized_today_try,
-            consecutive_loss_streak=0,
-            volatility_regime="normal",
+            consecutive_loss_streak=consecutive_loss_streak,
+            volatility_regime=volatility_regime,
+        )
+        logger.info(
+            "risk_budget_computed_signals",
+            extra={
+                "extra": {
+                    "loss_streak": consecutive_loss_streak,
+                    "volatility_regime": volatility_regime,
+                    "computed_vol_value": computed_vol,
+                    "vol_lookback": self.settings.stage7_vol_lookback,
+                    "loss_lookback": self.settings.stage7_max_consecutive_losses,
+                    "snapshot_count": len(pnl_snapshots),
+                    "mode": mode.value,
+                    "prev_mode": prev_mode.value if prev_mode else None,
+                    "block_reason": reasons,
+                }
+            },
         )
         budget_multiplier = budget_view.position_sizing_multiplier
         if mode == Mode.OBSERVE_ONLY:
@@ -443,3 +487,49 @@ class RiskBudgetService:
             notional = abs(position.qty * mark)
             largest = max(largest, notional)
         return largest / equity_try
+
+    @staticmethod
+    def compute_consecutive_loss_streak(snapshots_desc: list[PnLSnapshot], *, lookback: int) -> int:
+        if lookback <= 0 or not snapshots_desc:
+            return 0
+        streak = 0
+        for snapshot in snapshots_desc[:lookback]:
+            if snapshot.realized_today_try < 0:
+                streak += 1
+                continue
+            break
+        return streak
+
+    @staticmethod
+    def compute_volatility_regime(
+        snapshots_desc: list[PnLSnapshot],
+        *,
+        lookback: int,
+        low_threshold: Decimal,
+        high_threshold: Decimal,
+    ) -> tuple[str, float | None]:
+        if lookback < 2:
+            return "normal", None
+        equities = [
+            float(snapshot.total_equity_try)
+            for snapshot in reversed(snapshots_desc[:lookback])
+            if snapshot.total_equity_try > 0
+        ]
+        if len(equities) < 6:
+            return "normal", None
+
+        returns = [math.log(curr / prev) for prev, curr in zip(equities, equities[1:], strict=False)]
+        if len(returns) < 5:
+            return "normal", None
+
+        mean = sum(returns) / len(returns)
+        variance = sum((ret - mean) ** 2 for ret in returns) / len(returns)
+        vol = round(math.sqrt(variance), 8)
+        low = float(low_threshold)
+        high = float(high_threshold)
+
+        if vol <= low:
+            return "low", vol
+        if vol >= high:
+            return "high", vol
+        return "normal", vol

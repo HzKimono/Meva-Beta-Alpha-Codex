@@ -177,6 +177,12 @@ class Settings(BaseSettings):
         alias="STAGE7_MAX_SPREAD_BPS",
     )
     stage7_vol_lookback: int = Field(default=20, alias="STAGE7_VOL_LOOKBACK")
+    stage7_vol_low_threshold: Decimal = Field(
+        default=Decimal("0.0025"), alias="STAGE7_VOL_LOW_THRESHOLD"
+    )
+    stage7_vol_high_threshold: Decimal = Field(
+        default=Decimal("0.02"), alias="STAGE7_VOL_HIGH_THRESHOLD"
+    )
     stage7_score_weights: dict[str, float] | None = Field(
         default=None, alias="STAGE7_SCORE_WEIGHTS"
     )
@@ -651,6 +657,8 @@ class Settings(BaseSettings):
     @field_validator(
         "stage7_min_quote_volume_try",
         "stage7_max_spread_bps",
+        "stage7_vol_low_threshold",
+        "stage7_vol_high_threshold",
         "stage7_order_offset_bps",
         "stage7_rules_fallback_tick_size",
         "stage7_rules_fallback_lot_size",
@@ -794,6 +802,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "LIVE_TRADING=true requires BTCTURK_API_KEY and BTCTURK_API_SECRET"
                 )
+
+        if self.stage7_vol_low_threshold > self.stage7_vol_high_threshold:
+            raise ValueError(
+                "STAGE7_VOL_LOW_THRESHOLD must be <= STAGE7_VOL_HIGH_THRESHOLD"
+            )
 
         self.log_level = self.log_level.strip().upper()
         if self.log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
