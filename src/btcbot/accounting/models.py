@@ -6,16 +6,23 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from btcbot.domain.money_policy import DEFAULT_MONEY_POLICY, round_fee, round_qty
+from btcbot.domain.money_policy import (
+    DEFAULT_MONEY_POLICY,
+    MoneyMathPolicy,
+    round_qty,
+    round_quote,
+)
 
-def quantize_money(value: Decimal) -> Decimal:
-    """Centralized quote/fee normalization to avoid execution/accounting drift."""
+def quantize_money(value: Decimal, policy: MoneyMathPolicy | None = None) -> Decimal:
+    """Centralized quote normalization to avoid execution/accounting drift."""
 
-    return round_fee(value, DEFAULT_MONEY_POLICY)
+    effective_policy = policy or DEFAULT_MONEY_POLICY
+    return round_quote(value, effective_policy)
 
 
-def quantize_qty(value: Decimal) -> Decimal:
-    return round_qty(value, DEFAULT_MONEY_POLICY)
+def quantize_qty(value: Decimal, policy: MoneyMathPolicy | None = None) -> Decimal:
+    effective_policy = policy or DEFAULT_MONEY_POLICY
+    return round_qty(value, effective_policy)
 
 
 class AccountingEventType(StrEnum):

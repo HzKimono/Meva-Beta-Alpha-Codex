@@ -56,7 +56,10 @@ def test_fee_rounding_consistency() -> None:
     fee_rate = Decimal("0.001")
 
     fee_path_a = round_fee(price * qty * fee_rate, policy)
-    fee_path_b = round_quote(round_price(Decimal("100.019"), policy) * round_qty(Decimal("0.123456"), policy) * fee_rate, policy)
+    fee_path_b = round_fee(
+        round_price(Decimal("100.019"), policy) * round_qty(Decimal("0.123456"), policy) * fee_rate,
+        policy,
+    )
     assert fee_path_a == fee_path_b
 
 
@@ -73,10 +76,11 @@ def test_pnl_drift_epsilon() -> None:
         _event("f3", ts, None, "0", None, fee="0.157516500"),
     ]
 
-    state = apply_events(LedgerState(), events)
-    ledger_realized = compute_realized_pnl(state)
+    policy_resolver = lambda symbol: policy
+    state = apply_events(LedgerState(), events, policy_resolver=policy_resolver)
+    ledger_realized = compute_realized_pnl(state, policy_resolver=policy_resolver)
     ledger_fees = state.fees_by_currency.get("TRY", Decimal("0"))
-    ledger_net = round_fee(ledger_realized - ledger_fees, policy)
+    ledger_net = round_quote(ledger_realized - ledger_fees, policy)
 
     buy_1_qty = round_qty(Decimal("1.23456"), policy)
     buy_1_price = round_price(Decimal("100.019"), policy)
@@ -89,17 +93,15 @@ def test_pnl_drift_epsilon() -> None:
     rem = round_qty(sell_qty - matched_1, policy)
     matched_2 = min(rem, buy_2_qty)
 
-    direct_realized = round_fee(
+    direct_realized = round_quote(
         (sell_price - buy_1_price) * matched_1 + (sell_price - buy_2_price) * matched_2,
         policy,
     )
     direct_fees = round_fee(
-        round_fee(Decimal("0.123456789"), policy)
-        + round_fee(Decimal("0.076543219"), policy)
-        + round_fee(Decimal("0.157516500"), policy),
+        Decimal("0.123456789") + Decimal("0.076543219") + Decimal("0.157516500"),
         policy,
     )
-    direct_net = round_fee(direct_realized - direct_fees, policy)
+    direct_net = round_quote(direct_realized - direct_fees, policy)
 
     assert abs(ledger_net - direct_net) <= policy.epsilon
 
