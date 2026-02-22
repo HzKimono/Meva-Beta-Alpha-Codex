@@ -2526,6 +2526,57 @@ def test_main_rejects_empty_state_db_path(monkeypatch) -> None:
         cli.main()
 
 
+def test_main_emits_single_startup_log(monkeypatch, caplog) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+        process_role = "MONITOR"
+        live_trading = False
+        kill_switch = True
+        safe_mode = False
+        state_db_path = "/tmp/health_monitor.db"
+
+    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **_kwargs: None)
+    monkeypatch.setattr(cli, "_apply_effective_universe", lambda settings: settings)
+    monkeypatch.setattr(cli, "run_health", lambda _settings: 0)
+    monkeypatch.setattr(sys, "argv", ["btcbot", "health"])
+
+    caplog.set_level("INFO")
+    assert cli.main() == 0
+
+    startup_logs = [record for record in caplog.records if record.getMessage() == "startup"]
+    assert len(startup_logs) == 1
+
+
+def test_main_doctor_runs_without_state_db_path(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+        process_role = "MONITOR"
+        live_trading = False
+        kill_switch = True
+        safe_mode = False
+        state_db_path = ""
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_doctor(*, settings, db_path, dataset_path, json_output):
+        del settings, dataset_path, json_output
+        captured["db_path"] = db_path
+        return 0
+
+    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **_kwargs: None)
+    monkeypatch.setattr(cli, "_apply_effective_universe", lambda settings: settings)
+    monkeypatch.delenv("STATE_DB_PATH", raising=False)
+    monkeypatch.setattr(cli, "run_doctor", _fake_run_doctor)
+    monkeypatch.setattr(sys, "argv", ["btcbot", "doctor", "--json"])
+
+    assert cli.main() == 0
+    assert captured["db_path"] is None
+
+
 def test_help_text_env_file_warns_dotenv_forbidden(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["btcbot", "--help"])
 

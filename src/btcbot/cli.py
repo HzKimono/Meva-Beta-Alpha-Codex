@@ -548,7 +548,7 @@ def main() -> int:
         resolved_db_path = _resolve_stage7_db_path(
             "doctor",
             db_path=args.db,
-            settings_db_path=settings.state_db_path,
+            settings_db_path=None,
             silent=True,
         )
         return run_doctor(
@@ -589,7 +589,6 @@ def _command_touches_state_db(command_name: str) -> bool:
         "stage7-backtest-export",
         "stage7-backtest-report",
         "stage7-db-count",
-        "doctor",
     }
 
 
