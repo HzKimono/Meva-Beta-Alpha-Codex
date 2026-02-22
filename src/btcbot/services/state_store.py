@@ -21,6 +21,7 @@ from btcbot.domain.ledger import LedgerEvent, LedgerEventType, ensure_utc
 from btcbot.domain.models import Order, OrderStatus, normalize_symbol
 from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.order_state import OrderEvent, Stage7Order
+from btcbot.domain.risk_mode_codec import dump_risk_mode, parse_risk_mode
 from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
@@ -1220,7 +1221,7 @@ class StateStore:
             (
                 cycle_id,
                 ensure_utc(decision.decided_at).isoformat(),
-                decision.mode.value,
+                dump_risk_mode(decision.mode),
                 json.dumps(decision.reasons, sort_keys=True),
                 (
                     ensure_utc(decision.cooldown_until).isoformat()
@@ -1252,7 +1253,7 @@ class StateStore:
             else None
         )
         return Stage7RiskDecision(
-            mode=RiskMode(str(row["mode"])),
+            mode=(parse_risk_mode(str(row["mode"])) or RiskMode.NORMAL),
             reasons=json.loads(str(row["reasons_json"])),
             cooldown_until=cooldown,
             decided_at=datetime.fromisoformat(str(row["decided_at"])),
@@ -2820,10 +2821,10 @@ class StateStore:
             ).fetchone()
         if row is None:
             return Mode.NORMAL
-        try:
-            return Mode(str(row["mode"]))
-        except ValueError:
+        risk_mode = parse_risk_mode(str(row["mode"]))
+        if risk_mode is None:
             return Mode.NORMAL
+        return risk_mode
 
     # Stage 4 helpers
     def client_order_id_exists(self, client_order_id: str) -> bool:
@@ -4165,7 +4166,7 @@ class StateStore:
     def upsert_risk_state_current(
         self,
         *,
-        mode: str,
+        risk_mode: Mode,
         peak_equity_try: Decimal,
         peak_equity_date: str,
         fees_try_today: Decimal,
@@ -4174,7 +4175,7 @@ class StateStore:
         with self._connect() as conn:
             self._upsert_risk_state_current_with_conn(
                 conn=conn,
-                mode=mode,
+                risk_mode=risk_mode,
                 peak_equity_try=peak_equity_try,
                 peak_equity_date=peak_equity_date,
                 fees_try_today=fees_try_today,
@@ -4186,14 +4187,14 @@ class StateStore:
         *,
         cycle_id: str,
         decision: RiskDecision,
-        prev_mode: str | None,
+        prev_mode: Mode | None,
     ) -> None:
         with self._connect() as conn:
             self._save_risk_decision_with_conn(
                 conn=conn,
                 cycle_id=cycle_id,
                 decision=decision,
-                prev_mode=prev_mode,
+                prev_mode=dump_risk_mode(prev_mode),
             )
 
     def persist_risk(
@@ -4201,8 +4202,8 @@ class StateStore:
         *,
         cycle_id: str,
         decision: RiskDecision,
-        prev_mode: str | None,
-        mode: Mode,
+        prev_mode: Mode | None,
+        risk_mode: Mode,
         peak_equity_try: Decimal,
         peak_day: str,
         fees_today_try: Decimal,
@@ -4213,11 +4214,11 @@ class StateStore:
                 conn=conn,
                 cycle_id=cycle_id,
                 decision=decision,
-                prev_mode=prev_mode,
+                prev_mode=dump_risk_mode(prev_mode),
             )
             self._upsert_risk_state_current_with_conn(
                 conn=conn,
-                mode=mode.value,
+                risk_mode=risk_mode,
                 peak_equity_try=peak_equity_try,
                 peak_equity_date=peak_day,
                 fees_try_today=fees_today_try,
@@ -4250,7 +4251,7 @@ class StateStore:
             (
                 cycle_id,
                 decision.decided_at.isoformat(),
-                decision.mode.value,
+                dump_risk_mode(decision.mode),
                 json.dumps(decision.reasons, sort_keys=True),
                 self._serialize_risk_payload(decision.signals),
                 self._serialize_risk_payload(decision.limits),
@@ -4263,7 +4264,7 @@ class StateStore:
         self,
         *,
         conn: sqlite3.Connection,
-        mode: str,
+        risk_mode: Mode,
         peak_equity_try: Decimal,
         peak_equity_date: str,
         fees_try_today: Decimal,
@@ -4284,7 +4285,7 @@ class StateStore:
                 updated_at=excluded.updated_at
             """,
             (
-                mode,
+                dump_risk_mode(risk_mode),
                 str(peak_equity_try),
                 peak_equity_date,
                 str(fees_try_today),
@@ -4304,7 +4305,7 @@ class StateStore:
             if isinstance(obj, datetime):
                 return obj.isoformat()
             if isinstance(obj, Mode):
-                return obj.value
+                return dump_risk_mode(obj) or ""
             raise TypeError(
                 f"Unsupported type for risk payload serialization: {type(obj).__name__}"
             )
