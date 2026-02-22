@@ -4123,7 +4123,7 @@ class StateStore:
                     cycle_id,
                     ts_start,
                     ts_end,
-                    mode,
+                    dump_risk_mode(risk_mode),
                     fills_count,
                     orders_submitted,
                     orders_canceled,
