@@ -26,6 +26,7 @@ from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
+from btcbot.persistence.uow import UnitOfWorkFactory
 
 if TYPE_CHECKING:
     from btcbot.domain.anomalies import AnomalyEvent
@@ -210,6 +211,7 @@ class StateStore:
         self.db_path = db_path
         self.db_path_abs = str(Path(db_path).expanduser().resolve())
         self.strict_instance_lock = strict_instance_lock
+        self._uow_factory = UnitOfWorkFactory(db_path)
         scope_digest = hashlib.sha256(self.db_path_abs.encode("utf-8")).hexdigest()[:12]
         self.instance_id = f"{os.getpid()}-{scope_digest}"
         self._transaction_conn: sqlite3.Connection | None = None
@@ -2828,12 +2830,9 @@ class StateStore:
 
     # Stage 4 helpers
     def client_order_id_exists(self, client_order_id: str) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM stage4_orders WHERE client_order_id = ?",
-                (client_order_id,),
-            ).fetchone()
-        return row is not None
+        # TODO(P2-2): remove facade once all callers migrate to UnitOfWork directly.
+        with self._uow_factory() as uow:
+            return uow.orders.client_order_id_exists(client_order_id)
 
     def stage4_has_unknown_orders(self) -> bool:
         with self._connect() as conn:
@@ -3846,25 +3845,9 @@ class StateStore:
         decisions: list[str],
         envelope: dict[str, object] | None = None,
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO cycle_audit(cycle_id, ts, counts_json, decisions_json, envelope_json)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(cycle_id) DO UPDATE SET
-                    ts=excluded.ts,
-                    counts_json=excluded.counts_json,
-                    decisions_json=excluded.decisions_json,
-                    envelope_json=excluded.envelope_json
-                """,
-                (
-                    cycle_id,
-                    datetime.now(UTC).isoformat(),
-                    json.dumps(counts, sort_keys=True),
-                    json.dumps(decisions, sort_keys=True),
-                    (json.dumps(envelope, sort_keys=True) if envelope is not None else None),
-                ),
-            )
+        # TODO(P2-2): remove facade once all callers migrate to UnitOfWork directly.
+        with self._uow_factory() as uow:
+            uow.trace.record_cycle_audit(cycle_id, counts, decisions, envelope)
 
     def save_account_snapshot(self, *, cycle_id: str, snapshot: AccountSnapshot) -> None:
         holdings_payload = {
@@ -4096,72 +4079,28 @@ class StateStore:
         pnl_json: str,
         meta_json: str,
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO cycle_metrics(
-                    cycle_id, ts_start, ts_end, mode, fills_count, orders_submitted,
-                    orders_canceled, rejects_count, fill_rate, avg_time_to_fill,
-                    slippage_bps_avg, fees_json, pnl_json, meta_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(cycle_id) DO UPDATE SET
-                    ts_start=excluded.ts_start,
-                    ts_end=excluded.ts_end,
-                    mode=excluded.mode,
-                    fills_count=excluded.fills_count,
-                    orders_submitted=excluded.orders_submitted,
-                    orders_canceled=excluded.orders_canceled,
-                    rejects_count=excluded.rejects_count,
-                    fill_rate=excluded.fill_rate,
-                    avg_time_to_fill=excluded.avg_time_to_fill,
-                    slippage_bps_avg=excluded.slippage_bps_avg,
-                    fees_json=excluded.fees_json,
-                    pnl_json=excluded.pnl_json,
-                    meta_json=excluded.meta_json
-                """,
-                (
-                    cycle_id,
-                    ts_start,
-                    ts_end,
-                    dump_risk_mode(risk_mode),
-                    fills_count,
-                    orders_submitted,
-                    orders_canceled,
-                    rejects_count,
-                    fill_rate,
-                    avg_time_to_fill,
-                    slippage_bps_avg,
-                    fees_json,
-                    pnl_json,
-                    meta_json,
-                ),
+        # TODO(P2-2): remove facade once all callers migrate to UnitOfWork directly.
+        with self._uow_factory() as uow:
+            uow.metrics.save_cycle_metrics(
+                cycle_id=cycle_id,
+                ts_start=ts_start,
+                ts_end=ts_end,
+                mode=mode,
+                fills_count=fills_count,
+                orders_submitted=orders_submitted,
+                orders_canceled=orders_canceled,
+                rejects_count=rejects_count,
+                fill_rate=fill_rate,
+                avg_time_to_fill=avg_time_to_fill,
+                slippage_bps_avg=slippage_bps_avg,
+                fees_json=fees_json,
+                pnl_json=pnl_json,
+                meta_json=meta_json,
             )
 
     def get_risk_state_current(self) -> dict[str, str | None]:
-        with self._connect() as conn:
-            self._ensure_risk_budget_schema(conn)
-            row = conn.execute("SELECT * FROM risk_state_current WHERE state_id = 1").fetchone()
-        if row is None:
-            return {
-                "current_mode": None,
-                "peak_equity_try": None,
-                "peak_equity_date": None,
-                "fees_try_today": None,
-                "fees_day": None,
-            }
-        return {
-            "current_mode": (str(row["current_mode"]) if row["current_mode"] is not None else None),
-            "peak_equity_try": (
-                str(row["peak_equity_try"]) if row["peak_equity_try"] is not None else None
-            ),
-            "peak_equity_date": (
-                str(row["peak_equity_date"]) if row["peak_equity_date"] is not None else None
-            ),
-            "fees_try_today": (
-                str(row["fees_try_today"]) if row["fees_try_today"] is not None else None
-            ),
-            "fees_day": str(row["fees_day"]) if row["fees_day"] is not None else None,
-        }
+        with self._uow_factory() as uow:
+            return uow.risk.get_risk_state_current()
 
     def upsert_risk_state_current(
         self,
@@ -4172,9 +4111,8 @@ class StateStore:
         fees_try_today: Decimal,
         fees_day: str,
     ) -> None:
-        with self._connect() as conn:
-            self._upsert_risk_state_current_with_conn(
-                conn=conn,
+        with self._uow_factory() as uow:
+            uow.risk.upsert_risk_state_current(
                 risk_mode=risk_mode,
                 peak_equity_try=peak_equity_try,
                 peak_equity_date=peak_equity_date,
@@ -4189,13 +4127,8 @@ class StateStore:
         decision: RiskDecision,
         prev_mode: Mode | None,
     ) -> None:
-        with self._connect() as conn:
-            self._save_risk_decision_with_conn(
-                conn=conn,
-                cycle_id=cycle_id,
-                decision=decision,
-                prev_mode=dump_risk_mode(prev_mode),
-            )
+        with self._uow_factory() as uow:
+            uow.risk.save_risk_decision(cycle_id=cycle_id, decision=decision, prev_mode=prev_mode)
 
     def persist_risk(
         self,
@@ -4209,15 +4142,9 @@ class StateStore:
         fees_today_try: Decimal,
         fees_day: str,
     ) -> None:
-        with self.transaction() as conn:
-            self._save_risk_decision_with_conn(
-                conn=conn,
-                cycle_id=cycle_id,
-                decision=decision,
-                prev_mode=dump_risk_mode(prev_mode),
-            )
-            self._upsert_risk_state_current_with_conn(
-                conn=conn,
+        with self._uow_factory() as uow:
+            uow.risk.save_risk_decision(cycle_id=cycle_id, decision=decision, prev_mode=prev_mode)
+            uow.risk.upsert_risk_state_current(
                 risk_mode=risk_mode,
                 peak_equity_try=peak_equity_try,
                 peak_equity_date=peak_day,
