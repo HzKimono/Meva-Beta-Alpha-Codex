@@ -1197,7 +1197,6 @@ def test_main_run_lock_failure_happens_before_instrumentation(monkeypatch) -> No
         log_level = "INFO"
         process_role = "MONITOR"
         state_db_path = "/tmp/monitor_state.db"
-        state_db_path = "./btcbot_state.db"
 
     called = {"configured": False}
 
@@ -1552,7 +1551,13 @@ def test_format_effective_side_effects_banner_blocked_includes_inputs_and_reason
 
 def test_main_emits_effective_state_banner_once_for_loop_run(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["btcbot", "run", "--loop", "--max-cycles", "2"])
-    monkeypatch.setattr(cli, "_load_settings", lambda env_file=None: Settings(DRY_RUN=True))
+    monkeypatch.setattr(
+        cli,
+        "_load_settings",
+        lambda env_file=None: Settings(
+            DRY_RUN=True, STATE_DB_PATH="/tmp/monitor_state.db", PROCESS_ROLE="MONITOR"
+        ),
+    )
     monkeypatch.setattr(cli, "setup_logging", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(cli, "configure_instrumentation", lambda **_kwargs: None)
     monkeypatch.setattr(cli, "_apply_effective_universe", lambda settings: settings)

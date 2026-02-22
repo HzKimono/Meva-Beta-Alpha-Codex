@@ -408,12 +408,7 @@ def main() -> int:
     args = parser.parse_args()
     require_no_dotenv(args.env_file)
     settings = _load_settings(args.env_file)
-    db_path = normalize_db_path(settings.state_db_path)
-    if hasattr(settings, "model_copy"):
-        settings = settings.model_copy(update={"state_db_path": str(db_path)})
-    else:
-        settings.state_db_path = str(db_path)
-    enforce_role_db_convention(settings.process_role, settings.live_trading, db_path)
+    settings = _prepare_runtime(settings, command_name=args.command, env_file_arg=args.env_file)
     setup_logging(settings.log_level)
     if args.command != "run":
         configure_instrumentation(
@@ -579,6 +574,56 @@ def main() -> int:
         )
 
     return 1
+
+
+def _command_touches_state_db(command_name: str) -> bool:
+    return command_name in {
+        "run",
+        "canary",
+        "stage4-run",
+        "stage7-run",
+        "health",
+        "stage7-report",
+        "stage7-export",
+        "stage7-alerts",
+        "stage7-backtest-export",
+        "stage7-backtest-report",
+        "stage7-db-count",
+        "doctor",
+    }
+
+
+def _prepare_runtime(
+    settings: Settings, *, command_name: str, env_file_arg: str | None
+) -> Settings:
+    require_no_dotenv(env_file_arg)
+    if _command_touches_state_db(command_name):
+        db_path = normalize_db_path(settings.state_db_path)
+        if hasattr(settings, "model_copy"):
+            settings = settings.model_copy(update={"state_db_path": str(db_path)})
+        else:
+            settings.state_db_path = str(db_path)
+        enforce_role_db_convention(
+            getattr(settings, "process_role", ""),
+            bool(getattr(settings, "live_trading", False)),
+            db_path,
+        )
+
+    logger.info(
+        "startup",
+        extra={
+            "extra": {
+                "role": getattr(settings, "process_role", ""),
+                "db_path": getattr(settings, "state_db_path", ""),
+                "live_trading": bool(getattr(settings, "live_trading", False)),
+                "safe_mode": bool(getattr(settings, "safe_mode", False)),
+                "kill_switch": bool(getattr(settings, "kill_switch", False)),
+                "pid": os.getpid(),
+                "command": command_name,
+            }
+        },
+    )
+    return settings
 
 
 def _load_settings(env_file: str | None) -> Settings:
