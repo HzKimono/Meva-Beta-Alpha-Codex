@@ -41,6 +41,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 addopts = "-q"
+log_cli = false
+log_level = "WARNING"
 
 [tool.ruff]
 line-length = 100
