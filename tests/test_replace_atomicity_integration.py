@@ -49,6 +49,7 @@ class FakeExchange:
 @dataclass
 class Txn:
     state: str
+    last_error: str | None = None
 
 
 class FakeStateStore:
@@ -131,13 +132,17 @@ class FakeStateStore:
         old = self.orders[client_order_id]
         self.orders[client_order_id] = Order(**{**old.__dict__, "status": "canceled"})
 
+    def get_replace_tx(self, replace_tx_id: str):
+        return self.replace.get(replace_tx_id)
+
     def upsert_replace_tx(self, *, replace_tx_id: str, symbol: str, side: str, old_client_order_ids: list[str], new_client_order_id: str, state: str, last_error: str | None = None) -> None:
-        del symbol, side, old_client_order_ids, new_client_order_id, last_error
-        self.replace[replace_tx_id] = Txn(state=state)
+        del symbol, side, old_client_order_ids, new_client_order_id
+        current = self.replace.get(replace_tx_id)
+        if current is None:
+            self.replace[replace_tx_id] = Txn(state=state, last_error=last_error)
 
     def update_replace_tx_state(self, *, replace_tx_id: str, state: str, last_error: str | None = None) -> None:
-        del last_error
-        self.replace[replace_tx_id] = Txn(state=state)
+        self.replace[replace_tx_id] = Txn(state=state, last_error=last_error)
 
 
 def _service(exchange: FakeExchange, state_store: FakeStateStore) -> ExecutionService:

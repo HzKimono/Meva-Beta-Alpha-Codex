@@ -36,3 +36,6 @@ Metrics:
 - `replace_tx_committed`
 - `replace_tx_blocked_unknown`
 - `replace_tx_failed`
+
+
+Note: `SUBMIT_CONFIRMED` means client-side submit succeeded (acknowledged/simulated); it does not imply the order is filled.

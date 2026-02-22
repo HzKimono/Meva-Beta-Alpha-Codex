@@ -90,6 +90,31 @@ UNKNOWN_ESCALATION_ATTEMPTS = 8
 logger = logging.getLogger(__name__)
 
 
+
+REPLACE_TX_STATE_ORDER = {
+    "INIT": 0,
+    "CANCEL_SENT": 1,
+    "CANCEL_CONFIRMED": 2,
+    "SUBMIT_SENT": 3,
+    "SUBMIT_CONFIRMED": 4,
+}
+
+
+def _is_replace_tx_forward_transition(current_state: str, new_state: str) -> bool:
+    current_rank = REPLACE_TX_STATE_ORDER.get(current_state)
+    new_rank = REPLACE_TX_STATE_ORDER.get(new_state)
+    if current_rank is None or new_rank is None:
+        return current_state != new_state
+    return new_rank >= current_rank
+
+
+def _is_replace_tx_terminal(state: str) -> bool:
+    return state in {"SUBMIT_CONFIRMED", "FAILED"}
+
+
+def _is_replace_tx_retryable_open(state: str) -> bool:
+    return not _is_replace_tx_terminal(state)
+
 @dataclass(frozen=True)
 class SubmitDedupeDecision:
     should_dedupe: bool
@@ -1594,22 +1619,23 @@ class StateStore:
         replace_columns = {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(stage4_replace_transactions)")
         }
-        if "replace_tx_id" not in replace_columns:
-            conn.execute("DROP TABLE IF EXISTS stage4_replace_transactions")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS stage4_replace_transactions (
-                    replace_tx_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    old_client_order_ids_json TEXT NOT NULL,
-                    new_client_order_id TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    last_updated_at TEXT NOT NULL
-                )
-                """
+        required_replace_columns = {
+            "replace_tx_id",
+            "symbol",
+            "side",
+            "old_client_order_ids_json",
+            "new_client_order_id",
+            "state",
+            "last_error",
+            "created_at",
+            "last_updated_at",
+        }
+        missing_replace_columns = required_replace_columns.difference(replace_columns)
+        if missing_replace_columns:
+            missing = ",".join(sorted(missing_replace_columns))
+            raise RuntimeError(
+                f"Incompatible stage4_replace_transactions schema; missing columns: {missing}. "
+                "Refusing destructive migration."
             )
         conn.execute(
             """
@@ -3104,7 +3130,7 @@ class StateStore:
             ).fetchone()
         if row is None:
             return None
-        old_ids = self._safe_json_list(row["old_client_order_ids_json"], default=[])
+        old_ids = json.loads(str(row["old_client_order_ids_json"])) if row["old_client_order_ids_json"] else []
         return ReplaceTxRecord(
             replace_tx_id=str(row["replace_tx_id"]),
             symbol=str(row["symbol"]),
@@ -3130,30 +3156,50 @@ class StateStore:
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT state, last_error FROM stage4_replace_transactions WHERE replace_tx_id=?",
+                (replace_tx_id,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO stage4_replace_transactions(
+                        replace_tx_id, symbol, side, old_client_order_ids_json, new_client_order_id, state, last_error, created_at, last_updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        replace_tx_id,
+                        normalize_symbol(symbol),
+                        side,
+                        json.dumps(old_client_order_ids),
+                        new_client_order_id,
+                        state,
+                        last_error,
+                        now,
+                        now,
+                    ),
+                )
+                return
+
+            current_state = str(existing["state"])
+            current_error = str(existing["last_error"]) if existing["last_error"] else None
+            next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
+            next_error = last_error if next_state != current_state else current_error
             conn.execute(
                 """
-                INSERT INTO stage4_replace_transactions(
-                    replace_tx_id, symbol, side, old_client_order_ids_json, new_client_order_id, state, last_error, created_at, last_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(replace_tx_id) DO UPDATE SET
-                    symbol=excluded.symbol,
-                    side=excluded.side,
-                    old_client_order_ids_json=excluded.old_client_order_ids_json,
-                    new_client_order_id=excluded.new_client_order_id,
-                    state=excluded.state,
-                    last_error=excluded.last_error,
-                    last_updated_at=excluded.last_updated_at
+                UPDATE stage4_replace_transactions
+                SET symbol=?, side=?, old_client_order_ids_json=?, new_client_order_id=?, state=?, last_error=?, last_updated_at=?
+                WHERE replace_tx_id=?
                 """,
                 (
-                    replace_tx_id,
                     normalize_symbol(symbol),
                     side,
                     json.dumps(old_client_order_ids),
                     new_client_order_id,
-                    state,
-                    last_error,
+                    next_state,
+                    next_error,
                     now,
-                    now,
+                    replace_tx_id,
                 ),
             )
 
@@ -3164,14 +3210,25 @@ class StateStore:
         state: str,
         last_error: str | None = None,
     ) -> None:
+        now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT state, last_error FROM stage4_replace_transactions WHERE replace_tx_id=?",
+                (replace_tx_id,),
+            ).fetchone()
+            if existing is None:
+                return
+            current_state = str(existing["state"])
+            current_error = str(existing["last_error"]) if existing["last_error"] else None
+            next_state = state if _is_replace_tx_forward_transition(current_state, state) else current_state
+            next_error = last_error if last_error is not None else current_error
             conn.execute(
                 """
                 UPDATE stage4_replace_transactions
                 SET state=?, last_error=?, last_updated_at=?
                 WHERE replace_tx_id=?
                 """,
-                (state, last_error, datetime.now(UTC).isoformat(), replace_tx_id),
+                (next_state, next_error, now, replace_tx_id),
             )
 
     def list_open_replace_txs(self) -> list[ReplaceTxRecord]:
@@ -3179,13 +3236,13 @@ class StateStore:
             rows = conn.execute(
                 """
                 SELECT * FROM stage4_replace_transactions
-                WHERE state NOT IN ('SUBMIT_CONFIRMED', 'FAILED', 'BLOCKED_UNKNOWN', 'BLOCKED_RECONCILE')
+                WHERE state NOT IN ('SUBMIT_CONFIRMED', 'FAILED')
                 ORDER BY last_updated_at DESC
                 """
             ).fetchall()
         records: list[ReplaceTxRecord] = []
         for row in rows:
-            old_ids = self._safe_json_list(row["old_client_order_ids_json"], default=[])
+            old_ids = json.loads(str(row["old_client_order_ids_json"])) if row["old_client_order_ids_json"] else []
             records.append(
                 ReplaceTxRecord(
                     replace_tx_id=str(row["replace_tx_id"]),

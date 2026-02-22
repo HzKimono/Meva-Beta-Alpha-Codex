@@ -81,6 +81,21 @@ class ExecutionService:
                 rejected_min_notional += rej_min
 
         for group in replace_groups:
+            if sum(1 for a in actions if a.symbol == group.symbol and a.side == group.side and a.action_type == LifecycleActionType.SUBMIT and a.reason == "replace_submit") > 1:
+                self.instrumentation.counter("replace_multiple_submits_coalesced_total")
+                emit_decision(
+                    logger,
+                    {
+                        "decision_layer": "execution_stage4_replace",
+                        "reason_code": "replace_multiple_submits_coalesced",
+                        "action": "SUPPRESS",
+                        "payload": {
+                            "symbol": group.symbol,
+                            "side": group.side,
+                            "new_client_order_id": group.submit_action.client_order_id,
+                        },
+                    },
+                )
             s, c, sim, rej, rej_min = self._execute_replace_group(group=group, live_mode=live_mode)
             submitted += s
             canceled += c
@@ -117,13 +132,12 @@ class ExecutionService:
             submits = bucket["submit"]
             regular_actions.extend(bucket["other"])
             if cancels and submits:
-                regular_actions.extend(submits[1:])
                 replace_groups.append(
                     ReplaceGroup(
                         symbol=symbol,
                         side=side,
                         cancel_actions=tuple(cancels),
-                        submit_action=submits[0],
+                        submit_action=submits[-1],
                     )
                 )
             else:
@@ -149,15 +163,23 @@ class ExecutionService:
             self.instrumentation.counter("replace_tx_failed")
             return 0, 0, 0, 0, 0
 
-        self.state_store.upsert_replace_tx(
-            replace_tx_id=replace_tx_id,
-            symbol=group.symbol,
-            side=group.side,
-            old_client_order_ids=old_ids,
-            new_client_order_id=new_id,
-            state="INIT",
-        )
-        self.instrumentation.counter("replace_tx_started")
+        existing_tx = self.state_store.get_replace_tx(replace_tx_id)
+        if existing_tx is None:
+            self.state_store.upsert_replace_tx(
+                replace_tx_id=replace_tx_id,
+                symbol=group.symbol,
+                side=group.side,
+                old_client_order_ids=old_ids,
+                new_client_order_id=new_id,
+                state="INIT",
+            )
+            self.instrumentation.counter("replace_tx_started")
+            current_state = "INIT"
+        else:
+            current_state = existing_tx.state
+
+        if current_state in {"SUBMIT_CONFIRMED", "FAILED"}:
+            return 0, 0, 0, 0, 0
 
         if self.state_store.stage4_has_unknown_orders():
             self.state_store.update_replace_tx_state(
