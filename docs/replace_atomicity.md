@@ -1,36 +1,38 @@
-# Replace Atomicity Envelope (Stage 4)
-
-## Problem
-A logical replace (`old_order -> new_order`) used to run as two independent actions (`CANCEL` then `SUBMIT`). If cancel confirmation was delayed or uncertain, the submit could still happen and temporarily double-open risk.
+# Replace Atomicity Envelope (Stage4)
 
 ## Invariants
-1. A replace submit must carry `replace_for_client_order_id`.
-2. New replace submit is blocked while any unknown order freeze is active.
-3. New replace submit is blocked until the old order is terminal (`canceled`, `filled`, `rejected`, `unknown_closed`).
-4. Replace state is persisted in `stage4_replace_transactions` for replay/restart observability.
-5. Existing safety gates are unchanged: kill switch, live-arm, unknown freeze, dedupe/idempotency.
+- Replace actions are treated as a transaction by `(symbol, side)` group.
+- Replacement submit is **deferred** until old replace-cancel orders are confirmed closed from exchange open-orders view.
+- Unknown-order freeze blocks replace progression (`BLOCKED_UNKNOWN`).
+- Replace transaction is persisted with stable `replace_tx_id` so retries/cycles continue idempotently.
+- Existing kill-switch/live-arm/idempotency and submit/cancel safety gates remain active.
 
-## State machine
-`stage4_replace_transactions.status`:
+## Replace TX state machine
+`INIT -> CANCEL_SENT -> CANCEL_CONFIRMED -> SUBMIT_SENT -> SUBMIT_CONFIRMED`
 
-- `pending_cancel`: replace intent exists; old order not terminal yet.
-- `blocked_unknown`: global unknown-order freeze blocked progression.
-- `submitted`: replacement submit was executed (live or dry-run simulated).
+Blocked/error terminal states:
+- `BLOCKED_UNKNOWN`
+- `BLOCKED_RECONCILE`
+- `FAILED`
 
-Transitions:
-
-1. `replace_submit` arrives -> upsert transaction as `pending_cancel`.
-2. If unknown freeze active -> `blocked_unknown` and no submit.
-3. If old order not terminal -> stay `pending_cancel` and no submit.
-4. If old order terminal -> run submit path with existing idempotency + validation.
-5. On successful submit/simulated submit -> `submitted`.
+## Persistence
+`stage4_replace_transactions` stores:
+- `replace_tx_id`
+- `symbol`, `side`
+- `old_client_order_ids_json`
+- `new_client_order_id`
+- `state`, `last_error`
+- `created_at`, `last_updated_at`
 
 ## Observability
-Execution emits:
-- decision events (`replace_waiting_cancel_confirmation`, `replace_blocked_unknown_order_freeze`, `replace_committed`)
-- metrics counters/gauge:
-  - `stage4_replace_missing_linkage_total`
-  - `stage4_replace_blocked_unknown_total`
-  - `stage4_replace_waiting_cancel_total`
-  - `stage4_replace_committed_total`
-  - `stage4_replace_inflight`
+Decision events emitted per replace group:
+- `replace_deferred_unknown_order_freeze`
+- `replace_deferred_cancel_unconfirmed`
+- `replace_committed`
+
+Metrics:
+- `replace_tx_started`
+- `replace_tx_deferred`
+- `replace_tx_committed`
+- `replace_tx_blocked_unknown`
+- `replace_tx_failed`

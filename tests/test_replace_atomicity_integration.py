@@ -15,7 +15,8 @@ from btcbot.services.exchange_rules_service import ExchangeRulesService
 class FakeExchange:
     def __init__(self) -> None:
         self.submits: list[str] = []
-        self.cancels: list[str] = []
+        self.open_orders: list[Order] = []
+        self.uncertain_cancel = False
 
     def get_exchange_info(self) -> list[PairInfo]:
         return [
@@ -29,25 +30,31 @@ class FakeExchange:
             )
         ]
 
+    def list_open_orders(self, symbol: str) -> list[Order]:
+        del symbol
+        return list(self.open_orders)
+
     def submit_limit_order(self, symbol: str, side: str, price: Decimal, qty: Decimal, client_order_id: str) -> OrderAck:
         del symbol, side, price, qty
         self.submits.append(client_order_id)
         return OrderAck(exchange_order_id=f"ex-{client_order_id}", status="submitted")
 
-    def cancel_order_by_exchange_id(self, exchange_order_id: str) -> bool:
-        self.cancels.append(exchange_order_id)
+    def cancel_order_by_exchange_id(self, exchange_order_id: str):
+        del exchange_order_id
+        if self.uncertain_cancel:
+            raise TimeoutError("cancel-timeout")
         return True
 
 
 @dataclass
-class FakeReplaceTxn:
-    status: str
+class Txn:
+    state: str
 
 
 class FakeStateStore:
     def __init__(self) -> None:
         now = datetime.now(UTC)
-        self.orders: dict[str, Order] = {
+        self.orders = {
             "old": Order(
                 symbol="BTC_TRY",
                 side="buy",
@@ -62,7 +69,7 @@ class FakeStateStore:
                 mode="live",
             )
         }
-        self.replace: dict[str, FakeReplaceTxn] = {}
+        self.replace: dict[str, Txn] = {}
 
     def stage4_has_unknown_orders(self) -> bool:
         return False
@@ -70,8 +77,8 @@ class FakeStateStore:
     def stage4_unknown_client_order_ids(self) -> list[str]:
         return []
 
-    def stage4_submit_dedupe_status(self, *, internal_client_order_id: str, exchange_client_order_id: str):
-        del internal_client_order_id, exchange_client_order_id
+    def stage4_submit_dedupe_status(self, **kwargs):
+        del kwargs
 
         class Result:
             should_dedupe = False
@@ -92,21 +99,22 @@ class FakeStateStore:
     def record_stage4_order_error(self, *args, **kwargs):
         del args, kwargs
 
-    def record_stage4_order_submitted(self, *, symbol: str, client_order_id: str, exchange_client_id: str, exchange_order_id: str, side: str, price: Decimal, qty: Decimal, mode: str, status: str) -> None:
+    def record_stage4_order_submitted(self, **kwargs) -> None:
+        cid = kwargs["client_order_id"]
         now = datetime.now(UTC)
-        self.orders[client_order_id] = Order(
-            symbol=symbol,
-            side=side,
+        self.orders[cid] = Order(
+            symbol=kwargs["symbol"],
+            side=kwargs["side"],
             type="limit",
-            price=price,
-            qty=qty,
-            status=status,
+            price=kwargs["price"],
+            qty=kwargs["qty"],
+            status=kwargs["status"],
             created_at=now,
             updated_at=now,
-            exchange_order_id=exchange_order_id,
-            client_order_id=client_order_id,
-            exchange_client_id=exchange_client_id,
-            mode=mode,
+            exchange_order_id=kwargs["exchange_order_id"],
+            client_order_id=cid,
+            exchange_client_id=kwargs["exchange_client_id"],
+            mode=kwargs["mode"],
         )
 
     def is_order_terminal(self, client_order_id: str) -> bool:
@@ -116,22 +124,24 @@ class FakeStateStore:
         return self.orders.get(client_order_id)
 
     def record_stage4_order_cancel_requested(self, client_order_id: str) -> None:
-        order = self.orders[client_order_id]
-        self.orders[client_order_id] = Order(**{**order.__dict__, "status": "cancel_requested"})
+        old = self.orders[client_order_id]
+        self.orders[client_order_id] = Order(**{**old.__dict__, "status": "cancel_requested"})
 
     def record_stage4_order_canceled(self, client_order_id: str) -> None:
-        order = self.orders[client_order_id]
-        self.orders[client_order_id] = Order(**{**order.__dict__, "status": "canceled"})
+        old = self.orders[client_order_id]
+        self.orders[client_order_id] = Order(**{**old.__dict__, "status": "canceled"})
 
-    def upsert_stage4_replace_transaction(self, *, new_client_order_id: str, old_client_order_id: str, symbol: str, side: str, status: str, last_error: str | None = None) -> None:
-        del old_client_order_id, symbol, side, last_error
-        self.replace[new_client_order_id] = FakeReplaceTxn(status=status)
+    def upsert_replace_tx(self, *, replace_tx_id: str, symbol: str, side: str, old_client_order_ids: list[str], new_client_order_id: str, state: str, last_error: str | None = None) -> None:
+        del symbol, side, old_client_order_ids, new_client_order_id, last_error
+        self.replace[replace_tx_id] = Txn(state=state)
+
+    def update_replace_tx_state(self, *, replace_tx_id: str, state: str, last_error: str | None = None) -> None:
+        del last_error
+        self.replace[replace_tx_id] = Txn(state=state)
 
 
-def test_replace_flow_integration_with_fakes() -> None:
-    exchange = FakeExchange()
-    state_store = FakeStateStore()
-    svc = ExecutionService(
+def _service(exchange: FakeExchange, state_store: FakeStateStore) -> ExecutionService:
+    return ExecutionService(
         exchange=exchange,
         state_store=state_store,  # type: ignore[arg-type]
         settings=Settings(
@@ -146,7 +156,9 @@ def test_replace_flow_integration_with_fakes() -> None:
         rules_service=ExchangeRulesService(exchange),
     )
 
-    actions = [
+
+def _replace_actions() -> list[LifecycleAction]:
+    return [
         LifecycleAction(
             action_type=LifecycleActionType.CANCEL,
             symbol="BTC_TRY",
@@ -169,10 +181,32 @@ def test_replace_flow_integration_with_fakes() -> None:
         ),
     ]
 
-    report = svc.execute_with_report(actions)
 
-    assert report.canceled == 1
-    assert report.submitted == 1
-    assert state_store.orders["old"].status == "canceled"
-    assert state_store.replace["new"].status == "submitted"
-    assert len(exchange.submits) == 1
+def test_replace_defers_until_open_order_disappears() -> None:
+    exchange = FakeExchange()
+    state_store = FakeStateStore()
+    exchange.open_orders = [state_store.orders["old"]]
+    svc = _service(exchange, state_store)
+
+    first = svc.execute_with_report(_replace_actions())
+    assert first.submitted == 0
+
+    exchange.open_orders = []
+    second = svc.execute_with_report(_replace_actions())
+    assert second.submitted == 1
+
+
+def test_uncertain_cancel_defers_then_reconcile_allows_submit() -> None:
+    exchange = FakeExchange()
+    state_store = FakeStateStore()
+    exchange.uncertain_cancel = True
+    exchange.open_orders = [state_store.orders["old"]]
+    svc = _service(exchange, state_store)
+
+    first = svc.execute_with_report(_replace_actions())
+    assert first.submitted == 0
+
+    exchange.uncertain_cancel = False
+    exchange.open_orders = []
+    second = svc.execute_with_report(_replace_actions())
+    assert second.submitted == 1

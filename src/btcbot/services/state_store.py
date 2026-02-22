@@ -128,6 +128,19 @@ class Stage4ReplaceTransaction:
     updated_at: datetime
 
 
+@dataclass(frozen=True)
+class ReplaceTxRecord:
+    replace_tx_id: str
+    symbol: str
+    side: str
+    old_client_order_ids: tuple[str, ...]
+    new_client_order_id: str
+    state: str
+    last_error: str | None
+    created_at: datetime
+    last_updated_at: datetime
+
+
 
 
 def _serialize_decimal_for_db(value: Decimal, *, field_name: str) -> str:
@@ -1566,21 +1579,42 @@ class StateStore:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS stage4_replace_transactions (
-                new_client_order_id TEXT PRIMARY KEY,
-                old_client_order_id TEXT NOT NULL,
+                replace_tx_id TEXT PRIMARY KEY,
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
-                status TEXT NOT NULL,
+                old_client_order_ids_json TEXT NOT NULL,
+                new_client_order_id TEXT NOT NULL,
+                state TEXT NOT NULL,
                 last_error TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                last_updated_at TEXT NOT NULL
             )
             """
         )
+        replace_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage4_replace_transactions)")
+        }
+        if "replace_tx_id" not in replace_columns:
+            conn.execute("DROP TABLE IF EXISTS stage4_replace_transactions")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stage4_replace_transactions (
+                    replace_tx_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    old_client_order_ids_json TEXT NOT NULL,
+                    new_client_order_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    last_updated_at TEXT NOT NULL
+                )
+                """
+            )
         conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_stage4_replace_transactions_old
-            ON stage4_replace_transactions(old_client_order_id)
+            CREATE INDEX IF NOT EXISTS idx_stage4_replace_transactions_state
+            ON stage4_replace_transactions(state)
             """
         )
         conn.execute(
@@ -3062,33 +3096,36 @@ class StateStore:
             status="rejected",
         )
 
-    def get_stage4_replace_transaction(self, new_client_order_id: str) -> Stage4ReplaceTransaction | None:
+    def get_replace_tx(self, replace_tx_id: str) -> ReplaceTxRecord | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM stage4_replace_transactions WHERE new_client_order_id=?",
-                (new_client_order_id,),
+                "SELECT * FROM stage4_replace_transactions WHERE replace_tx_id=?",
+                (replace_tx_id,),
             ).fetchone()
         if row is None:
             return None
-        return Stage4ReplaceTransaction(
-            new_client_order_id=str(row["new_client_order_id"]),
-            old_client_order_id=str(row["old_client_order_id"]),
+        old_ids = self._safe_json_list(row["old_client_order_ids_json"], default=[])
+        return ReplaceTxRecord(
+            replace_tx_id=str(row["replace_tx_id"]),
             symbol=str(row["symbol"]),
             side=str(row["side"]),
-            status=str(row["status"]),
+            old_client_order_ids=tuple(str(item) for item in old_ids),
+            new_client_order_id=str(row["new_client_order_id"]),
+            state=str(row["state"]),
             last_error=(str(row["last_error"]) if row["last_error"] else None),
             created_at=datetime.fromisoformat(str(row["created_at"])),
-            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            last_updated_at=datetime.fromisoformat(str(row["last_updated_at"])),
         )
 
-    def upsert_stage4_replace_transaction(
+    def upsert_replace_tx(
         self,
         *,
-        new_client_order_id: str,
-        old_client_order_id: str,
+        replace_tx_id: str,
         symbol: str,
         side: str,
-        status: str,
+        old_client_order_ids: list[str],
+        new_client_order_id: str,
+        state: str,
         last_error: str | None = None,
     ) -> None:
         now = datetime.now(UTC).isoformat()
@@ -3096,27 +3133,73 @@ class StateStore:
             conn.execute(
                 """
                 INSERT INTO stage4_replace_transactions(
-                    new_client_order_id, old_client_order_id, symbol, side, status, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(new_client_order_id) DO UPDATE SET
-                    old_client_order_id=excluded.old_client_order_id,
+                    replace_tx_id, symbol, side, old_client_order_ids_json, new_client_order_id, state, last_error, created_at, last_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(replace_tx_id) DO UPDATE SET
                     symbol=excluded.symbol,
                     side=excluded.side,
-                    status=excluded.status,
+                    old_client_order_ids_json=excluded.old_client_order_ids_json,
+                    new_client_order_id=excluded.new_client_order_id,
+                    state=excluded.state,
                     last_error=excluded.last_error,
-                    updated_at=excluded.updated_at
+                    last_updated_at=excluded.last_updated_at
                 """,
                 (
-                    new_client_order_id,
-                    old_client_order_id,
+                    replace_tx_id,
                     normalize_symbol(symbol),
                     side,
-                    status,
+                    json.dumps(old_client_order_ids),
+                    new_client_order_id,
+                    state,
                     last_error,
                     now,
                     now,
                 ),
             )
+
+    def update_replace_tx_state(
+        self,
+        *,
+        replace_tx_id: str,
+        state: str,
+        last_error: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE stage4_replace_transactions
+                SET state=?, last_error=?, last_updated_at=?
+                WHERE replace_tx_id=?
+                """,
+                (state, last_error, datetime.now(UTC).isoformat(), replace_tx_id),
+            )
+
+    def list_open_replace_txs(self) -> list[ReplaceTxRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM stage4_replace_transactions
+                WHERE state NOT IN ('SUBMIT_CONFIRMED', 'FAILED', 'BLOCKED_UNKNOWN', 'BLOCKED_RECONCILE')
+                ORDER BY last_updated_at DESC
+                """
+            ).fetchall()
+        records: list[ReplaceTxRecord] = []
+        for row in rows:
+            old_ids = self._safe_json_list(row["old_client_order_ids_json"], default=[])
+            records.append(
+                ReplaceTxRecord(
+                    replace_tx_id=str(row["replace_tx_id"]),
+                    symbol=str(row["symbol"]),
+                    side=str(row["side"]),
+                    old_client_order_ids=tuple(str(item) for item in old_ids),
+                    new_client_order_id=str(row["new_client_order_id"]),
+                    state=str(row["state"]),
+                    last_error=(str(row["last_error"]) if row["last_error"] else None),
+                    created_at=datetime.fromisoformat(str(row["created_at"])),
+                    last_updated_at=datetime.fromisoformat(str(row["last_updated_at"])),
+                )
+            )
+        return records
 
     def update_stage4_order_exchange_id(self, client_order_id: str, exchange_order_id: str) -> None:
         with self._connect() as conn:

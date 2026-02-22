@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
-from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Quantizer
+from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Order, Quantizer
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.client_order_id_service import build_exchange_client_id
@@ -14,6 +15,8 @@ from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
+
+TERMINAL_OLD_ORDER_STATUSES = {"canceled", "filled", "rejected", "unknown_closed"}
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,14 @@ class ExecutionReport:
     simulated: int
     rejected: int
     rejected_min_notional: int
+
+
+@dataclass(frozen=True)
+class ReplaceGroup:
+    symbol: str
+    side: str
+    cancel_actions: tuple[LifecycleAction, ...]
+    submit_action: LifecycleAction
 
 
 class ExecutionService:
@@ -56,17 +67,23 @@ class ExecutionService:
         live_mode = self.settings.is_live_trading_enabled() and not self.settings.dry_run
         submitted = canceled = simulated = rejected = rejected_min_notional = 0
 
-        for action in actions:
+        regular_actions, replace_groups = self._extract_replace_groups(actions)
+
+        for action in regular_actions:
             if action.action_type == LifecycleActionType.CANCEL:
                 canceled += self._execute_cancel_action(action=action, live_mode=live_mode)
                 continue
-            if action.action_type != LifecycleActionType.SUBMIT:
-                continue
-            if self._is_replace_submit(action):
-                s, sim, rej, rej_min = self._execute_replace_submit(action=action, live_mode=live_mode)
-            else:
+            if action.action_type == LifecycleActionType.SUBMIT:
                 s, sim, rej, rej_min = self._execute_submit_action(action=action, live_mode=live_mode)
+                submitted += s
+                simulated += sim
+                rejected += rej
+                rejected_min_notional += rej_min
+
+        for group in replace_groups:
+            s, c, sim, rej, rej_min = self._execute_replace_group(group=group, live_mode=live_mode)
             submitted += s
+            canceled += c
             simulated += sim
             rejected += rej
             rejected_min_notional += rej_min
@@ -79,6 +96,188 @@ class ExecutionService:
             rejected=rejected,
             rejected_min_notional=rejected_min_notional,
         )
+
+    @staticmethod
+    def _extract_replace_groups(actions: list[LifecycleAction]) -> tuple[list[LifecycleAction], list[ReplaceGroup]]:
+        grouped: dict[tuple[str, str], dict[str, list[LifecycleAction]]] = {}
+        for action in actions:
+            key = (action.symbol, action.side)
+            bucket = grouped.setdefault(key, {"cancel": [], "submit": [], "other": []})
+            if action.action_type == LifecycleActionType.CANCEL and action.reason == "replace_cancel":
+                bucket["cancel"].append(action)
+            elif action.action_type == LifecycleActionType.SUBMIT and action.reason == "replace_submit":
+                bucket["submit"].append(action)
+            else:
+                bucket["other"].append(action)
+
+        regular_actions: list[LifecycleAction] = []
+        replace_groups: list[ReplaceGroup] = []
+        for (symbol, side), bucket in grouped.items():
+            cancels = bucket["cancel"]
+            submits = bucket["submit"]
+            regular_actions.extend(bucket["other"])
+            if cancels and submits:
+                regular_actions.extend(submits[1:])
+                replace_groups.append(
+                    ReplaceGroup(
+                        symbol=symbol,
+                        side=side,
+                        cancel_actions=tuple(cancels),
+                        submit_action=submits[0],
+                    )
+                )
+            else:
+                regular_actions.extend(cancels)
+                regular_actions.extend(submits)
+        return regular_actions, replace_groups
+
+    @staticmethod
+    def _replace_tx_id(group: ReplaceGroup) -> str:
+        old_ids = sorted([a.client_order_id or "missing" for a in group.cancel_actions])
+        payload = "|".join(
+            [group.symbol, group.side, group.submit_action.client_order_id or "missing", *old_ids]
+        )
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+        return f"rpl:{digest}"
+
+    def _execute_replace_group(self, *, group: ReplaceGroup, live_mode: bool) -> tuple[int, int, int, int, int]:
+        submitted = canceled = simulated = rejected = rejected_min = 0
+        replace_tx_id = self._replace_tx_id(group)
+        old_ids = [a.client_order_id for a in group.cancel_actions if a.client_order_id]
+        new_id = group.submit_action.client_order_id
+        if not new_id or not old_ids:
+            self.instrumentation.counter("replace_tx_failed")
+            return 0, 0, 0, 0, 0
+
+        self.state_store.upsert_replace_tx(
+            replace_tx_id=replace_tx_id,
+            symbol=group.symbol,
+            side=group.side,
+            old_client_order_ids=old_ids,
+            new_client_order_id=new_id,
+            state="INIT",
+        )
+        self.instrumentation.counter("replace_tx_started")
+
+        if self.state_store.stage4_has_unknown_orders():
+            self.state_store.update_replace_tx_state(
+                replace_tx_id=replace_tx_id,
+                state="BLOCKED_UNKNOWN",
+                last_error="unknown_order_freeze",
+            )
+            self.instrumentation.counter("replace_tx_blocked_unknown")
+            emit_decision(
+                logger,
+                {
+                    "decision_layer": "execution_stage4_replace",
+                    "reason_code": "replace_deferred_unknown_order_freeze",
+                    "action": "SUPPRESS",
+                    "payload": {
+                        "replace_tx_id": replace_tx_id,
+                        "symbol": group.symbol,
+                        "side": group.side,
+                        "old_client_order_ids": old_ids,
+                        "new_client_order_id": new_id,
+                    },
+                },
+            )
+            return 0, 0, 0, 0, 0
+
+        for cancel_action in group.cancel_actions:
+            canceled += self._execute_cancel_action(action=cancel_action, live_mode=live_mode)
+        self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="CANCEL_SENT")
+
+        confirmed, reason = self._confirm_replace_cancels(group)
+        if not confirmed:
+            self.state_store.update_replace_tx_state(
+                replace_tx_id=replace_tx_id,
+                state="BLOCKED_RECONCILE",
+                last_error=reason,
+            )
+            self.instrumentation.counter("replace_tx_deferred")
+            emit_decision(
+                logger,
+                {
+                    "decision_layer": "execution_stage4_replace",
+                    "reason_code": "replace_deferred_cancel_unconfirmed",
+                    "action": "SUPPRESS",
+                    "payload": {
+                        "replace_tx_id": replace_tx_id,
+                        "symbol": group.symbol,
+                        "side": group.side,
+                        "old_client_order_ids": old_ids,
+                        "new_client_order_id": new_id,
+                        "detail": reason,
+                    },
+                },
+            )
+            return 0, canceled, 0, 0, 0
+
+        self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="CANCEL_CONFIRMED")
+        self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="SUBMIT_SENT")
+        submit_action = LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol=group.submit_action.symbol,
+            side=group.submit_action.side,
+            price=group.submit_action.price,
+            qty=group.submit_action.qty,
+            reason=group.submit_action.reason,
+            client_order_id=group.submit_action.client_order_id,
+        )
+        s, sim, rej, rej_min = self._execute_submit_action(action=submit_action, live_mode=live_mode)
+        submitted += s
+        simulated += sim
+        rejected += rej
+        rejected_min += rej_min
+
+        if submitted or simulated:
+            self.state_store.update_replace_tx_state(replace_tx_id=replace_tx_id, state="SUBMIT_CONFIRMED")
+            self.instrumentation.counter("replace_tx_committed")
+            emit_decision(
+                logger,
+                {
+                    "decision_layer": "execution_stage4_replace",
+                    "reason_code": "replace_committed",
+                    "action": "ALLOW",
+                    "payload": {
+                        "replace_tx_id": replace_tx_id,
+                        "symbol": group.symbol,
+                        "side": group.side,
+                        "old_client_order_ids": old_ids,
+                        "new_client_order_id": new_id,
+                    },
+                },
+            )
+        elif rejected:
+            self.state_store.update_replace_tx_state(
+                replace_tx_id=replace_tx_id,
+                state="FAILED",
+                last_error="submit_rejected",
+            )
+            self.instrumentation.counter("replace_tx_failed")
+
+        return submitted, canceled, simulated, rejected, rejected_min
+
+    def _confirm_replace_cancels(self, group: ReplaceGroup) -> tuple[bool, str]:
+        try:
+            open_orders = self.exchange.list_open_orders(group.symbol)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"reconcile_failed:{type(exc).__name__}"
+
+        open_client_ids = {o.client_order_id for o in open_orders if o.client_order_id}
+        for cancel_action in group.cancel_actions:
+            old_id = cancel_action.client_order_id
+            if not old_id:
+                continue
+            if old_id in open_client_ids:
+                return False, f"still_open:{old_id}"
+            local_order = self.state_store.get_stage4_order_by_client_id(old_id)
+            if local_order is None:
+                continue
+            if local_order.status not in TERMINAL_OLD_ORDER_STATUSES and old_id in open_client_ids:
+                return False, f"local_non_terminal:{old_id}:{local_order.status}"
+
+        return True, "confirmed"
 
     def _execute_submit_action(self, *, action: LifecycleAction, live_mode: bool) -> tuple[int, int, int, int]:
         if self.state_store.stage4_has_unknown_orders():
@@ -101,20 +300,7 @@ class ExecutionService:
             exchange_client_order_id=exchange_client_id,
         )
         if dedupe_decision.should_dedupe:
-            logger.info(
-                "submit_deduped",
-                extra={
-                    "extra": {
-                        "internal_client_order_id": action.client_order_id,
-                        "exchange_client_order_id": exchange_client_id,
-                        "dedupe_key": dedupe_decision.dedupe_key,
-                        "reason": dedupe_decision.reason,
-                        "age_s": dedupe_decision.age_seconds,
-                        "related_order_id": dedupe_decision.related_order_id,
-                        "related_status": dedupe_decision.related_status,
-                    }
-                },
-            )
+            logger.info("submit_deduped")
             return 0, 0, 0, 0
 
         resolve_boundary = getattr(self.rules_service, "resolve_boundary", None)
@@ -149,28 +335,10 @@ class ExecutionService:
 
         q_price = Quantizer.quantize_price(action.price, rules)
         q_qty = Quantizer.quantize_qty(action.qty, rules)
-        order_notional_try = q_price * q_qty
         if not Quantizer.validate_min_notional(q_price, q_qty, rules):
-            reason = (
-                "min_notional_violation:"
-                f"notional_try={order_notional_try}:"
-                f"required_try={rules.min_notional_try}"
-            )
-            logger.info(
-                "submit_rejected_min_notional",
-                extra={
-                    "extra": {
-                        "symbol": action.symbol,
-                        "side": action.side,
-                        "client_order_id": action.client_order_id,
-                        "order_notional_try": str(order_notional_try),
-                        "required_min_notional_try": str(rules.min_notional_try),
-                    }
-                },
-            )
             self.state_store.record_stage4_order_rejected(
                 action.client_order_id,
-                reason,
+                "min_notional_violation",
                 symbol=action.symbol,
                 side=action.side,
                 price=q_price,
@@ -210,16 +378,6 @@ class ExecutionService:
             return 0, 0, 0, 0
 
         ack = ack_or_uncertain
-        logger.info(
-            "submit_acknowledged",
-            extra={
-                "extra": {
-                    "internal_client_order_id": action.client_order_id,
-                    "exchange_client_order_id": exchange_client_id,
-                    "exchange_order_id": ack.exchange_order_id,
-                }
-            },
-        )
         self.state_store.record_stage4_order_submitted(
             symbol=action.symbol,
             client_order_id=action.client_order_id,
@@ -274,125 +432,4 @@ class ExecutionService:
                 status="unknown",
             )
             return 0
-        if canceled_or_uncertain:
-            self.state_store.record_stage4_order_canceled(client_id)
-            return 1
-        return 0
-
-    def _is_replace_submit(self, action: LifecycleAction) -> bool:
-        return action.reason == "replace_submit" or action.replace_for_client_order_id is not None
-
-    def _execute_replace_submit(self, *, action: LifecycleAction, live_mode: bool) -> tuple[int, int, int, int]:
-        if not action.client_order_id or not action.replace_for_client_order_id:
-            self.state_store.record_stage4_order_error(
-                client_order_id=action.client_order_id or "missing-client-order-id",
-                reason="replace_missing_linkage",
-                symbol=action.symbol,
-                side=action.side,
-                price=action.price,
-                qty=action.qty,
-                mode=("live" if live_mode else "dry_run"),
-                status="error",
-            )
-            self.instrumentation.counter("stage4_replace_missing_linkage_total")
-            return 0, 0, 0, 0
-
-        replace_client_id = action.client_order_id
-        old_client_id = action.replace_for_client_order_id
-        self.state_store.upsert_stage4_replace_transaction(
-            new_client_order_id=replace_client_id,
-            old_client_order_id=old_client_id,
-            symbol=action.symbol,
-            side=action.side,
-            status="pending_cancel",
-        )
-
-        unknown_orders = self.state_store.stage4_unknown_client_order_ids()
-        if unknown_orders:
-            self.state_store.upsert_stage4_replace_transaction(
-                new_client_order_id=replace_client_id,
-                old_client_order_id=old_client_id,
-                symbol=action.symbol,
-                side=action.side,
-                status="blocked_unknown",
-                last_error="unknown_order_freeze",
-            )
-            self.instrumentation.counter("stage4_replace_blocked_unknown_total")
-            emit_decision(
-                logger,
-                {
-                    "decision_layer": "execution_stage4_replace",
-                    "reason_code": "replace_blocked_unknown_order_freeze",
-                    "action": "SUPPRESS",
-                    "payload": {
-                        "replace_client_order_id": replace_client_id,
-                        "replace_for_client_order_id": old_client_id,
-                        "unknown_orders": unknown_orders,
-                    },
-                },
-            )
-            return 0, 0, 0, 0
-
-        old_order = self.state_store.get_stage4_order_by_client_id(old_client_id)
-        if old_order is not None and old_order.status not in {"canceled", "filled", "rejected", "unknown_closed"}:
-            self.state_store.upsert_stage4_replace_transaction(
-                new_client_order_id=replace_client_id,
-                old_client_order_id=old_client_id,
-                symbol=action.symbol,
-                side=action.side,
-                status="pending_cancel",
-                last_error=f"cancel_not_confirmed:{old_order.status}",
-            )
-            self.instrumentation.counter("stage4_replace_waiting_cancel_total")
-            self.instrumentation.gauge("stage4_replace_inflight", 1.0)
-            emit_decision(
-                logger,
-                {
-                    "decision_layer": "execution_stage4_replace",
-                    "reason_code": "replace_waiting_cancel_confirmation",
-                    "action": "SUPPRESS",
-                    "payload": {
-                        "replace_client_order_id": replace_client_id,
-                        "replace_for_client_order_id": old_client_id,
-                        "old_status": old_order.status,
-                    },
-                },
-            )
-            return 0, 0, 0, 0
-
-        submitted, simulated, rejected, rejected_min = self._execute_submit_action(
-            action=LifecycleAction(
-                action_type=LifecycleActionType.SUBMIT,
-                symbol=action.symbol,
-                side=action.side,
-                price=action.price,
-                qty=action.qty,
-                reason="replace_submit_atomic",
-                client_order_id=replace_client_id,
-            ),
-            live_mode=live_mode,
-        )
-        if submitted or simulated:
-            self.state_store.upsert_stage4_replace_transaction(
-                new_client_order_id=replace_client_id,
-                old_client_order_id=old_client_id,
-                symbol=action.symbol,
-                side=action.side,
-                status="submitted",
-                last_error=None,
-            )
-            self.instrumentation.counter("stage4_replace_committed_total")
-            self.instrumentation.gauge("stage4_replace_inflight", 0.0)
-            emit_decision(
-                logger,
-                {
-                    "decision_layer": "execution_stage4_replace",
-                    "reason_code": "replace_committed",
-                    "action": "ALLOW",
-                    "payload": {
-                        "replace_client_order_id": replace_client_id,
-                        "replace_for_client_order_id": old_client_id,
-                    },
-                },
-            )
-        return submitted, simulated, rejected, rejected_min
+        return 1 if canceled_or_uncertain else 0
