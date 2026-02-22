@@ -1326,6 +1326,7 @@ def run_cycle(
                     live_trading_enabled=settings.live_trading,
                     live_trading_ack=settings.live_trading_ack == "I_UNDERSTAND",
                     safe_mode=effective_safe_mode,
+                    spot_sell_requires_inventory=settings.spot_sell_requires_inventory,
                 )
                 accounting_service = AccountingService(
                     exchange=exchange, state_store=resolved_state_store
