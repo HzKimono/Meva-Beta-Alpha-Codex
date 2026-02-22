@@ -12,6 +12,8 @@ from time import monotonic
 from typing import Protocol
 
 from btcbot.adapters.btcturk.instrumentation import MetricsSink
+from btcbot.obs.metrics import inc_counter
+from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
 from btcbot.observability import get_instrumentation
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,7 @@ class BtcturkWsClient:
         idle_reconnect_seconds: float = 30.0,
         heartbeat_interval_seconds: float | None = None,
         heartbeat_payload_factory: Callable[[], str] | None = None,
+        process_role: str | None = None,
     ) -> None:
         self.url = url
         self.subscription_factory = subscription_factory
@@ -63,6 +66,7 @@ class BtcturkWsClient:
         self.max_backoff_seconds = max_backoff_seconds
         self.idle_reconnect_seconds = idle_reconnect_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.process_role = coerce_process_role(process_role or get_process_role_from_env().value).value
         self.heartbeat_payload_factory = heartbeat_payload_factory
 
         self._stop = asyncio.Event()
@@ -97,6 +101,7 @@ class BtcturkWsClient:
                         raise err
             except Exception:
                 self.metrics.inc("ws_drops")
+                inc_counter("bot_ws_disconnects_total", labels={"exchange": "btcturk", "process_role": self.process_role})
                 logger.exception("BTCTurk websocket disconnected")
             finally:
                 await self._cancel_tasks()
