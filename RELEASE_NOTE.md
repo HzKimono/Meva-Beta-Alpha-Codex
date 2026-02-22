@@ -1,3 +1,0 @@
-## Stage4 Replace Atomicity Closeout
-
-Stage4 replace execution is now finalized as a persisted cancel-confirm-then-submit transaction envelope with strict safety defaults. Replace transactions are resume-safe across cycles, blocked states remain retryable, and terminal completion semantics are explicit (`SUBMIT_CONFIRMED`/`FAILED`). The closeout also standardizes replace metrics naming (`*_total`), adds metadata-mismatch protection for deterministic `replace_tx_id`, and improves operator-facing decision signals/runbook guidance. Backward compatibility is preserved for strategy/allocation behavior; this is an execution-layer safety hardening.
