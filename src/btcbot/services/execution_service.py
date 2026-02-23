@@ -25,6 +25,7 @@ from btcbot.domain.models import (
     SubmitOrderResult,
     fallback_match_by_fields,
     make_client_order_id,
+    map_exchange_ack_to_submit_result,
     match_order_by_client_id,
     map_exchange_ack_to_submit_result,
     normalize_symbol,

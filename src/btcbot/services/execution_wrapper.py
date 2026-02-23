@@ -68,7 +68,9 @@ class ExecutionWrapper:
             return place_fn(**self._filter_kwargs_for_callable(place_fn, place_payload))
 
         available = [
-            name for name in ("submit_limit_order", "place_limit_order") if callable(getattr(self.exchange, name, None))
+            name
+            for name in ("submit_limit_order", "place_limit_order")
+            if callable(getattr(self.exchange, name, None))
         ]
         raise RuntimeError(
             "No compatible submit method on exchange "
@@ -100,8 +102,7 @@ class ExecutionWrapper:
         except (TypeError, ValueError):
             return payload
         accepts_var_kwargs = any(
-            param.kind == inspect.Parameter.VAR_KEYWORD
-            for param in signature.parameters.values()
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
         )
         if accepts_var_kwargs:
             return payload
