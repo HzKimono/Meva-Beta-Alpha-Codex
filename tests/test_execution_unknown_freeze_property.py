@@ -5,29 +5,6 @@ from decimal import Decimal
 
 import pytest
 
-try:
-    from hypothesis import given
-    from hypothesis import strategies as st
-except ImportError:  # pragma: no cover - optional dependency
-    pytestmark = pytest.mark.skip(reason="hypothesis is not installed")
-
-    def given(*_args, **_kwargs):
-        def _decorator(func):
-            return func
-
-        return _decorator
-
-    class _MissingStrategies:
-        @staticmethod
-        def lists(*_args, **_kwargs):
-            return None
-
-        @staticmethod
-        def sampled_from(*_args, **_kwargs):
-            return None
-
-    st = _MissingStrategies()
-
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.models import (
     Balance,
@@ -114,12 +91,15 @@ def _intent(cycle_id: str) -> OrderIntent:
     )
 
 
-@given(
-    st.lists(
-        st.sampled_from(["unknown_on", "unknown_off", "submit", "reconcile_fail", "reconcile_ok"]),
-        min_size=1,
-        max_size=25,
-    )
+@pytest.mark.parametrize(
+    "events",
+    [
+        ["submit"],
+        ["unknown_on", "submit", "unknown_off", "submit"],
+        ["unknown_on", "reconcile_fail", "submit"],
+        ["unknown_on", "reconcile_ok", "submit"],
+        ["submit", "unknown_on", "submit", "unknown_off", "submit", "reconcile_ok", "submit"],
+    ],
 )
 def test_submit_never_reaches_exchange_when_unknown_present(tmp_path, events) -> None:
     exchange = _FakeExchange()

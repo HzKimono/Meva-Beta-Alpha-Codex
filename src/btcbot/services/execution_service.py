@@ -22,8 +22,10 @@ from btcbot.domain.models import (
     OrderStatus,
     ReconcileOutcome,
     ReconcileStatus,
+    SubmitOrderResult,
     fallback_match_by_fields,
     make_client_order_id,
+    map_exchange_ack_to_submit_result,
     match_order_by_client_id,
     normalize_symbol,
     quantize_price,
@@ -1579,6 +1581,20 @@ class ExecutionService:
                     updated_at=now_utc,
                 )
 
+            if isinstance(order, SubmitOrderResult):
+                now_utc = datetime.now(UTC)
+                order = Order(
+                    order_id=order.order_id,
+                    client_order_id=client_order_id,
+                    symbol=symbol_normalized,
+                    side=intent.side,
+                    price=price,
+                    quantity=quantity,
+                    status=OrderStatus.OPEN,
+                    created_at=now_utc,
+                    updated_at=now_utc,
+                )
+
             self.state_store.save_order(
                 order,
                 idempotency_key=(idempotency_key),
@@ -1643,7 +1659,7 @@ class ExecutionService:
         client_order_id: str,
         cycle_id: str,
         intent_id: str | None,
-    ) -> Order:
+    ) -> SubmitOrderResult | UncertainResult:
         self._sync_unknown_registry_from_store(allow_clear=False)
         self._emit_unknown_freeze_metrics()
         get_instrumentation().counter("submit_gate_enforced_total", 1)
@@ -1675,13 +1691,16 @@ class ExecutionService:
             )
             raise SubmitBlockedDueToUnknownError("submit blocked while unknown orders exist")
 
-        return self.execution_wrapper.submit_limit_order(
+        submit_result = self.execution_wrapper.submit_limit_order(
             symbol=symbol,
             side=side,
             price=price,
             quantity=quantity,
             client_order_id=client_order_id,
         )
+        if isinstance(submit_result, UncertainResult):
+            return submit_result
+        return map_exchange_ack_to_submit_result(submit_result)
 
     def _recover_stale_pending_place_order(
         self,

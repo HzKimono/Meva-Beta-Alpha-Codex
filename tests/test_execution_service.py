@@ -124,6 +124,40 @@ class EmptyBalanceExchange(RecordingExchange):
         return []
 
 
+class AckOnlyExchange(RecordingExchange):
+    def submit_limit_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        price: float,
+        quantity: float,
+        client_order_id: str | None = None,
+    ):
+        self.placed.append((symbol, side, price, quantity, client_order_id or ""))
+        return type("OrderAck", (), {"exchange_order_id": "ack-200-1"})()
+
+
+class KnownRejectExchange(RecordingExchange):
+    def submit_limit_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        price: float,
+        quantity: float,
+        client_order_id: str | None = None,
+    ):
+        del symbol, side, price, quantity, client_order_id
+        raise ExchangeError(
+            "submit rejected",
+            status_code=400,
+            error_code=1123,
+            error_message="FAILED_MIN_TOTAL_AMOUNT",
+            request_method="POST",
+            request_path="/api/v1/order",
+            response_body='{"code":1123,"message":"FAILED_MIN_TOTAL_AMOUNT"}',
+        )
+
+
 def _intent(cycle_id: str = "c1") -> OrderIntent:
     return OrderIntent(
         symbol="BTC_TRY",
@@ -1552,3 +1586,45 @@ def test_cycle_balance_cache_is_bounded(tmp_path) -> None:
     assert len(service._cycle_balance_cache) == 10
     assert "cycle-0" not in service._cycle_balance_cache
     assert "cycle-19" in service._cycle_balance_cache
+
+
+def test_submit_ack_mapped_to_domain_result_with_order_id(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = AckOnlyExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents([_intent(cycle_id="ack-map")])
+
+    assert placed == 1
+    saved = store.get_order("ack-200-1")
+    assert saved is not None
+    assert saved.order_id == "ack-200-1"
+
+
+def test_known_min_total_reject_does_not_crash_pipeline(tmp_path, caplog) -> None:
+    caplog.set_level("ERROR")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = KnownRejectExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    placed = service.execute_intents([_intent(cycle_id="known-reject")])
+
+    assert placed == 0
+    assert service.last_execute_summary["orders_failed_exchange"] == 1
+    assert any(r.message == "exchange_submit_failed" for r in caplog.records)
