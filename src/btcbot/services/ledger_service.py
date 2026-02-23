@@ -303,6 +303,7 @@ class LedgerService:
             ledger_state=ledger_state,
         )
 
+        # Drawdown source of truth: persisted pnl_snapshots equity history.
         with self.state_store._connect() as conn:
             rows = conn.execute(
                 "SELECT ts,total_equity_try FROM pnl_snapshots ORDER BY ts"
@@ -385,6 +386,7 @@ class LedgerService:
         *,
         fees_by_currency: dict[str, Decimal],
         price_for_fee_conversion: Callable[[str, str], Decimal] | None,
+        strict: bool = False,
     ) -> tuple[Decimal, set[str]]:
         fees_try = Decimal("0")
         missing_rates: set[str] = set()
@@ -399,6 +401,8 @@ class LedgerService:
             try:
                 converted = price_for_fee_conversion(normalized, "TRY")
             except FeeConversionRateError:
+                if strict:
+                    raise
                 missing_rates.add(normalized)
                 continue
             fees_try += round_quote(
@@ -408,7 +412,7 @@ class LedgerService:
         return fees_try, missing_rates
 
     def load_state_incremental(
-        self, scope_id: str = "stage7"
+        self, scope_id: str = "global"
     ) -> tuple[LedgerState, int, bool, int]:
         checkpoint = self.state_store.get_ledger_checkpoint(scope_id)
         used_checkpoint = False
@@ -429,7 +433,10 @@ class LedgerService:
                     extra={"extra": {"scope_id": scope_id, "last_rowid": checkpoint.last_rowid}},
                 )
 
-        new_events, batch_max_rowid = self.state_store.load_ledger_events_after_rowid(cursor)
+        new_events, batch_max_rowid = self.state_store.load_ledger_events_after_rowid(
+            scope_id=scope_id,
+            last_rowid=cursor,
+        )
         if new_events:
             state = apply_events(state, new_events)
 
@@ -450,16 +457,13 @@ class LedgerService:
         return state, new_last_rowid, used_checkpoint, applied_events
 
     def _compute_turnover_try(self) -> Decimal:
-        with self.state_store._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT COALESCE(SUM(ABS(CAST(price AS REAL) * CAST(qty AS REAL))), 0) AS turnover
-                FROM ledger_events
-                WHERE type = ? AND price IS NOT NULL
-                """,
-                (LedgerEventType.FILL.value,),
-            ).fetchone()
-        return Decimal(str(row["turnover"])) if row is not None else Decimal("0")
+        events = self.state_store.load_ledger_events()
+        turnover = Decimal("0")
+        for event in events:
+            if event.type != LedgerEventType.FILL or event.price is None:
+                continue
+            turnover += abs(event.price * event.qty)
+        return turnover
 
     def checkpoint(self) -> LedgerCheckpoint:
         self.load_state_incremental()

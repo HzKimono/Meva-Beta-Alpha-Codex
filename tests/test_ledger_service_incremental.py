@@ -83,7 +83,7 @@ def test_full_replay_and_incremental_checkpoint_parity(tmp_path) -> None:
     assert used_checkpoint is False
     assert applied_events == len(events)
 
-    checkpoint_before = store.get_ledger_checkpoint("stage7")
+    checkpoint_before = store.get_ledger_checkpoint("global")
     assert checkpoint_before is not None
 
     second_state, second_rowid, second_used_checkpoint, second_applied = (
@@ -94,7 +94,7 @@ def test_full_replay_and_incremental_checkpoint_parity(tmp_path) -> None:
     assert second_used_checkpoint is True
     assert second_applied == 0
 
-    checkpoint_after = store.get_ledger_checkpoint("stage7")
+    checkpoint_after = store.get_ledger_checkpoint("global")
     assert checkpoint_after is not None
     # no-new-events path should avoid checkpoint churn
     assert checkpoint_after.updated_at == checkpoint_before.updated_at
@@ -134,7 +134,7 @@ def test_incremental_cursor_does_not_skip_events_appended_during_checkpoint_writ
     assert second_applied == 1
     assert state_after_second.fees_by_currency["TRY"] == Decimal("3")
 
-    checkpoint_after_second = store.get_ledger_checkpoint("stage7")
+    checkpoint_after_second = store.get_ledger_checkpoint("global")
     assert checkpoint_after_second is not None
     # checkpoint must only advance through rows that were actually applied
     assert checkpoint_after_second.last_rowid == second_cursor
