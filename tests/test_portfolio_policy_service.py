@@ -234,3 +234,61 @@ def test_sell_priority_applies_during_max_orders_selection_even_if_buy_is_larger
 
     assert len(plan.actions) == 1
     assert plan.actions[0].side == "SELL"
+
+
+def test_weighted_allocations_follow_portfolio_targets() -> None:
+    service = PortfolioPolicyService()
+    settings = _settings(
+        TRY_CASH_TARGET="0",
+        TRY_CASH_MAX="0",
+        SYMBOLS="BTCTRY,ETHTRY,SOLTRY,AVAXTRY,ADATRY",
+        PORTFOLIO_TARGETS="BTCTRY:0.4,ETHTRY:0.2,SOLTRY:0.2,AVAXTRY:0.1,ADATRY:0.1",
+    )
+    plan = service.build_plan(
+        universe=["BTCTRY", "ETHTRY", "SOLTRY", "AVAXTRY", "ADATRY"],
+        mark_prices_try={
+            "BTCTRY": Decimal("100"),
+            "ETHTRY": Decimal("100"),
+            "SOLTRY": Decimal("100"),
+            "AVAXTRY": Decimal("100"),
+            "ADATRY": Decimal("100"),
+        },
+        balances=[Balance(asset="TRY", free=1000)],
+        settings=settings,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    by_symbol = {allocation.symbol: allocation.target_notional_try for allocation in plan.allocations}
+    assert by_symbol["BTCTRY"] == Decimal("400")
+    assert by_symbol["ETHTRY"] == Decimal("200")
+    assert by_symbol["SOLTRY"] == Decimal("200")
+    assert by_symbol["AVAXTRY"] == Decimal("100")
+    assert by_symbol["ADATRY"] == Decimal("100")
+
+
+def test_weighted_allocations_respect_max_position_cap() -> None:
+    service = PortfolioPolicyService()
+    settings = _settings(
+        TRY_CASH_TARGET="0",
+        TRY_CASH_MAX="0",
+        SYMBOLS="BTCTRY,ETHTRY,SOLTRY,AVAXTRY,ADATRY",
+        PORTFOLIO_TARGETS="BTCTRY:0.8,ETHTRY:0.1,SOLTRY:0.05,AVAXTRY:0.03,ADATRY:0.02",
+        MAX_POSITION_NOTIONAL_TRY="500",
+    )
+    plan = service.build_plan(
+        universe=["BTCTRY", "ETHTRY", "SOLTRY", "AVAXTRY", "ADATRY"],
+        mark_prices_try={
+            "BTCTRY": Decimal("100"),
+            "ETHTRY": Decimal("100"),
+            "SOLTRY": Decimal("100"),
+            "AVAXTRY": Decimal("100"),
+            "ADATRY": Decimal("100"),
+        },
+        balances=[Balance(asset="TRY", free=1000)],
+        settings=settings,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    by_symbol = {allocation.symbol: allocation.target_notional_try for allocation in plan.allocations}
+    assert by_symbol["BTCTRY"] == Decimal("500")
+    assert any(note.startswith("leftover_weight_to_cash=") for note in plan.notes)

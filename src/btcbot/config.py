@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +14,8 @@ from btcbot.domain.anomalies import AnomalyCode
 from btcbot.domain.symbols import canonical_symbol
 from btcbot.domain.universe_models import UniverseKnobs
 from btcbot.obs.process_role import ProcessRole, coerce_process_role
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -863,6 +866,79 @@ class Settings(BaseSettings):
 
     def is_safe_mode_enabled(self) -> bool:
         return self.safe_mode
+
+    def get_portfolio_target_weights(self, universe: list[str]) -> dict[str, Decimal]:
+        normalized_universe = sorted(
+            {canonical_symbol(symbol) for symbol in universe if str(symbol).strip()}
+        )
+        if not normalized_universe:
+            return {}
+
+        raw = (self.portfolio_targets or "").strip()
+        if not raw:
+            equal_weight = Decimal("1") / Decimal(len(normalized_universe))
+            return {symbol: equal_weight for symbol in normalized_universe}
+
+        entries: list[tuple[str, Decimal]] = []
+        if raw.startswith("{"):
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError("PORTFOLIO_TARGETS JSON value must be an object")
+            for symbol, weight_raw in parsed.items():
+                entries.append((str(symbol), self._parse_portfolio_weight(weight_raw)))
+        else:
+            for part in raw.split(","):
+                token = part.strip()
+                if not token:
+                    continue
+                if ":" not in token:
+                    raise ValueError(f"Invalid PORTFOLIO_TARGETS entry: {token}")
+                symbol_token, weight_token = token.split(":", 1)
+                entries.append((symbol_token, self._parse_portfolio_weight(weight_token)))
+
+        weights: dict[str, Decimal] = {}
+        for symbol_raw, weight in entries:
+            symbol = canonical_symbol(symbol_raw)
+            if not symbol or symbol in weights:
+                continue
+            if weight <= 0:
+                raise ValueError(f"PORTFOLIO_TARGETS weight must be > 0: {symbol}={weight}")
+            weights[symbol] = weight
+
+        if not weights:
+            raise ValueError("PORTFOLIO_TARGETS did not produce any valid symbol weights")
+
+        unknown = sorted(set(weights) - set(normalized_universe))
+        if unknown:
+            raise ValueError(f"PORTFOLIO_TARGETS contains symbols outside universe: {unknown}")
+
+        total = sum(weights.values(), start=Decimal("0"))
+        tolerance = Decimal("0.000001")
+        if (Decimal("1") - total).copy_abs() > tolerance:
+            if Decimal("0.95") < total < Decimal("1.05"):
+                weights = {symbol: (weight / total) for symbol, weight in weights.items()}
+                logger.info(
+                    "portfolio_targets_auto_normalized",
+                    extra={
+                        "extra": {
+                            "sum_before": str(total),
+                            "symbols": sorted(weights),
+                        }
+                    },
+                )
+            else:
+                raise ValueError(
+                    f"PORTFOLIO_TARGETS weights must sum to 1.0±1e-6 (got {total})"
+                )
+
+        return {symbol: weights[symbol] for symbol in sorted(weights)}
+
+    @staticmethod
+    def _parse_portfolio_weight(value: object) -> Decimal:
+        try:
+            return Decimal(str(value).strip())
+        except (InvalidOperation, AttributeError) as exc:
+            raise ValueError(f"Invalid PORTFOLIO_TARGETS weight: {value}") from exc
 
     def symbols_source(self) -> str:
         """Return the highest-precedence source for configured symbols."""
