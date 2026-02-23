@@ -226,6 +226,7 @@ class StateStore:
             self._ensure_stage7_schema(conn)
             self._ensure_agent_audit_schema(conn)
             self._ensure_idempotency_schema(conn)
+            self._ensure_op_state_schema(conn)
             self._ensure_instance_lock_schema(conn)
             self._register_instance_lock(conn)
         logger.info(
@@ -1547,7 +1548,9 @@ class StateStore:
             )
             """
         )
-        ledger_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(ledger_events)")}
+        ledger_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(ledger_events)")
+        }
         if "inserted_at" not in ledger_columns:
             conn.execute("ALTER TABLE ledger_events ADD COLUMN inserted_at TEXT")
             conn.execute(
@@ -2010,6 +2013,30 @@ class StateStore:
                 (now_epoch, self.instance_id),
             )
 
+    def _ensure_op_state_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS op_state (
+                key TEXT PRIMARY KEY,
+                int_value INTEGER,
+                text_value TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency_state (
+                key TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK(status IN ('reserved','submitted','failed')),
+                exchange_order_id TEXT,
+                first_seen_ts TEXT NOT NULL,
+                last_update_ts TEXT NOT NULL,
+                error TEXT
+            )
+            """
+        )
+
     def _ensure_idempotency_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """
@@ -2433,6 +2460,172 @@ class StateStore:
                 (resolved_now,),
             )
             return int(cur.rowcount)
+
+    def set_runtime_counter(self, key: str, value: int) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, ?, NULL, ?)
+                ON CONFLICT(key) DO UPDATE SET int_value=excluded.int_value, updated_at=excluded.updated_at
+                """,
+                (key, int(value), now),
+            )
+
+    def set_runtime_state(self, key: str, text: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, NULL, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET text_value=excluded.text_value, updated_at=excluded.updated_at
+                """,
+                (key, text, now),
+            )
+
+    def get_consecutive_critical_errors(self, role: str) -> int:
+        key = f"critical_errors:{role}"
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT int_value FROM op_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+        if row is None or row["int_value"] is None:
+            return 0
+        return int(row["int_value"])
+
+    def increment_consecutive_critical_errors(self, role: str) -> int:
+        key = f"critical_errors:{role}"
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT int_value FROM op_state WHERE key = ?", (key,)).fetchone()
+            current = int(row["int_value"]) if row and row["int_value"] is not None else 0
+            value = current + 1
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, ?, NULL, ?)
+                ON CONFLICT(key) DO UPDATE SET int_value=excluded.int_value, updated_at=excluded.updated_at
+                """,
+                (key, value, now),
+            )
+            return value
+
+    def reset_consecutive_critical_errors(self, role: str) -> None:
+        key = f"critical_errors:{role}"
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, 0, NULL, ?)
+                ON CONFLICT(key) DO UPDATE SET int_value=0, updated_at=excluded.updated_at
+                """,
+                (key, now),
+            )
+
+    def set_kill_switch(
+        self,
+        role: str,
+        enabled: bool,
+        reason: str,
+        until_ts: str | None,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        payload = json.dumps(
+            {"enabled": bool(enabled), "reason": reason, "until_ts": until_ts},
+            sort_keys=True,
+        )
+        key = f"kill_switch:{role}"
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    int_value=excluded.int_value,
+                    text_value=excluded.text_value,
+                    updated_at=excluded.updated_at
+                """,
+                (key, 1 if enabled else 0, payload, now),
+            )
+
+    def get_kill_switch(self, role: str) -> tuple[bool, str | None, str | None]:
+        key = f"kill_switch:{role}"
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT int_value, text_value FROM op_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return False, None, None
+        enabled = bool(row["int_value"])
+        reason = None
+        until_ts = None
+        text_value = row["text_value"]
+        if text_value:
+            try:
+                payload = json.loads(str(text_value))
+            except json.JSONDecodeError:
+                payload = {}
+            reason = payload.get("reason")
+            until_ts = payload.get("until_ts")
+        return enabled, reason, until_ts
+
+    def reserve_idempotency(self, key: str) -> bool:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM idempotency_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is not None and str(row["status"]).lower() in {"reserved", "submitted"}:
+                return False
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO idempotency_state(
+                        key, status, exchange_order_id, first_seen_ts, last_update_ts, error
+                    ) VALUES (?, 'reserved', NULL, ?, ?, NULL)
+                    """,
+                    (key, now, now),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE idempotency_state
+                    SET status='reserved', exchange_order_id=NULL, error=NULL, last_update_ts=?
+                    WHERE key=?
+                    """,
+                    (now, key),
+                )
+            return True
+
+    def commit_idempotency(self, key: str, exchange_order_id: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE idempotency_state
+                SET status='submitted', exchange_order_id=?, error=NULL, last_update_ts=?
+                WHERE key=?
+                """,
+                (exchange_order_id, now, key),
+            )
+
+    def fail_idempotency(self, key: str, error: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE idempotency_state
+                SET status='failed', error=?, last_update_ts=?
+                WHERE key=?
+                """,
+                (error[:500], now, key),
+            )
 
     def _row_to_reservation_result(self, row: sqlite3.Row, *, reserved: bool) -> ReservationResult:
         return ReservationResult(

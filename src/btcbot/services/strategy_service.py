@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from decimal import Decimal, ROUND_HALF_UP
 import logging
+from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
 
 from btcbot.accounting.accounting_service import AccountingService
 from btcbot.config import Settings
@@ -15,7 +15,6 @@ from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.strategies.base import Strategy
 from btcbot.strategies.context import StrategyContext
-
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +169,10 @@ class StrategyService:
                     "actions": len(plan.actions),
                     "intents": len(intents),
                     "planned_turnover_try": str(
-                        sum((action.target_notional_try for action in plan.actions), start=Decimal("0"))
+                        sum(
+                            (action.target_notional_try for action in plan.actions),
+                            start=Decimal("0"),
+                        )
                     ),
                 }
             },

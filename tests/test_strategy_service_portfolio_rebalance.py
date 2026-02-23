@@ -26,7 +26,6 @@ class _FakeAccounting:
         return []
 
 
-
 class _FakeStateStore:
     def __init__(self, mode: Mode) -> None:
         self._mode = mode

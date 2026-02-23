@@ -204,6 +204,9 @@ class BtcturkHttpClient(ExchangeClient):
         self._breaker_429_consecutive_threshold = max(1, breaker_429_consecutive_threshold)
         self._breaker_cooldown_seconds = max(0.0, breaker_cooldown_seconds)
         self._breaker_state: dict[str, _BreakerState] = {}
+        self._last_429_ts: datetime | None = None
+        self._last_retry_after_seconds: float | None = None
+        self._consecutive_network_errors: int = 0
         self._orderbook_cache_ttl_s = max(0.0, orderbook_cache_ttl_s)
         self._orderbook_inflight_wait_timeout_s = max(0.1, orderbook_inflight_wait_timeout_s)
         self._live_rules_require_exchangeinfo = live_rules_require_exchangeinfo
@@ -243,10 +246,13 @@ class BtcturkHttpClient(ExchangeClient):
 
     def _record_success(self, group: str) -> None:
         self._breaker_for(group).consecutive_429 = 0
+        self._consecutive_network_errors = 0
 
     def _record_429(self, group: str, retry_after_s: float | None) -> None:
         state = self._breaker_for(group)
         state.consecutive_429 += 1
+        self._last_429_ts = datetime.now(UTC)
+        self._last_retry_after_seconds = retry_after_s
         self._rate_limiter.penalize_on_429(group, retry_after_s)
         if state.consecutive_429 >= self._breaker_429_consecutive_threshold:
             cooldown = (
@@ -328,11 +334,15 @@ class BtcturkHttpClient(ExchangeClient):
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
+                self._consecutive_network_errors = 0
                 retry_after_s = parse_retry_after_seconds(exc.response.headers.get("Retry-After"))
                 self._record_429(group, retry_after_s)
                 get_instrumentation().counter(
                     "rest_429_total", 1, attrs={"group": group, "path": path}
                 )
+            raise
+        except (httpx.TimeoutException, httpx.TransportError):
+            self._consecutive_network_errors += 1
             raise
 
     def _safe_sleep(self, seconds: float) -> None:
@@ -492,6 +502,9 @@ class BtcturkHttpClient(ExchangeClient):
             )
         except _RetryableRequestError as exc:
             raise exc.exchange_error from exc
+        except (httpx.TimeoutException, httpx.TransportError):
+            self._consecutive_network_errors += 1
+            raise
 
     def _private_get(self, path: str, params: dict[str, str | int] | None = None) -> dict:
         return self._private_request("GET", path, params=params)
@@ -931,6 +944,28 @@ class BtcturkHttpClient(ExchangeClient):
                 f"(rows={len(rows)}, malformed={malformed})"
             )
         return pairs
+
+    def health_snapshot(self) -> dict[str, object]:
+        now = monotonic()
+        open_groups = [
+            group for group, state in self._breaker_state.items() if state.open_until > now
+        ]
+        remaining = [max(0.0, self._breaker_state[group].open_until - now) for group in open_groups]
+        recommended = 0.0
+        if remaining:
+            recommended = max(remaining)
+        if self._last_retry_after_seconds is not None:
+            recommended = max(recommended, float(self._last_retry_after_seconds))
+        breaker_open = bool(open_groups)
+        degraded = breaker_open or self._consecutive_network_errors >= 3
+        return {
+            "breaker_open": breaker_open,
+            "last_429_ts": (self._last_429_ts.isoformat() if self._last_429_ts else None),
+            "recommended_sleep_seconds": recommended,
+            "consecutive_network_errors": self._consecutive_network_errors,
+            "degraded": degraded,
+            "open_groups": open_groups,
+        }
 
     def health_check(self) -> bool:
         data = self._get("/api/v2/server/exchangeinfo")

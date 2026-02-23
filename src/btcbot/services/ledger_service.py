@@ -457,12 +457,17 @@ class LedgerService:
         return state, new_last_rowid, used_checkpoint, applied_events
 
     def _compute_turnover_try(self) -> Decimal:
-        events = self.state_store.load_ledger_events()
+        with self.state_store._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT price, qty
+                FROM ledger_events
+                WHERE type = 'FILL' AND price IS NOT NULL
+                """
+            ).fetchall()
         turnover = Decimal("0")
-        for event in events:
-            if event.type != LedgerEventType.FILL or event.price is None:
-                continue
-            turnover += abs(event.price * event.qty)
+        for row in rows:
+            turnover += abs(Decimal(str(row["price"])) * Decimal(str(row["qty"])))
         return turnover
 
     def checkpoint(self) -> LedgerCheckpoint:

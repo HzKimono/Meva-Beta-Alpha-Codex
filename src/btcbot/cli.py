@@ -420,14 +420,14 @@ def main() -> int:
     settings = _apply_effective_universe(settings)
     set_base_context(process_role=settings.process_role, state_db_path=settings.state_db_path)
     logger.info(
-        "startup",
+        "runtime_prepared",
         extra={
             "extra": {
                 "role": settings.process_role,
                 "db_path": settings.state_db_path,
-                "live_trading": bool(settings.live_trading),
+                "live_trading": bool(getattr(settings, "live_trading", False)),
                 "safe_mode": bool(getattr(settings, "safe_mode", False)),
-                "kill_switch": bool(settings.kill_switch),
+                "kill_switch": bool(getattr(settings, "kill_switch", False)),
                 "pid": os.getpid(),
                 "command": args.command,
             }
@@ -660,6 +660,7 @@ def run_with_optional_loop(
     cycle_seconds: int,
     max_cycles: int | None,
     jitter_seconds: int,
+    stop_loop_fn: Callable[[], bool] | None = None,
 ) -> int:
     if cycle_seconds < 0 or jitter_seconds < 0:
         print("cycle-seconds and jitter-seconds must be >= 0")
@@ -726,6 +727,13 @@ def run_with_optional_loop(
                         },
                     )
                     time.sleep(backoff)
+
+            if callable(stop_loop_fn) and stop_loop_fn():
+                logger.warning(
+                    "loop_runner_stop_requested",
+                    extra={"extra": {"command": command, "cycle": cycle}},
+                )
+                return last_rc
 
             if max_cycles is not None and cycle >= max_cycles:
                 logger.info(
@@ -803,6 +811,15 @@ def run_stage3_runtime(
                     }
                 },
             )
+            process_role = str(getattr(settings, "process_role", "monitor"))
+            is_live_role = process_role.lower() == "live"
+
+            def _stop_loop_if_killed() -> bool:
+                if not is_live_role:
+                    return False
+                enabled, _reason, _until = runtime_state_store.get_kill_switch(process_role)
+                return bool(enabled)
+
             return run_with_optional_loop(
                 command="run",
                 cycle_fn=lambda: run_cycle(
@@ -814,6 +831,7 @@ def run_stage3_runtime(
                 cycle_seconds=cycle_seconds,
                 max_cycles=max_cycles,
                 jitter_seconds=jitter_seconds,
+                stop_loop_fn=_stop_loop_if_killed,
             )
     except RuntimeError as exc:
         logger.error("stage3_runtime_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
@@ -1281,9 +1299,9 @@ def run_cycle(
                         "cycle_id": cycle_id,
                         "mode": "stage3",
                         "dry_run": dry_run,
-                        "kill_switch": bool(settings.kill_switch),
+                        "kill_switch": bool(getattr(settings, "kill_switch", False)),
                         "safe_mode": bool(effective_safe_mode),
-                        "live_trading": bool(settings.live_trading),
+                        "live_trading": bool(getattr(settings, "live_trading", False)),
                         "armed": bool((not dry_run) and live_policy.allowed),
                         "db_instance_id": getattr(resolved_state_store, "instance_id", ""),
                     }
