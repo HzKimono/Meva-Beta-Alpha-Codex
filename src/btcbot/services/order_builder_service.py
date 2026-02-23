@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 from datetime import datetime
 from decimal import Decimal
@@ -31,6 +32,7 @@ class OrderBuilderService:
 
         offset_bps = Decimal(str(settings.stage7_order_offset_bps))
         unavailable = rules_unavailable or {}
+        buy_cycle_cap_remaining = Decimal(str(settings.notional_cap_try_per_cycle))
 
         ordered_actions = sorted(
             plan.actions,
@@ -73,10 +75,17 @@ class OrderBuilderService:
                 action=action,
                 mark_prices_try=mark_prices_try,
                 rules=rules,
+                settings=settings,
+                plan=plan,
                 offset_bps=offset_bps,
+                buy_cycle_cap_remaining=buy_cycle_cap_remaining,
                 now_utc=now_utc,
             )
             intents.append(intent)
+            if intent.side == "BUY" and not intent.skipped and buy_cycle_cap_remaining > Decimal("0"):
+                buy_cycle_cap_remaining = max(
+                    Decimal("0"), buy_cycle_cap_remaining - intent.notional_try
+                )
 
         return intents
 
@@ -87,7 +96,10 @@ class OrderBuilderService:
         action: RebalanceAction,
         mark_prices_try: dict[str, Decimal],
         rules: ExchangeRulesService,
+        settings: Settings,
+        plan: PortfolioPlan,
         offset_bps: Decimal,
+        buy_cycle_cap_remaining: Decimal,
         now_utc: datetime,
     ) -> OrderIntent:
         symbol = normalize_symbol(action.symbol)
@@ -131,7 +143,28 @@ class OrderBuilderService:
             )
 
         target_notional = Decimal(str(action.target_notional_try))
-        qty_raw = target_notional / price_try
+        max_spend_try = target_notional
+        if side == "BUY":
+            max_spend_try = self._max_spend_after_buffers(
+                action=action,
+                decision=decision,
+                plan=plan,
+                settings=settings,
+                price_try=price_try,
+                buy_cycle_cap_remaining=buy_cycle_cap_remaining,
+            )
+            internal_min_notional = Decimal(str(settings.min_order_notional_try))
+            if max_spend_try < max(decision.rules.min_notional_try, internal_min_notional):
+                return self._skipped(
+                    cycle_id=cycle_id,
+                    symbol=symbol,
+                    side=side,
+                    reason=action.reason,
+                    skip_reason="insufficient_notional_after_buffers",
+                    now_utc=now_utc,
+                )
+
+        qty_raw = max_spend_try / price_try
         qty = rules.quantize_qty(symbol, qty_raw) if qty_raw > 0 else Decimal("0")
         if qty <= 0:
             return self._skipped(
@@ -143,8 +176,28 @@ class OrderBuilderService:
                 now_utc=now_utc,
             )
 
-        valid, reason = rules.validate_notional(symbol, price_try, qty)
+        if side == "BUY" and decision.rules.min_qty is not None and qty < decision.rules.min_qty:
+            return self._skipped(
+                cycle_id=cycle_id,
+                symbol=symbol,
+                side=side,
+                reason=action.reason,
+                skip_reason="qty_below_min_qty_after_quantize",
+                now_utc=now_utc,
+            )
+
         notional_try = price_try * qty
+        if side == "BUY" and notional_try < decision.rules.min_notional_try:
+            return self._skipped(
+                cycle_id=cycle_id,
+                symbol=symbol,
+                side=side,
+                reason=action.reason,
+                skip_reason="notional_below_min_total_after_quantize",
+                now_utc=now_utc,
+            )
+
+        valid, reason = rules.validate_notional(symbol, price_try, qty)
         if not valid:
             return self._skipped(
                 cycle_id=cycle_id,
@@ -181,6 +234,69 @@ class OrderBuilderService:
             skipped=False,
             skip_reason=None,
         )
+
+    def _max_spend_after_buffers(
+        self,
+        *,
+        action: RebalanceAction,
+        decision: ExchangeRulesService.RulesBoundaryDecision,
+        plan: PortfolioPlan,
+        settings: Settings,
+        price_try: Decimal,
+        buy_cycle_cap_remaining: Decimal,
+    ) -> Decimal:
+        investable_try = Decimal(str(action.target_notional_try))
+        max_per_order = Decimal(str(settings.max_notional_per_order_try))
+        try_cash_available = self._plan_cash_available(plan)
+        upper_limits = [investable_try, try_cash_available]
+        if buy_cycle_cap_remaining > Decimal("0"):
+            upper_limits.append(buy_cycle_cap_remaining)
+        if max_per_order > Decimal("0"):
+            upper_limits.append(max_per_order)
+        max_spend_try = min(upper_limits)
+
+        fee_buffer_ratio = self._resolve_fee_buffer_ratio(settings)
+        spend_after_fee = max_spend_try * (Decimal("1") - fee_buffer_ratio)
+        rounding_buffer_try = self._resolve_rounding_buffer_try(
+            settings=settings,
+            decision=decision,
+            price_try=price_try,
+        )
+        return max(Decimal("0"), spend_after_fee - rounding_buffer_try)
+
+    @staticmethod
+    def _resolve_fee_buffer_ratio(settings: Settings) -> Decimal:
+        ratio = Decimal(str(settings.fee_buffer_ratio))
+        if ratio > Decimal("0"):
+            return min(ratio, Decimal("1"))
+        bps_ratio = Decimal(str(settings.allocation_fee_buffer_bps)) / Decimal("10000")
+        return min(max(bps_ratio, Decimal("0")), Decimal("1"))
+
+    @staticmethod
+    def _resolve_rounding_buffer_try(
+        *,
+        settings: Settings,
+        decision: ExchangeRulesService.RulesBoundaryDecision,
+        price_try: Decimal,
+    ) -> Decimal:
+        configured = Decimal(str(getattr(settings, "rounding_buffer_try", Decimal("0"))))
+        if configured > Decimal("0"):
+            return configured
+        rules = decision.rules
+        assert rules is not None
+        return max(price_try * rules.step_size, rules.tick_size * rules.step_size)
+
+    @staticmethod
+    def _plan_cash_available(plan: PortfolioPlan) -> Decimal:
+        raw_snapshot = plan.constraints_summary.get("snapshot")
+        if isinstance(raw_snapshot, str) and raw_snapshot:
+            try:
+                parsed = ast.literal_eval(raw_snapshot)
+            except (ValueError, SyntaxError):
+                return Decimal("Infinity")
+            if isinstance(parsed, dict) and "cash_try" in parsed:
+                return Decimal(str(parsed["cash_try"]))
+        return Decimal("Infinity")
 
     def _skipped(
         self,
