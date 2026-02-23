@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import Literal
+
+import logging
 
 from btcbot.config import Settings
 from btcbot.domain.models import Balance, normalize_symbol
@@ -15,6 +17,8 @@ from btcbot.domain.portfolio_policy_models import (
     TargetAllocation,
 )
 from btcbot.domain.risk_budget import Mode
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,10 +89,13 @@ class PortfolioPolicyService:
 
         investable_equity = max(Decimal("0"), snapshot.equity_try - cash_target_try)
 
+        target_weights = settings.get_portfolio_target_weights(filtered_universe)
+
         allocations, notes = self._build_allocations(
             universe=filtered_universe,
             investable_equity=investable_equity,
             max_position_notional_try=max_position_notional_try,
+            target_weights=target_weights,
         )
 
         raw_actions = self._build_raw_actions(
@@ -118,6 +125,11 @@ class PortfolioPolicyService:
             if dropped > 0:
                 mode_notes.append(f"mode_reduce_risk_only={dropped}")
 
+        planned_turnover_try = sum(
+            (action.target_notional_try.copy_abs() for action in constrained_actions),
+            start=Decimal("0"),
+        )
+
         constraints_summary = {
             "try_cash_target": str(cash_target_cfg),
             "try_cash_max": str(cash_max_cfg),
@@ -128,7 +140,32 @@ class PortfolioPolicyService:
             "min_order_notional_try": str(min_order_notional_try),
             "final_mode": final_mode.value,
             "snapshot": str(snapshot.to_dict()),
+            "planned_turnover_try": str(planned_turnover_try),
+            "target_weights": {symbol: str(weight) for symbol, weight in target_weights.items()},
         }
+
+        logger.info(
+            "portfolio_rebalance_plan_summary",
+            extra={
+                "extra": {
+                    "equity_try": str(snapshot.equity_try),
+                    "cash_try": str(snapshot.cash_try),
+                    "investable_equity": str(investable_equity),
+                    "target_weights": {symbol: str(weight) for symbol, weight in target_weights.items()},
+                    "actions_count": len(constrained_actions),
+                    "planned_turnover_try": str(planned_turnover_try),
+                    "dropped_reasons": [
+                        note
+                        for note in dropped_notes
+                        if note.startswith("min_notional=")
+                        or note.startswith("turnover_cap=")
+                        or note.startswith("max_orders=")
+                    ],
+                    "mode": final_mode.value,
+                    "timestamp": now_utc.astimezone(UTC).isoformat(),
+                }
+            },
+        )
 
         return PortfolioPlan(
             timestamp=now_utc,
@@ -186,19 +223,22 @@ class PortfolioPolicyService:
         universe: list[str],
         investable_equity: Decimal,
         max_position_notional_try: Decimal,
+        target_weights: dict[str, Decimal],
     ) -> tuple[list[TargetAllocation], list[str]]:
         if not universe or investable_equity <= 0:
             return [], ["no investable equity or empty universe"]
 
-        equal_weight = Decimal("1") / Decimal(len(universe))
         allocations: list[TargetAllocation] = []
         allocated_weight = Decimal("0")
         capped_count = 0
 
-        for symbol in universe:
-            equal_target = investable_equity * equal_weight
-            target_notional = min(equal_target, max_position_notional_try)
-            if equal_target > 0 and target_notional < equal_target:
+        ordered_universe = sorted(universe)
+
+        for symbol in ordered_universe:
+            configured_weight = target_weights.get(symbol, Decimal("0"))
+            raw_target = investable_equity * configured_weight
+            target_notional = min(raw_target, max_position_notional_try)
+            if raw_target > 0 and target_notional < raw_target:
                 capped_count += 1
             weight = target_notional / investable_equity if investable_equity > 0 else Decimal("0")
             allocated_weight += weight

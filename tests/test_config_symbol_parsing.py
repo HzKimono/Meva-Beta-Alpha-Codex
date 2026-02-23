@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from btcbot.config import Settings
@@ -64,3 +66,52 @@ def test_symbols_source_legacy_alias_when_universe_symbols_missing(monkeypatch) 
     monkeypatch.setenv("SYMBOLS", "BTCTRY")
     settings = Settings()
     assert settings.symbols_source() == "env:SYMBOLS"
+
+
+def test_portfolio_targets_json_and_csv_parse_weights() -> None:
+    settings_json = Settings(
+        SYMBOLS="BTCTRY,ETHTRY,SOLTRY,AVAXTRY,ADATRY",
+        PORTFOLIO_TARGETS='{"BTCTRY":0.4,"ETHTRY":0.2,"SOLTRY":0.2,"AVAXTRY":0.1,"ADATRY":0.1}',
+    )
+    assert settings_json.get_portfolio_target_weights(settings_json.symbols) == {
+        "ADATRY": Decimal("0.1"),
+        "AVAXTRY": Decimal("0.1"),
+        "BTCTRY": Decimal("0.4"),
+        "ETHTRY": Decimal("0.2"),
+        "SOLTRY": Decimal("0.2"),
+    }
+
+    settings_csv = Settings(
+        SYMBOLS="BTCTRY,ETHTRY,SOLTRY,AVAXTRY,ADATRY",
+        PORTFOLIO_TARGETS="BTCTRY:0.4,ETHTRY:0.2,SOLTRY:0.2,AVAXTRY:0.1,ADATRY:0.1",
+    )
+    assert settings_csv.get_portfolio_target_weights(settings_csv.symbols) == {
+        "ADATRY": Decimal("0.1"),
+        "AVAXTRY": Decimal("0.1"),
+        "BTCTRY": Decimal("0.4"),
+        "ETHTRY": Decimal("0.2"),
+        "SOLTRY": Decimal("0.2"),
+    }
+
+
+def test_portfolio_targets_invalid_inputs_raise_value_error() -> None:
+    settings_negative = Settings(
+        SYMBOLS="BTCTRY,ETHTRY",
+        PORTFOLIO_TARGETS="BTCTRY:-0.2,ETHTRY:1.2",
+    )
+    with pytest.raises(ValueError, match="weight must be > 0"):
+        settings_negative.get_portfolio_target_weights(settings_negative.symbols)
+
+    settings_sum = Settings(
+        SYMBOLS="BTCTRY,ETHTRY",
+        PORTFOLIO_TARGETS="BTCTRY:0.5,ETHTRY:0.2",
+    )
+    with pytest.raises(ValueError, match="must sum to 1.0"):
+        settings_sum.get_portfolio_target_weights(settings_sum.symbols)
+
+    settings_unknown = Settings(
+        SYMBOLS="BTCTRY,ETHTRY",
+        PORTFOLIO_TARGETS="BTCTRY:0.5,SOLTRY:0.5",
+    )
+    with pytest.raises(ValueError, match="outside universe"):
+        settings_unknown.get_portfolio_target_weights(settings_unknown.symbols)
