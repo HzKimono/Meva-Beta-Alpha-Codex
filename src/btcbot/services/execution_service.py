@@ -202,6 +202,23 @@ class ExecutionService:
     def was_lifecycle_refreshed(self, *, cycle_id: str | None) -> bool:
         return bool(cycle_id and str(cycle_id) in self._lifecycle_refreshed_cycles)
 
+    def _api_degrade_snapshot(self) -> dict[str, object]:
+        snapshot_fn = getattr(self.exchange, "health_snapshot", None)
+        if callable(snapshot_fn):
+            snapshot = snapshot_fn()
+            if isinstance(snapshot, dict):
+                return snapshot
+        return {"degraded": False, "breaker_open": False, "recommended_sleep_seconds": 0.0}
+
+    def _submission_guarded_by_runtime_state(self) -> bool:
+        if self.dry_run:
+            return False
+        kill_enabled, _reason, _until = self.state_store.get_kill_switch(self.process_role)
+        if kill_enabled:
+            return True
+        snapshot = self._api_degrade_snapshot()
+        return bool(snapshot.get("degraded", False) or snapshot.get("breaker_open", False))
+
     def refresh_order_lifecycle(
         self, symbols: list[str], *, skip_non_essential: bool = False
     ) -> dict[str, object]:
@@ -739,6 +756,10 @@ class ExecutionService:
                 )
             return 0
 
+        if self._submission_guarded_by_runtime_state():
+            logger.warning("cancel_suppressed_due_to_runtime_state")
+            return 0
+
         canceled = 0
         self.state_store.prune_expired_idempotency_keys()
         now = datetime.now(UTC)
@@ -995,6 +1016,8 @@ class ExecutionService:
             "rejected_intents": 0,
             "intents_rejected_precheck": 0,
             "attempted_exchange_calls": 0,
+            "would_submit_orders": 0,
+            "would_submit_notional_try": "0",
         }
         self._sync_unknown_registry_from_store(allow_clear=False)
         self._emit_unknown_freeze_metrics()
@@ -1040,6 +1063,10 @@ class ExecutionService:
                 )
             return 0
 
+        if self._submission_guarded_by_runtime_state():
+            logger.warning("submission_suppressed_due_to_runtime_state")
+            return 0
+
         if self.unknown_order_registry.has_unknown():
             for intent, raw_intent in normalized_intents:
                 self._emit_unknown_freeze_metrics(submit_blocked=True)
@@ -1077,6 +1104,8 @@ class ExecutionService:
         intents_rejected_precheck = 0
         orders_failed_exchange = 0
         attempted_exchange_calls = 0
+        would_submit_orders = 0
+        would_submit_notional_try = Decimal("0")
         for intent, raw_intent in normalized_intents:
             if not self.dry_run:
                 self._ensure_live_side_effects_allowed(
@@ -1232,6 +1261,8 @@ class ExecutionService:
                 status="PENDING",
             )
             if self.dry_run:
+                would_submit_orders += 1
+                would_submit_notional_try += Decimal(str(intent.price)) * Decimal(str(intent.quantity))
                 emit_decision(
                     logger,
                     {
@@ -1389,6 +1420,7 @@ class ExecutionService:
                         order_id=None,
                         status="UNKNOWN",
                     )
+                    self.state_store.fail_idempotency(idempotency_key, outcome.reason or "submit_reconcile_unknown")
                     unknown_order_id = f"unknown:{client_order_id}"
                     now_utc = datetime.now(UTC)
                     self.state_store.save_order(
@@ -1455,6 +1487,8 @@ class ExecutionService:
                     order_id=order.order_id,
                     status="COMMITTED",
                 )
+                if not self.dry_run:
+                    self.state_store.commit_idempotency(idempotency_key, order.order_id)
                 placed += 1
                 continue
 
@@ -1486,6 +1520,7 @@ class ExecutionService:
                         order_id=None,
                         status="UNKNOWN",
                     )
+                    self.state_store.fail_idempotency(idempotency_key, outcome.reason or "submit_reconcile_unknown")
                     unknown_order_id = f"unknown:{client_order_id}"
                     now_utc = datetime.now(UTC)
                     self.state_store.save_order(
@@ -1547,6 +1582,8 @@ class ExecutionService:
                 order_id=order.order_id,
                 status="COMMITTED",
             )
+            if not self.dry_run:
+                self.state_store.commit_idempotency(idempotency_key, order.order_id)
             placed += 1
         if placed > 0:
             inc_counter(
@@ -1571,6 +1608,8 @@ class ExecutionService:
             "rejected_intents": rejected_intents,
             "intents_rejected_precheck": intents_rejected_precheck,
             "attempted_exchange_calls": attempted_exchange_calls,
+            "would_submit_orders": would_submit_orders,
+            "would_submit_notional_try": str(would_submit_notional_try),
         }
         return placed
 

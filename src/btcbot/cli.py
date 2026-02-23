@@ -660,6 +660,7 @@ def run_with_optional_loop(
     cycle_seconds: int,
     max_cycles: int | None,
     jitter_seconds: int,
+    stop_loop_fn: Callable[[], bool] | None = None,
 ) -> int:
     if cycle_seconds < 0 or jitter_seconds < 0:
         print("cycle-seconds and jitter-seconds must be >= 0")
@@ -726,6 +727,10 @@ def run_with_optional_loop(
                         },
                     )
                     time.sleep(backoff)
+
+            if callable(stop_loop_fn) and stop_loop_fn():
+                logger.warning("loop_runner_stop_requested", extra={"extra": {"command": command, "cycle": cycle}})
+                return last_rc
 
             if max_cycles is not None and cycle >= max_cycles:
                 logger.info(
@@ -803,6 +808,15 @@ def run_stage3_runtime(
                     }
                 },
             )
+            process_role = str(getattr(settings, "process_role", "monitor"))
+            is_live_role = process_role.lower() == "live"
+
+            def _stop_loop_if_killed() -> bool:
+                if not is_live_role:
+                    return False
+                enabled, _reason, _until = runtime_state_store.get_kill_switch(process_role)
+                return bool(enabled)
+
             return run_with_optional_loop(
                 command="run",
                 cycle_fn=lambda: run_cycle(
@@ -814,6 +828,7 @@ def run_stage3_runtime(
                 cycle_seconds=cycle_seconds,
                 max_cycles=max_cycles,
                 jitter_seconds=jitter_seconds,
+                stop_loop_fn=_stop_loop_if_killed,
             )
     except RuntimeError as exc:
         logger.error("stage3_runtime_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
