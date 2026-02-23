@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
 import re
 import time
@@ -54,9 +55,58 @@ class ExecutionWrapper:
         return self._execute("cancel", self.cancel_retry_max_attempts, self._cancel_call, **kwargs)
 
     def _submit_call(self, **kwargs: Any) -> Any:
-        if hasattr(self.exchange, "submit_limit_order"):
-            return self.exchange.submit_limit_order(**kwargs)
-        return self.exchange.place_limit_order(**kwargs)
+        payload = self._normalize_submit_kwargs(kwargs)
+        submit_fn = getattr(self.exchange, "submit_limit_order", None)
+        place_fn = getattr(self.exchange, "place_limit_order", None)
+
+        if callable(submit_fn) and "qty" in payload:
+            return submit_fn(**self._filter_kwargs_for_callable(submit_fn, payload))
+        if callable(place_fn):
+            place_payload = dict(payload)
+            if "quantity" not in place_payload and "qty" in place_payload:
+                place_payload["quantity"] = place_payload["qty"]
+            return place_fn(**self._filter_kwargs_for_callable(place_fn, place_payload))
+
+        available = [
+            name for name in ("submit_limit_order", "place_limit_order") if callable(getattr(self.exchange, name, None))
+        ]
+        raise RuntimeError(
+            "No compatible submit method on exchange "
+            f"for payload keys={sorted(payload.keys())}; available_methods={available}"
+        )
+
+    def _normalize_submit_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(kwargs)
+        qty = payload.get("qty")
+        quantity = payload.get("quantity")
+        if qty is not None and quantity is not None and qty != quantity:
+            raise ValueError(f"qty and quantity mismatch: qty={qty!r}, quantity={quantity!r}")
+        if qty is None and quantity is not None:
+            payload["qty"] = quantity
+        if quantity is None and qty is not None:
+            payload["quantity"] = qty
+
+        required_base = ("symbol", "side", "price", "client_order_id")
+        for field in required_base:
+            if payload.get(field) in (None, ""):
+                raise ValueError(f"missing required submit field: {field}")
+        if payload.get("qty") in (None, "") and payload.get("quantity") in (None, ""):
+            raise ValueError("missing required submit field: qty or quantity")
+        return payload
+
+    def _filter_kwargs_for_callable(self, fn: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return payload
+        accepts_var_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+        if accepts_var_kwargs:
+            return payload
+        allowed = set(signature.parameters.keys())
+        return {key: value for key, value in payload.items() if key in allowed}
 
     def _cancel_call(self, **kwargs: Any) -> Any:
         if "exchange_order_id" in kwargs and hasattr(self.exchange, "cancel_order_by_exchange_id"):

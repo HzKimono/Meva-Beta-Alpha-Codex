@@ -1323,7 +1323,16 @@ class ExecutionService:
                     request_method = None
                     request_path = None
                     request_json = None
+                    failure_phase = "pre_http"
+                    sanitized_request_payload = {
+                        "symbol": symbol_normalized,
+                        "side": intent.side.value,
+                        "price": str(price),
+                        "qty": str(quantity),
+                        "client_order_id": client_order_id,
+                    }
                     if isinstance(exc, ExchangeError):
+                        failure_phase = "http"
                         response_body = (exc.response_body or "")[:2048]
                         status_code = exc.status_code
                         error_code = exc.error_code
@@ -1333,6 +1342,7 @@ class ExecutionService:
                         request_json = exc.request_json
                     logger.error(
                         "exchange_submit_failed",
+                        exc_info=True,
                         extra={
                             "extra": {
                                 "cycle_id": intent.cycle_id,
@@ -1344,6 +1354,10 @@ class ExecutionService:
                                 "quantity": str(quantity),
                                 "client_order_id": client_order_id,
                                 "idempotency_key": idempotency_key,
+                                "failure_phase": failure_phase,
+                                "exception_type": type(exc).__name__,
+                                "exception_message": str(exc),
+                                "sanitized_request_payload": sanitized_request_payload,
                                 "request_method": request_method,
                                 "request_path": request_path,
                                 "request_json": request_json,
