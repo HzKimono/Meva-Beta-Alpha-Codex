@@ -28,9 +28,11 @@ def test_normalize_db_path_fails_when_empty() -> None:
         normalize_db_path("")
 
 
-def test_normalize_db_path_fails_when_relative() -> None:
-    with pytest.raises(ValueError, match="must be an absolute path"):
-        normalize_db_path("state.db")
+def test_normalize_db_path_resolves_relative() -> None:
+    db_path = normalize_db_path("state.db")
+
+    assert db_path.is_absolute()
+    assert db_path.suffix == ".db"
 
 
 def test_normalize_db_path_normalizes_absolute_db(tmp_path: Path) -> None:
