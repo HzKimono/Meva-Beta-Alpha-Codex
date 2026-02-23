@@ -35,6 +35,7 @@ from btcbot.domain.models import (
     PairInfo,
     SubmitOrderRequest,
     SubmitOrderResult,
+    SymbolRules,
     ValidationError,
     normalize_symbol,
     pair_info_to_symbol_rules,
@@ -64,6 +65,29 @@ _RETRY_TOTAL_WAIT_CAP_SECONDS = 8.0
 _DEFAULT_MIN_NOTIONAL_TRY = Decimal("10")
 _BREAKER_CONSECUTIVE_429_THRESHOLD = 3
 _BREAKER_COOLDOWN_SECONDS = 3.0
+
+
+def preflight_validate_and_quantize(
+    *,
+    symbol: str,
+    price: Decimal,
+    qty: Decimal,
+    rules: SymbolRules,
+) -> tuple[Decimal, Decimal]:
+    if price <= 0:
+        raise ValidationError(f"price must be positive; observed={price}")
+    if qty <= 0:
+        raise ValidationError(f"quantity must be positive; observed={qty}")
+
+    quantized_price = quantize_price(price, rules)
+    quantized_qty = quantize_quantity(qty, rules)
+    validate_order(price=quantized_price, qty=quantized_qty, rules=rules)
+
+    if quantized_price <= 0:
+        raise ValidationError(f"price non-positive after quantize; observed={quantized_price}")
+    if quantized_qty <= 0:
+        raise ValidationError(f"quantity non-positive after quantize; observed={quantized_qty}")
+    return quantized_price, quantized_qty
 
 
 @dataclass
@@ -1129,25 +1153,14 @@ class BtcturkHttpClient(ExchangeClient):
         client_order_id: str,
     ) -> OrderAck:
         symbol_normalized = normalize_symbol(symbol)
-        if price <= 0:
-            raise ValidationError(f"price must be positive; observed={price}")
-        if qty <= 0:
-            raise ValidationError(f"quantity must be positive; observed={qty}")
         rules = self._resolve_symbol_rules(symbol_normalized)
-        validate_order(price=price, qty=qty, rules=rules)
-        quantized_price = quantize_price(price, rules)
-        quantized_qty = quantize_quantity(qty, rules)
-        if quantized_price <= 0:
-            raise ValidationError(f"price non-positive after quantize; observed={quantized_price}")
-        if quantized_qty <= 0:
-            raise ValidationError(f"quantity non-positive after quantize; observed={quantized_qty}")
+        quantized_price, quantized_qty = preflight_validate_and_quantize(
+            symbol=symbol_normalized,
+            price=price,
+            qty=qty,
+            rules=rules,
+        )
         computed_notional = quantized_price * quantized_qty
-        min_notional = rules.min_total if rules.min_total is not None else _DEFAULT_MIN_NOTIONAL_TRY
-        if computed_notional < min_notional:
-            raise ValidationError(
-                f"total below min_total for {rules.pair_symbol}; "
-                f"required={min_notional} observed={computed_notional}"
-            )
 
         request = SubmitOrderRequest(
             pair_symbol=_btcturk_pair_symbol(symbol_normalized),
@@ -1160,10 +1173,17 @@ class BtcturkHttpClient(ExchangeClient):
         try:
             response = self._private_request("POST", "/api/v1/order", json=payload)
         except ExchangeError as exc:
+            is_min_total_reject = (
+                exc.status_code == 400
+                and str(exc.error_code) == "1123"
+                and (exc.error_message or "").upper() == "FAILED_MIN_TOTAL_AMOUNT"
+            )
             logger.error(
                 "BTCTurk submit_limit_order failed",
                 extra={
                     "extra": {
+                        "failure_phase": "http",
+                        "known_reject": is_min_total_reject,
                         "status_code": exc.status_code,
                         "error_code": exc.error_code,
                         "error_message": exc.error_message,
