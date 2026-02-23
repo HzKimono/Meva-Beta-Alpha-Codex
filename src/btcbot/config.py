@@ -156,6 +156,7 @@ class Settings(BaseSettings):
         default=Decimal("20"), alias="ALLOCATION_FEE_BUFFER_BPS"
     )
     fee_buffer_ratio: Decimal = Field(default=Decimal("0"), alias="FEE_BUFFER_RATIO")
+    rounding_buffer_try: Decimal = Field(default=Decimal("0"), alias="ROUNDING_BUFFER_TRY")
     investable_usage_mode: str = Field(default="use_all", alias="INVESTABLE_USAGE_MODE")
     investable_usage_fraction: Decimal = Field(
         default=Decimal("1"), alias="INVESTABLE_USAGE_FRACTION"
@@ -552,7 +553,7 @@ class Settings(BaseSettings):
             raise ValueError("MAX_TRY_PER_CYCLE must be >= 0")
         return value
 
-    @field_validator("allocation_fee_buffer_bps", "fee_buffer_ratio")
+    @field_validator("allocation_fee_buffer_bps", "fee_buffer_ratio", "rounding_buffer_try")
     def validate_allocation_fee_buffer_bps(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("Fee buffer values must be >= 0")

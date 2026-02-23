@@ -60,6 +60,9 @@ NO_ACTION_REASON_ENUM = {
     "ALL_INTENTS_REJECTED_BY_RISK",
     "NO_EXECUTABLE_ACTIONS",
     "NO_SUBMISSIONS",
+    "INSUFFICIENT_NOTIONAL_AFTER_BUFFERS",
+    "QTY_BELOW_MIN_QTY_AFTER_QUANTIZE",
+    "NOTIONAL_BELOW_MIN_TOTAL_AFTER_QUANTIZE",
 }
 
 
@@ -1028,6 +1031,11 @@ class Stage4CycleRunner:
                         intents_after_risk=len(accepted_actions),
                         intents_executed=execution_report.executed_total,
                         orders_submitted=execution_report.submitted,
+                        intent_skip_reasons=[
+                            getattr(item, "skip_reason", None)
+                            for item in intents
+                            if bool(getattr(item, "skipped", False))
+                        ],
                     ),
                     intents_created=len(intents),
                     intents_after_risk=len(accepted_actions),
@@ -1735,6 +1743,7 @@ class Stage4CycleRunner:
         intents_after_risk: int,
         intents_executed: int,
         orders_submitted: int,
+        intent_skip_reasons: list[str | None] | None = None,
     ) -> list[str]:
         reasons: list[str] = []
         if intents_created <= 0:
@@ -1745,7 +1754,12 @@ class Stage4CycleRunner:
             reasons.append("NO_EXECUTABLE_ACTIONS")
         if intents_executed > 0 and orders_submitted <= 0:
             reasons.append("NO_SUBMISSIONS")
-        return [reason for reason in reasons if reason in NO_ACTION_REASON_ENUM]
+        if intents_executed <= 0:
+            for item in intent_skip_reasons or []:
+                mapped = str(item or "").strip().upper()
+                if mapped:
+                    reasons.append(mapped)
+        return [reason for reason in sorted(set(reasons)) if reason in NO_ACTION_REASON_ENUM]
 
     @staticmethod
     def _inc_reason(reasons: dict[str, int], key: str) -> None:
