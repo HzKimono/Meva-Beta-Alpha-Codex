@@ -76,9 +76,102 @@ class FakeExchange:
         del client_order_id
         return True
 
+    def health_snapshot(self) -> dict[str, object]:
+        return {"degraded": False, "breaker_open": False}
+
     def close(self) -> None:
         self.calls.append("close")
 
+
+
+
+def test_runner_writes_stage4_run_metrics(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    db_path = tmp_path / "runner_stage4_metrics.sqlite"
+    settings = Settings(
+        DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path), SYMBOLS="BTC_TRY"
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(str(db_path))
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM stage4_run_metrics ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+
+    assert row is not None
+    reasons = json.loads(str(row["reasons_no_action_json"]))
+    rejects_by_code = json.loads(str(row["rejects_by_code_json"]))
+    assert isinstance(reasons, list)
+    assert int(row["intents_created"]) == 1
+    assert int(row["intents_after_risk"]) == 1
+    assert int(row["orders_submitted"]) == 0
+    assert row["breaker_state"] == "closed"
+    assert int(row["degraded_mode"]) == 0
+    assert rejects_by_code == {}
+
+
+def test_runner_writes_stage4_run_metrics_no_action_reasons(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    class RejectAllRisk:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def filter_actions(self, actions, **kwargs):
+            del kwargs
+            return [], []
+
+    monkeypatch.setattr("btcbot.services.stage4_cycle_runner.RiskPolicy", RejectAllRisk)
+
+    db_path = tmp_path / "runner_stage4_metrics_reasons.sqlite"
+    settings = Settings(
+        DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path), SYMBOLS="BTC_TRY"
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(str(db_path))
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM stage4_run_metrics ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+
+    assert row is not None
+    reasons = set(json.loads(str(row["reasons_no_action_json"])))
+    assert "ALL_INTENTS_REJECTED_BY_RISK" in reasons
+    assert "NO_INTENTS_CREATED" not in reasons
+    assert int(row["intents_created"]) == 1
+    assert int(row["intents_after_risk"]) == 0
+    assert int(row["orders_submitted"]) == 0
+
+
+
+def test_extract_rejects_by_code_normalizes_numeric_codes() -> None:
+    runner = Stage4CycleRunner()
+    rejects = runner._extract_rejects_by_code(
+        {
+            "rejected": 3,
+            "rejected_min_notional": 2,
+            "rejected_1123": 4,
+            "alloc_rejected_code_1123": 1,
+            "pipeline_rejected_code_4001": 5,
+            "rejected_code_42": 6,
+        }
+    )
+    assert rejects == {"1123": 5, "4001": 5, "42": 6}
 
 def test_runner_writes_audit_with_mandatory_counts(monkeypatch, tmp_path) -> None:
     runner = Stage4CycleRunner()

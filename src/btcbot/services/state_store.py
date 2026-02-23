@@ -392,6 +392,7 @@ class StateStore:
             self._ensure_stage4_schema(conn)
             self._ensure_ledger_schema(conn)
             self._ensure_cycle_metrics_schema(conn)
+            self._ensure_stage4_run_metrics_schema(conn)
             self._ensure_risk_budget_schema(conn)
             self._ensure_anomaly_schema(conn)
             self._ensure_stage7_schema(conn)
@@ -1906,6 +1907,96 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS idx_cycle_metrics_ts_start ON cycle_metrics(ts_start)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cycle_metrics_mode ON cycle_metrics(mode)")
+
+    def _ensure_stage4_run_metrics_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage4_run_metrics (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                reasons_no_action_json TEXT NOT NULL,
+                intents_created INTEGER NOT NULL,
+                intents_after_risk INTEGER NOT NULL,
+                intents_executed INTEGER NOT NULL,
+                orders_submitted INTEGER NOT NULL,
+                rejects_by_code_json TEXT NOT NULL,
+                breaker_state TEXT NOT NULL,
+                degraded_mode INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage4_run_metrics_ts ON stage4_run_metrics(ts)"
+        )
+        self._migrate_stage4_run_metrics_schema(conn)
+
+    def _migrate_stage4_run_metrics_schema(self, conn: sqlite3.Connection) -> None:
+        fks = conn.execute("PRAGMA foreign_key_list(stage4_run_metrics)").fetchall()
+        needs_fk_drop = bool(fks)
+        columns = {
+            str(row["name"]): str(row["type"]).upper()
+            for row in conn.execute("PRAGMA table_info(stage4_run_metrics)")
+        }
+        integer_targets = {
+            "intents_created",
+            "intents_after_risk",
+            "intents_executed",
+            "orders_submitted",
+            "degraded_mode",
+        }
+        needs_integer_migration = any(columns.get(col) != "INTEGER" for col in integer_targets)
+        if not (needs_fk_drop or needs_integer_migration):
+            return
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage4_run_metrics_new (
+                cycle_id TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                reasons_no_action_json TEXT NOT NULL,
+                intents_created INTEGER NOT NULL,
+                intents_after_risk INTEGER NOT NULL,
+                intents_executed INTEGER NOT NULL,
+                orders_submitted INTEGER NOT NULL,
+                rejects_by_code_json TEXT NOT NULL,
+                breaker_state TEXT NOT NULL,
+                degraded_mode INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO stage4_run_metrics_new(
+                cycle_id,
+                ts,
+                reasons_no_action_json,
+                intents_created,
+                intents_after_risk,
+                intents_executed,
+                orders_submitted,
+                rejects_by_code_json,
+                breaker_state,
+                degraded_mode
+            )
+            SELECT
+                cycle_id,
+                ts,
+                reasons_no_action_json,
+                CAST(intents_created AS INTEGER),
+                CAST(intents_after_risk AS INTEGER),
+                CAST(intents_executed AS INTEGER),
+                CAST(orders_submitted AS INTEGER),
+                rejects_by_code_json,
+                breaker_state,
+                CAST(degraded_mode AS INTEGER)
+            FROM stage4_run_metrics
+            """
+        )
+        conn.execute("DROP TABLE stage4_run_metrics")
+        conn.execute("ALTER TABLE stage4_run_metrics_new RENAME TO stage4_run_metrics")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage4_run_metrics_ts ON stage4_run_metrics(ts)"
+        )
 
     def _ensure_actions_metadata_columns(self, conn: sqlite3.Connection) -> None:
         columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(actions)")}
@@ -4144,6 +4235,66 @@ class StateStore:
                     fees_json,
                     pnl_json,
                     meta_json,
+                ),
+            )
+
+    def save_stage4_run_metrics(
+        self,
+        *,
+        cycle_id: str,
+        ts: datetime,
+        reasons_no_action: list[str],
+        intents_created: int,
+        intents_after_risk: int,
+        intents_executed: int,
+        orders_submitted: int,
+        rejects_by_code: dict[str, int],
+        breaker_state: str,
+        degraded_mode: bool,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage4_run_metrics(
+                    cycle_id,
+                    ts,
+                    reasons_no_action_json,
+                    intents_created,
+                    intents_after_risk,
+                    intents_executed,
+                    orders_submitted,
+                    rejects_by_code_json,
+                    breaker_state,
+                    degraded_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    ts=excluded.ts,
+                    reasons_no_action_json=excluded.reasons_no_action_json,
+                    intents_created=excluded.intents_created,
+                    intents_after_risk=excluded.intents_after_risk,
+                    intents_executed=excluded.intents_executed,
+                    orders_submitted=excluded.orders_submitted,
+                    rejects_by_code_json=excluded.rejects_by_code_json,
+                    breaker_state=excluded.breaker_state,
+                    degraded_mode=excluded.degraded_mode
+                """,
+                (
+                    cycle_id,
+                    ts.isoformat(),
+                    json.dumps(sorted(set(reasons_no_action))),
+                    int(intents_created),
+                    int(intents_after_risk),
+                    int(intents_executed),
+                    int(orders_submitted),
+                    json.dumps(
+                        {
+                            str(key): int(value)
+                            for key, value in sorted(rejects_by_code.items())
+                        },
+                        sort_keys=True,
+                    ),
+                    breaker_state,
+                    1 if degraded_mode else 0,
                 ),
             )
 

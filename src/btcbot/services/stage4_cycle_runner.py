@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -52,6 +54,13 @@ from btcbot.services.stage4_planning_kernel_integration import build_stage4_kern
 from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
+
+NO_ACTION_REASON_ENUM = {
+    "NO_INTENTS_CREATED",
+    "ALL_INTENTS_REJECTED_BY_RISK",
+    "NO_EXECUTABLE_ACTIONS",
+    "NO_SUBMISSIONS",
+}
 
 
 class _UnavailableLlmClient:
@@ -1005,6 +1014,40 @@ class Stage4CycleRunner:
                     for key, value in dict(bootstrap_drop_reasons).items()
                 }
             )
+            try:
+                health_snapshot_fn = getattr(exchange, "health_snapshot", None)
+                api_snapshot = health_snapshot_fn() if callable(health_snapshot_fn) else {}
+                breaker_is_open = bool((api_snapshot or {}).get("breaker_open", False))
+                degraded_mode = bool((api_snapshot or {}).get("degraded", False) or breaker_is_open)
+                rejects_by_code = self._extract_rejects_by_code(decision_report.counters)
+                state_store.save_stage4_run_metrics(
+                    cycle_id=cycle_id,
+                    ts=cycle_ended_at,
+                    reasons_no_action=self._reasons_no_action_enum(
+                        intents_created=len(intents),
+                        intents_after_risk=len(accepted_actions),
+                        intents_executed=execution_report.executed_total,
+                        orders_submitted=execution_report.submitted,
+                    ),
+                    intents_created=len(intents),
+                    intents_after_risk=len(accepted_actions),
+                    intents_executed=execution_report.executed_total,
+                    orders_submitted=execution_report.submitted,
+                    rejects_by_code=rejects_by_code,
+                    breaker_state=("open" if breaker_is_open else "closed"),
+                    degraded_mode=degraded_mode,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "stage4_run_metrics_persist_failed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "reason_code": "stage4_run_metrics_persist_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                    },
+                )
             with uow_factory() as uow:
                 uow.trace.record_cycle_audit(
                     cycle_id=cycle_id,
@@ -1673,6 +1716,36 @@ class Stage4CycleRunner:
                 )
             )
         return translated
+
+    @staticmethod
+    def _extract_rejects_by_code(counters: Mapping[str, int]) -> dict[str, int]:
+        rejects_by_code: dict[str, int] = {}
+        for key, value in counters.items():
+            match = re.search(r"(?:^|_)rejected(?:_code)?_(\d+)$", str(key))
+            if match is None:
+                continue
+            code = match.group(1)
+            rejects_by_code[code] = rejects_by_code.get(code, 0) + int(value)
+        return dict(sorted(rejects_by_code.items()))
+
+    def _reasons_no_action_enum(
+        self,
+        *,
+        intents_created: int,
+        intents_after_risk: int,
+        intents_executed: int,
+        orders_submitted: int,
+    ) -> list[str]:
+        reasons: list[str] = []
+        if intents_created <= 0:
+            reasons.append("NO_INTENTS_CREATED")
+        if intents_created > 0 and intents_after_risk <= 0:
+            reasons.append("ALL_INTENTS_REJECTED_BY_RISK")
+        if intents_after_risk > 0 and intents_executed <= 0:
+            reasons.append("NO_EXECUTABLE_ACTIONS")
+        if intents_executed > 0 and orders_submitted <= 0:
+            reasons.append("NO_SUBMISSIONS")
+        return [reason for reason in reasons if reason in NO_ACTION_REASON_ENUM]
 
     @staticmethod
     def _inc_reason(reasons: dict[str, int], key: str) -> None:
