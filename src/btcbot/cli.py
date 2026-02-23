@@ -408,7 +408,13 @@ def main() -> int:
     args = parser.parse_args()
     require_no_dotenv(args.env_file)
     settings = _load_settings(args.env_file)
-    settings = _prepare_runtime(settings, command_name=args.command, env_file_arg=args.env_file)
+    settings = _prepare_runtime(
+        settings,
+        command_name=args.command,
+        env_file_arg=args.env_file,
+        db_override=getattr(args, "db", None),
+        prefer_env_db=args.command == "stage7-db-count" and getattr(args, "db", None) is None,
+    )
     setup_logging(settings.log_level)
     if args.command != "run":
         configure_instrumentation(
@@ -592,21 +598,41 @@ def _command_touches_state_db(command_name: str) -> bool:
     }
 
 
+def _enforce_role_db_convention_for_command(command_name: str) -> bool:
+    return command_name in {"run", "canary", "stage4-run", "health"}
+
+
 def _prepare_runtime(
-    settings: Settings, *, command_name: str, env_file_arg: str | None
+    settings: Settings,
+    *,
+    command_name: str,
+    env_file_arg: str | None,
+    db_override: str | None = None,
+    prefer_env_db: bool = False,
 ) -> Settings:
     require_no_dotenv(env_file_arg)
     if _command_touches_state_db(command_name):
+        effective_db = db_override.strip() if db_override and db_override.strip() else None
+        if effective_db is None and prefer_env_db:
+            env_db = os.getenv("STATE_DB_PATH")
+            effective_db = env_db.strip() if env_db and env_db.strip() else None
+        if effective_db is not None:
+            if hasattr(settings, "model_copy"):
+                settings = settings.model_copy(update={"state_db_path": effective_db})
+            else:
+                settings.state_db_path = effective_db
+
         db_path = normalize_db_path(settings.state_db_path)
         if hasattr(settings, "model_copy"):
             settings = settings.model_copy(update={"state_db_path": str(db_path)})
         else:
             settings.state_db_path = str(db_path)
-        enforce_role_db_convention(
-            getattr(settings, "process_role", ""),
-            bool(getattr(settings, "live_trading", False)),
-            db_path,
-        )
+        if _enforce_role_db_convention_for_command(command_name):
+            enforce_role_db_convention(
+                getattr(settings, "process_role", ""),
+                bool(getattr(settings, "live_trading", False)),
+                db_path,
+            )
 
     logger.info(
         "startup",

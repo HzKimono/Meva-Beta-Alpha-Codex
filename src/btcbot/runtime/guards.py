@@ -21,16 +21,16 @@ def normalize_db_path(raw: str) -> Path:
     if not candidate:
         raise ValueError(
             "STATE_DB_PATH is required and cannot be empty. "
-            "Use an absolute .db path in PowerShell, e.g. "
+            "Use a .db path in PowerShell, e.g. "
             "$env:STATE_DB_PATH='C:\\btcbot\\live\\state_live.db'."
         )
 
-    path = Path(candidate)
+    path = Path(candidate).expanduser()
+    if not path.is_absolute() and candidate.startswith("/"):
+        path = Path(candidate)
     if not path.is_absolute():
-        raise ValueError(
-            "STATE_DB_PATH must be an absolute path. "
-            "PowerShell example: $env:STATE_DB_PATH='C:\\btcbot\\monitor\\state_monitor.db'."
-        )
+        path = path.resolve()
+
     if path.suffix.lower() != ".db":
         raise ValueError("STATE_DB_PATH must end with '.db'.")
 

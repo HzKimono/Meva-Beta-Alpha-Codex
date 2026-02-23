@@ -134,7 +134,10 @@ def validate_secret_controls(
 
 def log_secret_validation(result: SecretValidationResult) -> None:
     for warning in result.warnings:
-        logger.warning("secret_control_warning", extra={"extra": {"warning": warning}})
+        try:
+            logger.warning("secret_control_warning", extra={"extra": {"warning": warning}})
+        except OSError:
+            pass
     for err in result.errors:
         logger.error("secret_control_error", extra={"extra": {"error": err}})
 
