@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from typing import cast
@@ -140,17 +142,41 @@ class Stage7CycleRunner:
         resolved_now = now_utc or datetime.now(UTC)
         resolved_cycle_id = cycle_id or uuid4().hex
         resolved_run_id = run_id or uuid4().hex
-        self.run_one_cycle_with_dependencies(
-            settings=settings,
-            exchange=resolved_exchange,
-            state_store=resolved_store,
-            now_utc=resolved_now,
-            cycle_id=resolved_cycle_id,
-            run_id=resolved_run_id,
-            stage4_result=stage4_result,
-            enable_adaptation=enable_adaptation,
-            use_active_params=use_active_params,
-        )
+        process_role = coerce_process_role(getattr(settings, "process_role", None)).value
+        try:
+            self.run_one_cycle_with_dependencies(
+                settings=settings,
+                exchange=resolved_exchange,
+                state_store=resolved_store,
+                now_utc=resolved_now,
+                cycle_id=resolved_cycle_id,
+                run_id=resolved_run_id,
+                stage4_result=stage4_result,
+                enable_adaptation=enable_adaptation,
+                use_active_params=use_active_params,
+            )
+            api_health = "healthy"
+            snapshot_fn = getattr(resolved_exchange, "health_snapshot", None)
+            if callable(snapshot_fn):
+                snapshot = snapshot_fn() or {}
+                if bool(snapshot.get("degraded") or snapshot.get("breaker_open")):
+                    api_health = "degraded"
+            if api_health == "healthy":
+                resolved_store.reset_consecutive_critical_errors(process_role)
+        except Exception as exc:  # noqa: BLE001
+            next_count = resolved_store.increment_consecutive_critical_errors(process_role)
+            if next_count >= int(getattr(settings, "kill_chain_max_consecutive_errors", 3)):
+                cooldown_seconds = int(getattr(settings, "kill_chain_cooldown_seconds", 0))
+                until_ts = None
+                if cooldown_seconds > 0:
+                    until_ts = (datetime.now(UTC) + timedelta(seconds=cooldown_seconds)).isoformat()
+                resolved_store.set_kill_switch(
+                    process_role,
+                    True,
+                    f"kill_chain:{type(exc).__name__}",
+                    until_ts,
+                )
+            raise
 
         if should_close_exchange:
             close = getattr(resolved_exchange, "close", None)
@@ -1037,7 +1063,39 @@ class Stage7CycleRunner:
                 }
             },
         )
-        logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id}})
+        snapshot_fn = getattr(exchange, "health_snapshot", None)
+        api_snapshot = snapshot_fn() if callable(snapshot_fn) else {}
+        breaker_open = bool((api_snapshot or {}).get("breaker_open", False))
+        backoff_seconds = float((api_snapshot or {}).get("recommended_sleep_seconds", 0.0) or 0.0)
+        api_health = "degraded" if bool((api_snapshot or {}).get("degraded") or breaker_open) else "healthy"
+        consecutive_errors = state_store.get_consecutive_critical_errors(process_role)
+        kill_enabled, kill_reason, _kill_until = state_store.get_kill_switch(process_role)
+        cycle_summary = {
+            "cycle_id": cycle_id,
+            "role": process_role,
+            "dry_run": bool(settings.dry_run),
+            "mode": final_risk_mode.value,
+            "api_health": api_health,
+            "breaker_open": breaker_open,
+            "backoff_seconds": backoff_seconds,
+            "intents_total": len(order_intents),
+            "intents_rejected_precheck": skipped_count,
+            "intents_rejected_risk": len([i for i in order_intents if i.skipped]),
+            "orders_submitted": oms_submitted,
+            "orders_canceled": oms_canceled,
+            "would_submit_orders": oms_submitted if bool(settings.dry_run) else 0,
+            "would_cancel_orders": oms_canceled if bool(settings.dry_run) else 0,
+            "pnl_realized_try": str(snapshot.realized_pnl_try),
+            "pnl_unrealized_try": str(snapshot.unrealized_pnl_try),
+            "fees_try": str(snapshot.fees_try),
+            "consecutive_critical_errors": consecutive_errors,
+            "kill_switch_state": "killed" if kill_enabled else "normal",
+            "latency_ms": _coerce_int(finalized.get("cycle_total_ms", 0)),
+        }
+        state_store.set_runtime_state(f"cycle_summary:{process_role}", json.dumps(cycle_summary, sort_keys=True))
+        state_store.set_runtime_counter(f"orders_submitted:{process_role}", int(cycle_summary["orders_submitted"]))
+        logger.info("cycle_summary", extra={"extra": cycle_summary})
+        logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id, "kill_reason": kill_reason}})
         return stage4_result
 
     def _build_stage7_order_intents(

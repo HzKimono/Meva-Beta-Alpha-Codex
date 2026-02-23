@@ -88,6 +88,20 @@ class Settings(BaseSettings):
     )
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     dry_run: bool = Field(default=True, alias="DRY_RUN")
+    kill_chain_max_consecutive_errors: int = Field(
+        default=3,
+        alias="KILL_CHAIN_MAX_CONSECUTIVE_ERRORS",
+    )
+    kill_chain_cooldown_seconds: int = Field(default=0, alias="KILL_CHAIN_COOLDOWN_SECONDS")
+    api_degrade_backoff_min_seconds: int = Field(
+        default=2,
+        alias="API_DEGRADE_BACKOFF_MIN_SECONDS",
+    )
+    api_degrade_backoff_max_seconds: int = Field(
+        default=60,
+        alias="API_DEGRADE_BACKOFF_MAX_SECONDS",
+    )
+    api_degrade_jitter_ratio: float = Field(default=0.2, alias="API_DEGRADE_JITTER_RATIO")
     live_trading: bool = Field(default=False, alias="LIVE_TRADING")
     live_trading_ack: str | None = Field(default=None, alias="LIVE_TRADING_ACK")
 
