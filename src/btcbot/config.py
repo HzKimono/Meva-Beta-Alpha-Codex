@@ -941,9 +941,7 @@ class Settings(BaseSettings):
                     },
                 )
             else:
-                raise ValueError(
-                    f"PORTFOLIO_TARGETS weights must sum to 1.0±1e-6 (got {total})"
-                )
+                raise ValueError(f"PORTFOLIO_TARGETS weights must sum to 1.0±1e-6 (got {total})")
 
         return {symbol: weights[symbol] for symbol in sorted(weights)}
 

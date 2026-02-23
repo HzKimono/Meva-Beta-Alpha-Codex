@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import Literal
-
-import logging
 
 from btcbot.config import Settings
 from btcbot.domain.models import Balance, normalize_symbol
@@ -151,7 +150,9 @@ class PortfolioPolicyService:
                     "equity_try": str(snapshot.equity_try),
                     "cash_try": str(snapshot.cash_try),
                     "investable_equity": str(investable_equity),
-                    "target_weights": {symbol: str(weight) for symbol, weight in target_weights.items()},
+                    "target_weights": {
+                        symbol: str(weight) for symbol, weight in target_weights.items()
+                    },
                     "actions_count": len(constrained_actions),
                     "planned_turnover_try": str(planned_turnover_try),
                     "dropped_reasons": [

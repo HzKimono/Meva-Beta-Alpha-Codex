@@ -1548,7 +1548,9 @@ class StateStore:
             )
             """
         )
-        ledger_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(ledger_events)")}
+        ledger_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(ledger_events)")
+        }
         if "inserted_at" not in ledger_columns:
             conn.execute("ALTER TABLE ledger_events ADD COLUMN inserted_at TEXT")
             conn.execute(
@@ -2459,8 +2461,6 @@ class StateStore:
             )
             return int(cur.rowcount)
 
-
-
     def set_runtime_counter(self, key: str, value: int) -> None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as conn:
@@ -2626,6 +2626,7 @@ class StateStore:
                 """,
                 (error[:500], now, key),
             )
+
     def _row_to_reservation_result(self, row: sqlite3.Row, *, reserved: bool) -> ReservationResult:
         return ReservationResult(
             reserved=reserved,

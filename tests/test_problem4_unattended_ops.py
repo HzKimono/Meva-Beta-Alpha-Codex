@@ -6,7 +6,15 @@ from decimal import Decimal
 import pytest
 
 from btcbot.config import Settings
-from btcbot.domain.models import Balance, OpenOrders, Order, OrderIntent, OrderSide, OrderStatus, PairInfo
+from btcbot.domain.models import (
+    Balance,
+    OpenOrders,
+    Order,
+    OrderIntent,
+    OrderSide,
+    OrderStatus,
+    PairInfo,
+)
 from btcbot.services.execution_service import ExecutionService
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.state_store import StateStore
@@ -17,7 +25,10 @@ class _MiniExchange:
         self.placed: list[tuple[str, OrderSide, float, float, str | None]] = []
 
     def get_balances(self) -> list[Balance]:
-        return [Balance(asset="TRY", free=Decimal("100000")), Balance(asset="BTC", free=Decimal("1"))]
+        return [
+            Balance(asset="TRY", free=Decimal("100000")),
+            Balance(asset="BTC", free=Decimal("1")),
+        ]
 
     def get_open_orders(self, pair_symbol: str) -> OpenOrders:
         del pair_symbol
@@ -33,7 +44,14 @@ class _MiniExchange:
     def get_exchange_info(self) -> list[PairInfo]:
         return []
 
-    def place_limit_order(self, symbol: str, side: OrderSide, price: float, quantity: float, client_order_id: str | None = None) -> Order:
+    def place_limit_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        price: float,
+        quantity: float,
+        client_order_id: str | None = None,
+    ) -> Order:
         self.placed.append((symbol, side, price, quantity, client_order_id))
         return Order(
             order_id="oid-1",
@@ -67,7 +85,9 @@ def test_state_store_idempotency_reservation_lifecycle(tmp_path):
 def test_execution_service_dry_run_tracks_would_submit(tmp_path):
     store = StateStore(db_path=str(tmp_path / "state.db"))
     exchange = _MiniExchange()
-    service = ExecutionService(exchange=exchange, state_store=store, dry_run=True, kill_switch=False)
+    service = ExecutionService(
+        exchange=exchange, state_store=store, dry_run=True, kill_switch=False
+    )
     intent = OrderIntent(
         symbol="BTC_TRY",
         side=OrderSide.BUY,
@@ -95,9 +115,13 @@ def test_kill_chain_enables_kill_switch_at_threshold(tmp_path, monkeypatch):
     settings = Settings(state_db_path=str(tmp_path / "state.db"))
 
     with pytest.raises(RuntimeError):
-        runner.run_one_cycle(settings=settings, state_store=store, exchange=object(), stage4_result=0)
+        runner.run_one_cycle(
+            settings=settings, state_store=store, exchange=object(), stage4_result=0
+        )
     with pytest.raises(RuntimeError):
-        runner.run_one_cycle(settings=settings, state_store=store, exchange=object(), stage4_result=0)
+        runner.run_one_cycle(
+            settings=settings, state_store=store, exchange=object(), stage4_result=0
+        )
 
     enabled, reason, _ = store.get_kill_switch("LIVE")
     assert enabled is True

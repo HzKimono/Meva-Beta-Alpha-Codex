@@ -948,14 +948,9 @@ class BtcturkHttpClient(ExchangeClient):
     def health_snapshot(self) -> dict[str, object]:
         now = monotonic()
         open_groups = [
-            group
-            for group, state in self._breaker_state.items()
-            if state.open_until > now
+            group for group, state in self._breaker_state.items() if state.open_until > now
         ]
-        remaining = [
-            max(0.0, self._breaker_state[group].open_until - now)
-            for group in open_groups
-        ]
+        remaining = [max(0.0, self._breaker_state[group].open_until - now) for group in open_groups]
         recommended = 0.0
         if remaining:
             recommended = max(remaining)

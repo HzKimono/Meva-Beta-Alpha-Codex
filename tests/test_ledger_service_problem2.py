@@ -10,7 +10,9 @@ from btcbot.services.ledger_service import LedgerService
 from btcbot.services.state_store import StateStore
 
 
-def _fill(*, fill_id: str, side: str, price: str, qty: str, fee: str, fee_asset: str, ts: datetime) -> Fill:
+def _fill(
+    *, fill_id: str, side: str, price: str, qty: str, fee: str, fee_asset: str, ts: datetime
+) -> Fill:
     return Fill(
         fill_id=fill_id,
         order_id=f"o-{fill_id}",
@@ -43,10 +45,14 @@ def test_ingest_exchange_updates_idempotent_and_pnl_stable(tmp_path) -> None:
     ]
 
     first = service.ingest_exchange_updates(fills)
-    snap_first = service.snapshot(mark_prices={"BTCTRY": Decimal("120")}, cash_try=Decimal("0"), ts=t0)
+    snap_first = service.snapshot(
+        mark_prices={"BTCTRY": Decimal("120")}, cash_try=Decimal("0"), ts=t0
+    )
 
     second = service.ingest_exchange_updates(fills)
-    snap_second = service.snapshot(mark_prices={"BTCTRY": Decimal("120")}, cash_try=Decimal("0"), ts=t0)
+    snap_second = service.snapshot(
+        mark_prices={"BTCTRY": Decimal("120")}, cash_try=Decimal("0"), ts=t0
+    )
 
     assert first.events_inserted == 4
     assert second.events_inserted == 0
@@ -94,14 +100,18 @@ def test_fee_conversion_missing_and_available_rates(tmp_path) -> None:
     ]
     service.ingest_exchange_updates(fills)
 
-    report_missing = service.report(mark_prices={}, cash_try=Decimal("0"), price_for_fee_conversion=None)
+    report_missing = service.report(
+        mark_prices={}, cash_try=Decimal("0"), price_for_fee_conversion=None
+    )
     assert report_missing.fees_total_try == Decimal("0")
     assert report_missing.fee_conversion_missing_currencies == ("USDT",)
 
     report_with_converter = service.report(
         mark_prices={},
         cash_try=Decimal("0"),
-        price_for_fee_conversion=lambda base, quote: Decimal("35") if (base, quote) == ("USDT", "TRY") else Decimal("0"),
+        price_for_fee_conversion=lambda base, quote: Decimal("35")
+        if (base, quote) == ("USDT", "TRY")
+        else Decimal("0"),
     )
     assert report_with_converter.fees_total_try == Decimal("3.5")
     assert report_with_converter.fee_conversion_missing_currencies == ()

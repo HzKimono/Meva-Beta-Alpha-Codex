@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -1067,7 +1066,9 @@ class Stage7CycleRunner:
         api_snapshot = snapshot_fn() if callable(snapshot_fn) else {}
         breaker_open = bool((api_snapshot or {}).get("breaker_open", False))
         backoff_seconds = float((api_snapshot or {}).get("recommended_sleep_seconds", 0.0) or 0.0)
-        api_health = "degraded" if bool((api_snapshot or {}).get("degraded") or breaker_open) else "healthy"
+        api_health = (
+            "degraded" if bool((api_snapshot or {}).get("degraded") or breaker_open) else "healthy"
+        )
         consecutive_errors = state_store.get_consecutive_critical_errors(process_role)
         kill_enabled, kill_reason, _kill_until = state_store.get_kill_switch(process_role)
         cycle_summary = {
@@ -1092,10 +1093,17 @@ class Stage7CycleRunner:
             "kill_switch_state": "killed" if kill_enabled else "normal",
             "latency_ms": _coerce_int(finalized.get("cycle_total_ms", 0)),
         }
-        state_store.set_runtime_state(f"cycle_summary:{process_role}", json.dumps(cycle_summary, sort_keys=True))
-        state_store.set_runtime_counter(f"orders_submitted:{process_role}", int(cycle_summary["orders_submitted"]))
+        state_store.set_runtime_state(
+            f"cycle_summary:{process_role}", json.dumps(cycle_summary, sort_keys=True)
+        )
+        state_store.set_runtime_counter(
+            f"orders_submitted:{process_role}", int(cycle_summary["orders_submitted"])
+        )
         logger.info("cycle_summary", extra={"extra": cycle_summary})
-        logger.info("stage7_cycle_end", extra={"extra": {"cycle_id": cycle_id, "run_id": run_id, "kill_reason": kill_reason}})
+        logger.info(
+            "stage7_cycle_end",
+            extra={"extra": {"cycle_id": cycle_id, "run_id": run_id, "kill_reason": kill_reason}},
+        )
         return stage4_result
 
     def _build_stage7_order_intents(

@@ -1262,7 +1262,9 @@ class ExecutionService:
             )
             if self.dry_run:
                 would_submit_orders += 1
-                would_submit_notional_try += Decimal(str(intent.price)) * Decimal(str(intent.quantity))
+                would_submit_notional_try += Decimal(str(intent.price)) * Decimal(
+                    str(intent.quantity)
+                )
                 emit_decision(
                     logger,
                     {
@@ -1420,7 +1422,9 @@ class ExecutionService:
                         order_id=None,
                         status="UNKNOWN",
                     )
-                    self.state_store.fail_idempotency(idempotency_key, outcome.reason or "submit_reconcile_unknown")
+                    self.state_store.fail_idempotency(
+                        idempotency_key, outcome.reason or "submit_reconcile_unknown"
+                    )
                     unknown_order_id = f"unknown:{client_order_id}"
                     now_utc = datetime.now(UTC)
                     self.state_store.save_order(
@@ -1520,7 +1524,9 @@ class ExecutionService:
                         order_id=None,
                         status="UNKNOWN",
                     )
-                    self.state_store.fail_idempotency(idempotency_key, outcome.reason or "submit_reconcile_unknown")
+                    self.state_store.fail_idempotency(
+                        idempotency_key, outcome.reason or "submit_reconcile_unknown"
+                    )
                     unknown_order_id = f"unknown:{client_order_id}"
                     now_utc = datetime.now(UTC)
                     self.state_store.save_order(

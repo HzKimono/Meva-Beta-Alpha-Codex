@@ -258,7 +258,9 @@ def test_weighted_allocations_follow_portfolio_targets() -> None:
         now_utc=datetime(2024, 1, 1, tzinfo=UTC),
     )
 
-    by_symbol = {allocation.symbol: allocation.target_notional_try for allocation in plan.allocations}
+    by_symbol = {
+        allocation.symbol: allocation.target_notional_try for allocation in plan.allocations
+    }
     assert by_symbol["BTCTRY"] == Decimal("400")
     assert by_symbol["ETHTRY"] == Decimal("200")
     assert by_symbol["SOLTRY"] == Decimal("200")
@@ -289,6 +291,8 @@ def test_weighted_allocations_respect_max_position_cap() -> None:
         now_utc=datetime(2024, 1, 1, tzinfo=UTC),
     )
 
-    by_symbol = {allocation.symbol: allocation.target_notional_try for allocation in plan.allocations}
+    by_symbol = {
+        allocation.symbol: allocation.target_notional_try for allocation in plan.allocations
+    }
     assert by_symbol["BTCTRY"] == Decimal("500")
     assert any(note.startswith("leftover_weight_to_cash=") for note in plan.notes)
