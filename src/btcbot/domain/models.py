@@ -171,6 +171,18 @@ class SubmitOrderResult(BaseModel):
     success: bool = True
 
 
+def map_exchange_ack_to_submit_result(ack: object) -> SubmitOrderResult:
+    if isinstance(ack, SubmitOrderResult):
+        return ack
+
+    order_id = getattr(ack, "order_id", None)
+    if order_id in (None, ""):
+        order_id = getattr(ack, "exchange_order_id", None)
+    if order_id in (None, ""):
+        raise ValidationError("submit ack missing order_id")
+    return SubmitOrderResult(order_id=str(order_id))
+
+
 class CancelOrderResult(BaseModel):
     success: bool
 

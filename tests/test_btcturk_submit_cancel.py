@@ -446,3 +446,47 @@ def test_place_limit_order_enforces_same_scale_validation_as_submit_limit_order(
 
     assert calls["post"] == 0
     client.close()
+
+
+def test_submit_limit_order_min_total_preflight_blocks_http() -> None:
+    calls = {"post": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v2/server/exchangeinfo":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [
+                        {
+                            "pairSymbol": "BTCTRY",
+                            "numeratorScale": 8,
+                            "denominatorScale": 2,
+                            "minTotalAmount": "1000",
+                        }
+                    ],
+                },
+            )
+        if request.method == "POST" and request.url.path == "/api/v1/order":
+            calls["post"] += 1
+            return httpx.Response(200, json={"success": True, "data": {"id": 1}})
+        return httpx.Response(404)
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c2VjcmV0",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+    )
+
+    with pytest.raises(ValidationError, match="total below min_total"):
+        client.submit_limit_order(
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("0.1"),
+            client_order_id="coid-min-total",
+        )
+
+    assert calls["post"] == 0
+    client.close()
