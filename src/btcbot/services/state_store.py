@@ -1542,10 +1542,17 @@ class StateStore:
                 exchange_trade_id TEXT,
                 exchange_order_id TEXT,
                 client_order_id TEXT,
-                meta_json TEXT NOT NULL
+                meta_json TEXT NOT NULL,
+                inserted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        ledger_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(ledger_events)")}
+        if "inserted_at" not in ledger_columns:
+            conn.execute("ALTER TABLE ledger_events ADD COLUMN inserted_at TEXT")
+            conn.execute(
+                "UPDATE ledger_events SET inserted_at = CURRENT_TIMESTAMP WHERE inserted_at IS NULL"
+            )
         # Dedupe scheme for exchange_trade_id:
         # - FILL events use raw exchange trade IDs (e.g., "t-123").
         # - FEE events use namespaced IDs (e.g., "fee:t-123") to avoid collisions.
@@ -1566,6 +1573,10 @@ class StateStore:
               AND side IS NOT NULL
               AND price IS NOT NULL
             """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_events_ts ON ledger_events(ts)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ledger_events_symbol_ts ON ledger_events(symbol, ts)"
         )
         conn.execute(
             """
@@ -3721,7 +3732,7 @@ class StateStore:
 
     def append_ledger_events(self, events: list[LedgerEvent]) -> AppendResult:
         inserted = 0
-        with self._connect() as conn:
+        with self.transaction() as conn:
             for event in events:
                 event_ts = ensure_utc(event.ts).isoformat()
                 cur = conn.execute(
@@ -3775,7 +3786,10 @@ class StateStore:
 
         return [self._row_to_ledger_event(row) for row in rows]
 
-    def load_ledger_events_after_rowid(self, last_rowid: int) -> tuple[list[LedgerEvent], int]:
+    def load_ledger_events_after_rowid(
+        self, *, scope_id: str = "global", last_rowid: int
+    ) -> tuple[list[LedgerEvent], int]:
+        del scope_id
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -3828,7 +3842,7 @@ class StateStore:
         snapshot_version: int,
         updated_at: str,
     ) -> None:
-        with self._connect() as conn:
+        with self.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO ledger_reducer_checkpoints(

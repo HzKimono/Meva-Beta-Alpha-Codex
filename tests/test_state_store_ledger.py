@@ -129,8 +129,8 @@ def test_ledger_incremental_rowid_and_checkpoint_io(tmp_path) -> None:
     store.append_ledger_events(events)
 
     assert store.get_latest_ledger_event_rowid() >= 2
-    events_after_zero, max_rowid_zero = store.load_ledger_events_after_rowid(0)
-    events_after_one, max_rowid_one = store.load_ledger_events_after_rowid(1)
+    events_after_zero, max_rowid_zero = store.load_ledger_events_after_rowid(last_rowid=0)
+    events_after_one, max_rowid_one = store.load_ledger_events_after_rowid(last_rowid=1)
     assert len(events_after_zero) == 2
     assert len(events_after_one) == 1
     assert max_rowid_zero >= 2
