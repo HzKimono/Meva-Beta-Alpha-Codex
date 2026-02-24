@@ -1619,6 +1619,7 @@ class StateStore:
                 status TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'dry_run',
                 last_error TEXT,
+                last_error_code INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -1641,6 +1642,8 @@ class StateStore:
             )
         if "last_error" not in order_columns:
             conn.execute("ALTER TABLE stage4_orders ADD COLUMN last_error TEXT")
+        if "last_error_code" not in order_columns:
+            conn.execute("ALTER TABLE stage4_orders ADD COLUMN last_error_code INTEGER")
         if "exchange_order_id" not in order_columns:
             conn.execute("ALTER TABLE stage4_orders ADD COLUMN exchange_order_id TEXT")
         if "exchange_client_id" not in order_columns:
@@ -3304,6 +3307,7 @@ class StateStore:
         qty: Decimal,
         mode: str,
         status: str = "error",
+        error_code: int | None = None,
     ) -> None:
         # TODO(P2-2): remove facade once all callers migrate to UnitOfWork directly.
         with self._uow_factory() as uow:
@@ -3316,6 +3320,7 @@ class StateStore:
                 qty=qty,
                 mode=mode,
                 status=status,
+                error_code=error_code,
             )
 
     def record_stage4_order_rejected(
@@ -3328,6 +3333,7 @@ class StateStore:
         price: Decimal = Decimal("0"),
         qty: Decimal = Decimal("0"),
         mode: str = "dry_run",
+        error_code: int | None = None,
     ) -> None:
         # TODO(P2-2): remove facade once all callers migrate to UnitOfWork directly.
         with self._uow_factory() as uow:
@@ -3339,6 +3345,7 @@ class StateStore:
                 price=price,
                 qty=qty,
                 mode=mode,
+                error_code=error_code,
             )
 
     @staticmethod

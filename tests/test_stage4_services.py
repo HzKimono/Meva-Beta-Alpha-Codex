@@ -21,6 +21,10 @@ from btcbot.domain.stage4 import (
 from btcbot.services.accounting_service_stage4 import AccountingIntegrityError, AccountingService
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
+from btcbot.services.execution_service_stage4 import (
+    REASON_TOKEN_EXCHANGE_1123,
+    REASON_TOKEN_GATE_1123,
+)
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskDecision, RiskPolicy
@@ -1630,11 +1634,12 @@ def test_execution_gate_blocks_submit_when_symbol_on_1123_cooldown(store: StateS
     assert rejected.status == "rejected"
     with store._connect() as conn:
         last_error_row = conn.execute(
-            "SELECT last_error FROM stage4_orders WHERE client_order_id = ?",
+            "SELECT last_error, last_error_code FROM stage4_orders WHERE client_order_id = ?",
             ("cid-gate",),
         ).fetchone()
     assert last_error_row is not None
-    assert "symbol_on_cooldown_1123" in str(last_error_row["last_error"] or "")
+    assert str(last_error_row["last_error"] or "") == REASON_TOKEN_GATE_1123
+    assert int(last_error_row["last_error_code"]) == 1123
 
 
 def test_exchange_reject_1123_records_symbol_cooldown(store: StateStore) -> None:
@@ -1693,3 +1698,11 @@ def test_exchange_reject_1123_records_symbol_cooldown(store: StateStore) -> None
     state = store.get_symbol_cooldown("BTC_TRY", now_ts=3001)
     assert state is not None
     assert state.cooldown_until_ts == 3000 + 300
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT last_error, last_error_code FROM stage4_orders WHERE client_order_id = ?",
+            ("cid-1123",),
+        ).fetchone()
+    assert row is not None
+    assert str(row["last_error"] or "") == REASON_TOKEN_EXCHANGE_1123
+    assert int(row["last_error_code"]) == 1123

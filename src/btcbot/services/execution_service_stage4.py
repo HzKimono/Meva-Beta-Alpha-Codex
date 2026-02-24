@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_OLD_ORDER_STATUSES = {"canceled", "filled", "rejected", "unknown_closed"}
 REJECT_1123_CODE = 1123
+REASON_TOKEN_EXCHANGE_1123 = "exchange_reject_1123"
+REASON_TOKEN_GATE_1123 = "exchange_reject_1123_cooldown_gate"
+REASON_TOKEN_STATEFAIL_1123 = "exchange_reject_1123_state_read_failed"
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,7 @@ class ExecutionReport:
     simulated: int
     rejected: int
     rejected_min_notional: int
+    rejected_by_code: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -65,12 +69,13 @@ class ExecutionService:
     def execute_with_report(self, actions: list[LifecycleAction]) -> ExecutionReport:
         if self.settings.kill_switch:
             logger.warning("kill_switch_active_blocking_writes")
-            return ExecutionReport(0, 0, 0, 0, 0, 0)
+            return ExecutionReport(0, 0, 0, 0, 0, 0, {})
         if self.settings.live_trading and not self.settings.is_live_trading_enabled():
             raise RuntimeError("LIVE_TRADING requires LIVE_TRADING_ACK=I_UNDERSTAND")
 
         live_mode = self.settings.is_live_trading_enabled() and not self.settings.dry_run
         submitted = canceled = simulated = rejected = rejected_min_notional = 0
+        self._rejects_by_code: dict[str, int] = {}
 
         regular_actions, replace_groups = self._extract_replace_groups(actions)
 
@@ -120,7 +125,12 @@ class ExecutionService:
             simulated=simulated,
             rejected=rejected,
             rejected_min_notional=rejected_min_notional,
+            rejected_by_code=dict(sorted(self._rejects_by_code.items())),
         )
+
+    def _inc_reject_code(self, code: int | str) -> None:
+        key = str(code)
+        self._rejects_by_code[key] = self._rejects_by_code.get(key, 0) + 1
 
     @staticmethod
     def _extract_replace_groups(
@@ -400,24 +410,28 @@ class ExecutionService:
             if cooldown_state == "READ_FAILED":
                 self.state_store.record_stage4_order_rejected(
                     action.client_order_id,
-                    "symbol_on_cooldown_1123:state_read_failed",
+                    REASON_TOKEN_STATEFAIL_1123,
                     symbol=action.symbol,
                     side=action.side,
                     price=action.price,
                     qty=action.qty,
                     mode=("live" if live_mode else "dry_run"),
+                    error_code=REJECT_1123_CODE,
                 )
+                self._inc_reject_code(REJECT_1123_CODE)
                 return 0, 0, 1, 0
             if cooldown_state is not None and cooldown_state.cooldown_until_ts > now_ts:
                 self.state_store.record_stage4_order_rejected(
                     action.client_order_id,
-                    f"symbol_on_cooldown_1123:until={cooldown_state.cooldown_until_ts}",
+                    REASON_TOKEN_GATE_1123,
                     symbol=action.symbol,
                     side=action.side,
                     price=action.price,
                     qty=action.qty,
                     mode=("live" if live_mode else "dry_run"),
+                    error_code=REJECT_1123_CODE,
                 )
+                self._inc_reject_code(REJECT_1123_CODE)
                 return 0, 0, 1, 0
 
         exchange_client_id = build_exchange_client_id(
@@ -508,17 +522,28 @@ class ExecutionService:
                 )
                 self.state_store.record_stage4_order_rejected(
                     action.client_order_id,
-                    "exchange_reject_1123"
-                    f":rolling_count={reject_state['rolling_count']}"
-                    f":window_start_ts={reject_state['window_start_ts']}"
-                    f":cooldown_until_ts={reject_state['cooldown_until_ts']}",
+                    REASON_TOKEN_EXCHANGE_1123,
                     symbol=action.symbol,
                     side=action.side,
                     price=q_price,
                     qty=q_qty,
                     mode="live",
+                    error_code=REJECT_1123_CODE,
                 )
-                return 0, 0, 1, 1
+                self._inc_reject_code(REJECT_1123_CODE)
+                logger.info(
+                    "stage4_exchange_reject_1123_recorded",
+                    extra={
+                        "extra": {
+                            "symbol": action.symbol,
+                            "client_order_id": action.client_order_id,
+                            "rolling_count": reject_state["rolling_count"],
+                            "window_start_ts": reject_state["window_start_ts"],
+                            "cooldown_until_ts": reject_state["cooldown_until_ts"],
+                        }
+                    },
+                )
+                return 0, 0, 1, 0
             raise
         if isinstance(ack_or_uncertain, UncertainResult):
             self.state_store.record_stage4_order_error(
