@@ -69,6 +69,14 @@ class ExecutionService:
     def execute_with_report(self, actions: list[LifecycleAction]) -> ExecutionReport:
         if self.settings.kill_switch:
             logger.warning("kill_switch_active_blocking_writes")
+            suppressed_submissions = sum(
+                1 for action in actions if action.action_type == LifecycleActionType.SUBMIT
+            )
+            if suppressed_submissions > 0:
+                self.instrumentation.counter(
+                    "dryrun_submission_suppressed_total",
+                    suppressed_submissions,
+                )
             return ExecutionReport(0, 0, 0, 0, 0, 0, {})
         if self.settings.live_trading and not self.settings.is_live_trading_enabled():
             raise RuntimeError("LIVE_TRADING requires LIVE_TRADING_ACK=I_UNDERSTAND")
@@ -499,6 +507,7 @@ class ExecutionService:
                 price=q_price,
                 qty=q_qty,
             )
+            self.instrumentation.counter("dryrun_submission_suppressed_total", 1)
             return 0, 1, 0, 0
 
         try:
