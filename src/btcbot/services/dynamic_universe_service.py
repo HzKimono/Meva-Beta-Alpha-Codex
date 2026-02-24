@@ -22,7 +22,6 @@ _STABLE_TOKENS = {
     "TUSD",
     "FDUSD",
     "BUSD",
-    "USDP",
 }
 
 
@@ -221,15 +220,17 @@ class DynamicUniverseService:
         ranked = sorted(candidates, key=lambda item: (Decimal("0") - item.score, item.symbol))
         desired = tuple(item.symbol for item in ranked[: max(0, settings.universe_top_n)])
         previous = tuple(str(item) for item in (latest or {}).get("selected_symbols", []))
-        churn_count = self._compute_churn_count(previous, desired)
-        day_churn = state_store.get_dynamic_universe_churn_count_for_day(now_utc)
         selected = desired
-        if churn_count > 0 and day_churn >= settings.universe_churn_max_per_day:
-            viable_previous = tuple(sym for sym in previous if any(c.symbol == sym for c in ranked))
-            if viable_previous:
-                selected = viable_previous[: max(0, settings.universe_top_n)]
-                self._inc(ineligible_counts, "churn_guard")
-                churn_count = 0
+        guarded = False
+        would_change = selected != previous
+        day_churn = state_store.get_dynamic_universe_churn_count_for_day(now_utc)
+        churn_next = day_churn + (1 if would_change else 0)
+        if previous and churn_next > settings.universe_churn_max_per_day:
+            # Churn is tracked as selection changes per day (+1 per changed cycle), not symbol swaps.
+            selected = previous
+            guarded = True
+            self._inc(ineligible_counts, "churn_guard")
+        churn_count = 1 if selected != previous else 0
         instr.histogram("universe_score_ms", (perf_counter() - t_score) * 1000.0)
 
         selected_set = set(selected)
@@ -270,7 +271,7 @@ class DynamicUniverseService:
             filters=filters,
             ineligible_counts=ineligible_counts,
             churn_count=churn_count,
-            refreshed=True,
+            refreshed=not guarded,
         )
 
         for reason, count in ineligible_counts.items():
@@ -290,7 +291,7 @@ class DynamicUniverseService:
                     "filters": filters,
                     "ineligible_counts": ineligible_counts,
                     "churn_count": churn_count,
-                    "refreshed": True,
+                    "refreshed": not guarded,
                 }
             },
         )
@@ -299,7 +300,7 @@ class DynamicUniverseService:
             scores=score_map,
             filters=filters,
             ineligible_counts=ineligible_counts,
-            refreshed=True,
+            refreshed=not guarded,
         )
 
     def _fetch_try_pairs(self, exchange: object) -> list[str]:
@@ -439,8 +440,9 @@ class DynamicUniverseService:
 
     @staticmethod
     def _is_stable_symbol(symbol: str) -> bool:
+        # Stable exclusion is based on parsed base asset, avoiding substring false positives.
         base = symbol[:-3] if symbol.endswith("TRY") else symbol
-        return base in _STABLE_TOKENS or any(token in symbol for token in _STABLE_TOKENS)
+        return base in _STABLE_TOKENS
 
     @staticmethod
     def _is_cooldown(state: dict[str, object], now_utc: datetime) -> bool:
@@ -450,8 +452,7 @@ class DynamicUniverseService:
     @staticmethod
     def _is_probation(state: dict[str, object], now_utc: datetime) -> bool:
         probation_until = _parse_optional_ts(state.get("probation_until_ts"))
-        last_selected_ts = _parse_optional_ts(state.get("last_selected_ts"))
-        return probation_until is not None and probation_until > now_utc and last_selected_ts is None
+        return probation_until is not None and probation_until > now_utc
 
     @staticmethod
     def _reject_counts(
@@ -462,10 +463,6 @@ class DynamicUniverseService:
         if start is None or now_utc - start > timedelta(minutes=settings.universe_reject_window_minutes):
             return {}
         return counts
-
-    @staticmethod
-    def _compute_churn_count(previous: tuple[str, ...], current: tuple[str, ...]) -> int:
-        return len(set(previous).symmetric_difference(set(current)))
 
     @staticmethod
     def _inc(target: dict[str, int], key: str) -> None:
