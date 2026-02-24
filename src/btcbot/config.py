@@ -388,6 +388,33 @@ class Settings(BaseSettings):
         alias="UNIVERSE_HISTORY_TOLERANCE_MINUTES",
     )
 
+    universe_orderbook_max_age_seconds: int = Field(
+        default=20, alias="UNIVERSE_ORDERBOOK_MAX_AGE_SECONDS"
+    )
+    universe_symbol_cooldown_minutes: int = Field(
+        default=60, alias="UNIVERSE_SYMBOL_COOLDOWN_MINUTES"
+    )
+    universe_probation_minutes: int = Field(default=120, alias="UNIVERSE_PROBATION_MINUTES")
+    universe_reject_window_minutes: int = Field(
+        default=240, alias="UNIVERSE_REJECT_WINDOW_MINUTES"
+    )
+    universe_reject_penalty_weight: Decimal = Field(
+        default=Decimal("0.05"), alias="UNIVERSE_REJECT_PENALTY_WEIGHT"
+    )
+    universe_reject_1123_threshold: int = Field(
+        default=3, alias="UNIVERSE_REJECT_1123_THRESHOLD"
+    )
+    universe_churn_max_per_day: int = Field(default=1, alias="UNIVERSE_CHURN_MAX_PER_DAY")
+    universe_score_weight_momentum: Decimal = Field(
+        default=Decimal("1"), alias="UNIVERSE_SCORE_WEIGHT_MOMENTUM"
+    )
+    universe_score_weight_spread: Decimal = Field(
+        default=Decimal("0.01"), alias="UNIVERSE_SCORE_WEIGHT_SPREAD"
+    )
+    universe_score_weight_depth: Decimal = Field(
+        default=Decimal("0.1"), alias="UNIVERSE_SCORE_WEIGHT_DEPTH"
+    )
+
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCTRY", "ETHTRY", "SOLTRY"],
         alias="SYMBOLS",
@@ -679,6 +706,12 @@ class Settings(BaseSettings):
         "universe_refresh_minutes",
         "universe_history_bucket_minutes",
         "universe_history_tolerance_minutes",
+        "universe_orderbook_max_age_seconds",
+        "universe_symbol_cooldown_minutes",
+        "universe_probation_minutes",
+        "universe_reject_window_minutes",
+        "universe_reject_1123_threshold",
+        "universe_churn_max_per_day",
     )
     def validate_dynamic_universe_positive_ints(cls, value: int) -> int:
         if value < 1:
@@ -700,7 +733,14 @@ class Settings(BaseSettings):
             raise ValueError("Stage7 universe decimal settings must be >= 0")
         return value
 
-    @field_validator("universe_spread_max_bps", "universe_min_depth_try")
+    @field_validator(
+        "universe_spread_max_bps",
+        "universe_min_depth_try",
+        "universe_reject_penalty_weight",
+        "universe_score_weight_momentum",
+        "universe_score_weight_spread",
+        "universe_score_weight_depth",
+    )
     def validate_dynamic_universe_non_negative_decimals(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("Dynamic universe decimal settings must be >= 0")
