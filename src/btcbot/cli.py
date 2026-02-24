@@ -687,6 +687,7 @@ def run_with_optional_loop(
     max_cycles: int | None,
     jitter_seconds: int,
     stop_loop_fn: Callable[[], bool] | None = None,
+    idle_hook_fn: Callable[[], None] | None = None,
 ) -> int:
     if cycle_seconds < 0 or jitter_seconds < 0:
         print("cycle-seconds and jitter-seconds must be >= 0")
@@ -752,7 +753,11 @@ def run_with_optional_loop(
                             }
                         },
                     )
-                    time.sleep(backoff)
+                    sleep_until = time.monotonic() + backoff
+                    while time.monotonic() < sleep_until:
+                        time.sleep(min(1.0, max(0.0, sleep_until - time.monotonic())))
+                        if callable(idle_hook_fn):
+                            idle_hook_fn()
 
             if callable(stop_loop_fn) and stop_loop_fn():
                 logger.warning(
@@ -773,7 +778,11 @@ def run_with_optional_loop(
             )
             if sleep_for <= 0:
                 sleep_for = 1
-            time.sleep(sleep_for)
+            sleep_until = time.monotonic() + sleep_for
+            while time.monotonic() < sleep_until:
+                time.sleep(min(1.0, max(0.0, sleep_until - time.monotonic())))
+                if callable(idle_hook_fn):
+                    idle_hook_fn()
     except KeyboardInterrupt:
         logger.info(
             "loop_runner_stopped",
@@ -792,7 +801,11 @@ def run_with_optional_loop(
 
 def _build_state_store(db_path: str, *, strict_instance_lock: bool) -> StateStore:
     try:
-        return StateStore(db_path=db_path, strict_instance_lock=strict_instance_lock)
+        return StateStore(
+            db_path=db_path,
+            strict_instance_lock=strict_instance_lock,
+            process_instance_ttl_seconds=int(os.getenv("PROCESS_INSTANCE_TTL_SECONDS", "180")),
+        )
     except TypeError:
         return StateStore(db_path=db_path)
 
@@ -833,10 +846,44 @@ def run_stage3_runtime(
                         ),
                         "instance_id": getattr(runtime_state_store, "instance_id", ""),
                         "strict_lock": strict_lock,
-                        "heartbeat_interval_seconds": max(1, cycle_seconds),
+                        "heartbeat_interval_seconds": int(
+                            getattr(settings, "process_instance_heartbeat_interval_seconds", 30)
+                        ),
                     }
                 },
             )
+            heartbeat_interval_seconds = max(
+                1,
+                int(getattr(settings, "process_instance_heartbeat_interval_seconds", 30)),
+            )
+            next_heartbeat_at = time.monotonic() + heartbeat_interval_seconds
+            heartbeat_error_count = 0
+
+            def _heartbeat_idle_hook() -> None:
+                nonlocal next_heartbeat_at, heartbeat_error_count
+                if time.monotonic() < next_heartbeat_at:
+                    return
+                heartbeat_instance_lock = getattr(runtime_state_store, "heartbeat_instance_lock", None)
+                if not callable(heartbeat_instance_lock):
+                    return
+                try:
+                    heartbeat_instance_lock()
+                    heartbeat_error_count = 0
+                except Exception as exc:  # noqa: BLE001
+                    heartbeat_error_count += 1
+                    get_instrumentation().counter("heartbeat_failures", 1)
+                    if heartbeat_error_count <= 1 or heartbeat_error_count % 10 == 0:
+                        logger.warning(
+                            "instance_heartbeat_failure",
+                            extra={
+                                "extra": {
+                                    "error": str(exc),
+                                    "error_type": type(exc).__name__,
+                                    "heartbeat_error_count": heartbeat_error_count,
+                                }
+                            },
+                        )
+                next_heartbeat_at = time.monotonic() + heartbeat_interval_seconds
             process_role = str(getattr(settings, "process_role", "monitor"))
             is_live_role = process_role.lower() == "live"
 
@@ -858,6 +905,7 @@ def run_stage3_runtime(
                 max_cycles=max_cycles,
                 jitter_seconds=jitter_seconds,
                 stop_loop_fn=_stop_loop_if_killed,
+                idle_hook_fn=_heartbeat_idle_hook,
             )
     except RuntimeError as exc:
         logger.error("stage3_runtime_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
@@ -1459,6 +1507,7 @@ def run_cycle(
                     portfolio_service=portfolio_service,
                     mark_prices=startup_mark_prices,
                     do_refresh_lifecycle=False,
+                    state_store=resolved_state_store,
                 )
                 if recovery.observe_only_required:
                     logger.error(

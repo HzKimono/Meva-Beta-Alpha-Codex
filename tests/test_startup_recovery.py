@@ -420,3 +420,26 @@ def test_startup_recovery_and_execute_same_cycle_reuses_refresh_and_balances(tmp
     assert placed == 1
     assert exchange.get_balances_calls == 0
     assert exchange.get_open_orders_calls == 1
+
+
+def test_startup_recovery_marks_partial_replace_state_as_recovered() -> None:
+    class _StubStateStore:
+        def list_open_replace_txs(self):
+            return [object()]
+
+    service = StartupRecoveryService()
+    execution = _StubExecutionService()
+    accounting = _StubAccountingService(fills_inserted=0, positions=[])
+    portfolio = _StubPortfolioService(balances=[Balance(asset="TRY", free=1.0)])
+
+    result = service.run(
+        cycle_id="cycle-partial",
+        symbols=["BTCTRY"],
+        execution_service=execution,
+        accounting_service=accounting,
+        portfolio_service=portfolio,
+        mark_prices={"BTCTRY": Decimal("1")},
+        state_store=_StubStateStore(),
+    )
+
+    assert result.recovered_reason == "open_replace_transactions_detected"

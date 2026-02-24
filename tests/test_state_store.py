@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+import threading
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -151,6 +152,89 @@ def test_state_store_strict_instance_lock_fails_on_active_conflict(tmp_path) -> 
 
     with pytest.raises(RuntimeError, match="STATE_DB_LOCK_CONFLICT"):
         StateStore(db_path=db_path, strict_instance_lock=True)
+
+
+def test_state_store_stale_instance_takeover_marks_old_instance(tmp_path) -> None:
+    db_path = str(tmp_path / "stale_takeover.db")
+    first = StateStore(db_path=db_path, process_instance_ttl_seconds=180)
+    stale_epoch = int((datetime.now(UTC) - timedelta(seconds=600)).timestamp())
+    with first._connect() as conn:
+        conn.execute(
+            "UPDATE process_instances SET heartbeat_at_epoch=? WHERE instance_id=?",
+            (stale_epoch, first.instance_id),
+        )
+
+    second = StateStore(db_path=db_path, process_instance_ttl_seconds=180)
+    with second._connect() as conn:
+        rows = conn.execute(
+            "SELECT instance_id, status, ended_at_epoch FROM process_instances"
+        ).fetchall()
+
+    row_by_id = {str(row["instance_id"]): row for row in rows}
+    assert row_by_id[first.instance_id]["status"] == "stale"
+    assert row_by_id[first.instance_id]["ended_at_epoch"] is not None
+    assert row_by_id[second.instance_id]["status"] == "active"
+
+
+def test_state_store_takeover_race_only_one_startup_succeeds(tmp_path) -> None:
+    db_path = str(tmp_path / "takeover_race.db")
+    baseline = StateStore(db_path=db_path, process_instance_ttl_seconds=60)
+    stale_epoch = int((datetime.now(UTC) - timedelta(seconds=600)).timestamp())
+    with baseline._connect() as conn:
+        conn.execute(
+            "UPDATE process_instances SET heartbeat_at_epoch=? WHERE instance_id=?",
+            (stale_epoch, baseline.instance_id),
+        )
+
+    gate = threading.Barrier(3)
+    results: list[str] = []
+
+    def _attempt_startup() -> None:
+        gate.wait(timeout=5)
+        try:
+            _ = StateStore(db_path=db_path, process_instance_ttl_seconds=60, strict_instance_lock=True)
+        except RuntimeError:
+            results.append("conflict")
+        else:
+            results.append("ok")
+
+    t1 = threading.Thread(target=_attempt_startup)
+    t2 = threading.Thread(target=_attempt_startup)
+    t1.start()
+    t2.start()
+    gate.wait(timeout=5)
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert results.count("ok") == 1
+    assert results.count("conflict") == 1
+
+
+def test_state_store_heartbeat_updates_timestamp(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "heartbeat.db"))
+    with store._connect() as conn:
+        before = int(
+            conn.execute(
+                "SELECT heartbeat_at_epoch FROM process_instances WHERE instance_id=?",
+                (store.instance_id,),
+            ).fetchone()["heartbeat_at_epoch"]
+        )
+        conn.execute(
+            "UPDATE process_instances SET heartbeat_at_epoch=? WHERE instance_id=?",
+            (before - 10, store.instance_id),
+        )
+
+    store.heartbeat_instance_lock()
+
+    with store._connect() as conn:
+        after = int(
+            conn.execute(
+                "SELECT heartbeat_at_epoch FROM process_instances WHERE instance_id=?",
+                (store.instance_id,),
+            ).fetchone()["heartbeat_at_epoch"]
+        )
+
+    assert after >= before
 
 
 def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
