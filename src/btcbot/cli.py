@@ -347,6 +347,11 @@ def main() -> int:
     doctor_parser.add_argument(
         "--json", action="store_true", help="Print machine-readable JSON report"
     )
+    doctor_parser.add_argument(
+        "--allow-mismatched-db",
+        action="store_true",
+        help="Allow doctor to run even when role/db naming convention mismatches",
+    )
 
     replay_init_parser = subparsers.add_parser(
         "replay-init", help="Initialize replay dataset structure"
@@ -559,6 +564,26 @@ def main() -> int:
             settings_db_path=None,
             silent=True,
         )
+        if resolved_db_path:
+            try:
+                enforce_role_db_convention(
+                    getattr(settings, "process_role", ""),
+                    bool(getattr(settings, "live_trading", False)),
+                    normalize_db_path(resolved_db_path),
+                )
+            except ValueError as exc:
+                if not bool(args.allow_mismatched_db):
+                    print(str(exc))
+                    return 2
+                logger.warning(
+                    "doctor_role_db_convention_bypassed",
+                    extra={
+                        "extra": {
+                            "db_path": resolved_db_path,
+                            "role": getattr(settings, "process_role", ""),
+                        }
+                    },
+                )
         return run_doctor(
             settings=settings,
             db_path=resolved_db_path,
@@ -610,6 +635,8 @@ def _enforce_role_db_convention_for_command(command_name: str) -> bool:
         "stage7-export",
         "stage7-alerts",
         "stage7-db-count",
+        "stage7-backtest-export",
+        "stage7-backtest-report",
         "doctor",
     }
 
