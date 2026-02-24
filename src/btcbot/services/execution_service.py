@@ -232,6 +232,11 @@ class ExecutionService:
             logger.warning("submission_blocked_by_policy_rotation_hygiene")
             get_instrumentation().counter("trading_blocked_by_policy_total", 1)
             return True
+        policy_blocked = is_trading_blocked_by_policy()
+        if policy_blocked:
+            logger.warning("submission_blocked_by_policy_rotation_hygiene")
+            get_instrumentation().counter("trading_blocked_by_policy_total", 1)
+            return True
         snapshot = self._api_degrade_snapshot()
         return bool(snapshot.get("degraded", False) or snapshot.get("breaker_open", False))
 
