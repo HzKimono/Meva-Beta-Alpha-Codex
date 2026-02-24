@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
+from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.parity import compute_run_fingerprint
 from btcbot.services.stage7_single_cycle_driver import (
@@ -53,18 +53,20 @@ class Stage7BacktestRunner:
             pair_info_snapshot=pair_info_snapshot,
         )
         param_changes, params_checkpoints = _read_adaptation_counts(out_db_path)
+        started_at = _coerce_iso_utc(summary.started_at)
+        ended_at = _coerce_iso_utc(summary.ended_at)
         final_fingerprint = compute_run_fingerprint(
             out_db_path,
-            datetime.fromisoformat(summary.started_at),
-            datetime.fromisoformat(summary.ended_at),
+            started_at,
+            ended_at,
             include_adaptation=not disable_adaptation,
         )
         return BacktestSummary(
             cycles_run=summary.cycles_run,
             seed=summary.seed,
             db_path=summary.db_path,
-            started_at=summary.started_at,
-            ended_at=summary.ended_at,
+            started_at=started_at.isoformat(),
+            ended_at=ended_at.isoformat(),
             param_changes=param_changes,
             params_checkpoints=params_checkpoints,
             final_fingerprint=final_fingerprint,
@@ -72,9 +74,22 @@ class Stage7BacktestRunner:
 
 
 def _read_adaptation_counts(db_path: Path) -> tuple[int, int]:
-    with sqlite3.connect(str(db_path)) as conn:
+    with sqlite_connection_context(str(db_path)) as conn:
+        existing = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "stage7_param_changes" not in existing or "stage7_params_checkpoints" not in existing:
+            return 0, 0
         param_changes = int(conn.execute("SELECT COUNT(*) FROM stage7_param_changes").fetchone()[0])
         checkpoints = int(
             conn.execute("SELECT COUNT(*) FROM stage7_params_checkpoints").fetchone()[0]
         )
     return param_changes, checkpoints
+
+
+def _coerce_iso_utc(raw: str) -> datetime:
+    parsed = datetime.fromisoformat(str(raw))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

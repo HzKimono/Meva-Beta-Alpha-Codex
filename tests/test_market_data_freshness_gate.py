@@ -89,3 +89,56 @@ def test_market_data_ws_age_stale_falls_back_to_rest_when_enabled() -> None:
     assert freshness.is_stale is False
     assert freshness.source_mode == "rest_fallback"
     assert exchange.orderbook_hits == 1
+
+
+class _CaptureInstrumentation:
+    def __init__(self) -> None:
+        self.counters: list[tuple[str, int]] = []
+
+    def counter(self, name: str, value: int = 1, *, attrs=None) -> None:
+        del attrs
+        self.counters.append((name, value))
+
+
+def test_rest_provider_serves_usable_stale_cache_emits_degraded_counter(monkeypatch) -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+
+    def _clock() -> datetime:
+        return now
+
+    class _FlakyExchange(_FakeExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = False
+
+        def get_orderbook(self, symbol: str, limit: int | None = None) -> tuple[float, float]:
+            del limit
+            if self.fail:
+                raise RuntimeError("boom")
+            return super().get_orderbook(symbol)
+
+    capture = _CaptureInstrumentation()
+    monkeypatch.setattr(
+        "btcbot.services.market_data_service.get_instrumentation",
+        lambda: capture,
+    )
+
+    exchange = _FlakyExchange()
+    service = MarketDataService(
+        exchange=exchange,
+        mode="rest",
+        now_provider=_clock,
+        orderbook_ttl_ms=5,
+        orderbook_max_staleness_ms=5_000,
+    )
+
+    bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY"], max_age_ms=500)
+    assert bids["BTC_TRY"] == 100.0
+    assert freshness.is_stale is False
+
+    now = now + timedelta(milliseconds=10)
+    exchange.fail = True
+    bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY"], max_age_ms=500)
+
+    assert bids["BTC_TRY"] == 100.0
+    assert any(name == "market_data_degraded_total" and value == 1 for name, value in capture.counters)

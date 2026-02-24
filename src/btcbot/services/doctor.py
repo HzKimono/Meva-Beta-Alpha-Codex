@@ -7,6 +7,7 @@ from pathlib import Path
 from time import perf_counter
 
 from btcbot.config import Settings
+from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.observability import get_instrumentation
 from btcbot.replay.validate import DatasetValidationReport, validate_replay_dataset
 from btcbot.services.effective_universe import resolve_effective_universe
@@ -572,8 +573,7 @@ def _validate_db_path(*, db_path: str, errors: list[str], warnings: list[str]) -
         return
 
     try:
-        with sqlite3.connect(str(db_file)) as conn:
-            conn.execute("PRAGMA busy_timeout = 5000")
+        with sqlite_connection_context(str(db_file)) as conn:
             has_schema_version = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
             ).fetchone()
