@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import ssl
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -19,6 +20,7 @@ from btcbot.adapters.btcturk_http import (
     _should_retry,
 )
 from btcbot.domain.models import ExchangeError, OrderSide
+from btcbot.logging_utils import JsonFormatter
 
 
 class DummyResponse:
@@ -115,6 +117,7 @@ def test_get_balances_parses_comma_decimal_values() -> None:
         api_secret="c3VwZXItc2VjcmV0LWJ5dGVz",
         transport=httpx.MockTransport(handler),
         base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
     )
 
     balances = client.get_balances()
@@ -881,4 +884,39 @@ def test_get_orderbook_with_timestamp_inflight_wait_timeout_raises_exchange_erro
     gate.set()
     with client._orderbook_lock:
         client._orderbook_inflight.pop(key, None)
+    client.close()
+
+
+def test_submit_limit_order_error_log_redacts_sensitive_payload(caplog) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "code": 1001,
+                "message": "Authorization: Bearer TOPSECRET123456",
+            },
+        )
+
+    client = BtcturkHttpClient(
+        api_key="demo-key",
+        api_secret="c3VwZXItc2VjcmV0LWJ5dGVz",
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.btcturk.com",
+        live_rules_require_exchangeinfo=False,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(ExchangeError):
+            client.submit_limit_order(
+                symbol="BTC_TRY",
+                side="buy",
+                price=Decimal("100"),
+                qty=Decimal("0.2"),
+                client_order_id="cid-token-abcdef123456",
+            )
+
+    formatter = JsonFormatter()
+    rendered = "\n".join(formatter.format(rec) for rec in caplog.records)
+    assert "TOPSECRET123456" not in rendered
     client.close()

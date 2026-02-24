@@ -21,7 +21,7 @@ class JsonFormatter(logging.Formatter):
         }
         extras = getattr(record, "extra", None)
         if isinstance(extras, dict):
-            payload.update(extras)
+            payload.update(redact_data(extras))
 
         context = get_logging_context()
         for field in ("run_id", "cycle_id", "client_order_id", "order_id", "symbol"):
@@ -33,7 +33,7 @@ class JsonFormatter(logging.Formatter):
             payload["error_message"] = (
                 sanitize_text(str(exc_value)) if exc_value is not None else ""
             )
-            payload["traceback"] = sanitize_text(self.formatException(record.exc_info))
+            payload["traceback"] = sanitize_text(str(self.formatException(record.exc_info)))
         elif record.exc_text:
             payload["traceback"] = sanitize_text(record.exc_text)
 
