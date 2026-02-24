@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from btcbot.domain.risk_budget import Mode
 from btcbot.obs.alert_engine import AlertDedupe, AlertRuleEvaluator, MetricWindowStore
-from btcbot.obs.alerts import AlertRule
+from btcbot.obs.alerts import DRY_RUN_ALERT_RULES, AlertRule
 from btcbot.obs.stage4_alarm_hook import build_cycle_metrics
 
 
@@ -146,3 +146,25 @@ def test_observe_only_mapping_uses_mode_observe_only() -> None:
 
     assert metrics_monitor["bot_degraded_mode"] == 0
     assert metrics_observe_only["bot_degraded_mode"] == 1
+
+
+def test_dry_run_alert_rules_emit_on_synthetic_window() -> None:
+    store = MetricWindowStore()
+    evaluator = AlertRuleEvaluator()
+
+    for minute in range(6):
+        ts = minute * 60
+        store.record("dryrun_market_data_stale_ratio", 0.5, ts)
+        store.record("dryrun_exchange_degraded_consecutive", 4, ts)
+        store.record("dryrun_ws_rest_fallback_total", minute * 2, ts)
+        store.record("dryrun_cycle_duration_ms", 6000, ts)
+        store.record("dryrun_cycle_stall_seconds", 120, ts)
+
+    events = evaluator.evaluate_rules(DRY_RUN_ALERT_RULES, store, now_epoch=300)
+    names = {event.rule_name for event in events}
+
+    assert "dryrun_market_data_stale_ratio_high" in names
+    assert "dryrun_exchange_degraded_consecutive" in names
+    assert "dryrun_ws_rest_fallback_spike" in names
+    assert "dryrun_cycle_duration_p95_high" in names
+    assert "dryrun_cycle_stalled" in names
