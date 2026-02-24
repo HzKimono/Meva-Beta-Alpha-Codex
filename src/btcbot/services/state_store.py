@@ -1899,8 +1899,42 @@ class StateStore:
                 ts TEXT NOT NULL,
                 selected_symbols_json TEXT NOT NULL,
                 scores_json TEXT NOT NULL,
+                score_breakdown_json TEXT NOT NULL DEFAULT '{}',
                 filters_json TEXT NOT NULL,
-                ineligible_counts_json TEXT NOT NULL
+                ineligible_counts_json TEXT NOT NULL,
+                churn_count INTEGER NOT NULL DEFAULT 0,
+                refreshed INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        dynamic_cols = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(dynamic_universe_cycles)")
+        }
+        if "score_breakdown_json" not in dynamic_cols:
+            conn.execute(
+                "ALTER TABLE dynamic_universe_cycles "
+                "ADD COLUMN score_breakdown_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "churn_count" not in dynamic_cols:
+            conn.execute(
+                "ALTER TABLE dynamic_universe_cycles "
+                "ADD COLUMN churn_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "refreshed" not in dynamic_cols:
+            conn.execute(
+                "ALTER TABLE dynamic_universe_cycles "
+                "ADD COLUMN refreshed INTEGER NOT NULL DEFAULT 1"
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dynamic_universe_symbol_state (
+                symbol TEXT PRIMARY KEY,
+                last_selected_ts TEXT,
+                cooldown_until_ts TEXT,
+                probation_until_ts TEXT,
+                reject_window_start_ts TEXT,
+                reject_counts_json TEXT NOT NULL DEFAULT '{}',
+                updated_at_ts TEXT NOT NULL
             )
             """
         )
@@ -4062,30 +4096,39 @@ class StateStore:
         ts: datetime,
         selected_symbols: list[str],
         scores: dict[str, str],
+        score_breakdown: dict[str, dict[str, str]] | None = None,
         filters: dict[str, object],
         ineligible_counts: dict[str, int],
+        churn_count: int = 0,
+        refreshed: bool = True,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO dynamic_universe_cycles(
-                    cycle_id, ts, selected_symbols_json, scores_json, filters_json,
-                    ineligible_counts_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    cycle_id, ts, selected_symbols_json, scores_json, score_breakdown_json,
+                    filters_json, ineligible_counts_json, churn_count, refreshed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cycle_id) DO UPDATE SET
                     ts=excluded.ts,
                     selected_symbols_json=excluded.selected_symbols_json,
                     scores_json=excluded.scores_json,
+                    score_breakdown_json=excluded.score_breakdown_json,
                     filters_json=excluded.filters_json,
-                    ineligible_counts_json=excluded.ineligible_counts_json
+                    ineligible_counts_json=excluded.ineligible_counts_json,
+                    churn_count=excluded.churn_count,
+                    refreshed=excluded.refreshed
                 """,
                 (
                     cycle_id,
                     ensure_utc(ts).isoformat(),
                     json.dumps(selected_symbols, sort_keys=True),
                     json.dumps(scores, sort_keys=True),
+                    json.dumps(score_breakdown or {}, sort_keys=True),
                     json.dumps(filters, sort_keys=True),
                     json.dumps(ineligible_counts, sort_keys=True),
+                    int(churn_count),
+                    1 if refreshed else 0,
                 ),
             )
 
@@ -4099,11 +4142,85 @@ class StateStore:
         payload = {key: row[key] for key in row.keys()}
         payload["selected_symbols"] = json.loads(str(payload.pop("selected_symbols_json") or "[]"))
         payload["scores"] = json.loads(str(payload.pop("scores_json") or "{}"))
+        payload["score_breakdown"] = json.loads(str(payload.pop("score_breakdown_json") or "{}"))
         payload["filters"] = json.loads(str(payload.pop("filters_json") or "{}"))
         payload["ineligible_counts"] = json.loads(
             str(payload.pop("ineligible_counts_json") or "{}")
         )
+        payload["refreshed"] = bool(int(payload.get("refreshed", 1)))
+        payload["churn_count"] = int(payload.get("churn_count", 0))
         return payload
+
+    def get_dynamic_universe_churn_count_for_day(self, day: datetime) -> int:
+        day_start = ensure_utc(day).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT selected_symbols_json
+                FROM dynamic_universe_cycles
+                WHERE ts >= ? AND ts < ?
+                ORDER BY ts ASC
+                """,
+                (day_start.isoformat(), day_end.isoformat()),
+            ).fetchall()
+        churn_count = 0
+        prev: tuple[str, ...] | None = None
+        for row in rows:
+            current = tuple(json.loads(str(row["selected_symbols_json"]) or "[]"))
+            if prev is not None and current != prev:
+                churn_count += 1
+            prev = current
+        return churn_count
+
+    def get_dynamic_universe_symbol_state(self, symbol: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM dynamic_universe_symbol_state WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = {key: row[key] for key in row.keys()}
+        payload["reject_counts"] = json.loads(str(payload.pop("reject_counts_json") or "{}"))
+        return payload
+
+    def upsert_dynamic_universe_symbol_state(
+        self,
+        *,
+        symbol: str,
+        updated_at: datetime,
+        last_selected_ts: datetime | None = None,
+        cooldown_until_ts: datetime | None = None,
+        probation_until_ts: datetime | None = None,
+        reject_window_start_ts: datetime | None = None,
+        reject_counts: dict[str, int] | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dynamic_universe_symbol_state(
+                    symbol, last_selected_ts, cooldown_until_ts, probation_until_ts,
+                    reject_window_start_ts, reject_counts_json, updated_at_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    last_selected_ts=excluded.last_selected_ts,
+                    cooldown_until_ts=excluded.cooldown_until_ts,
+                    probation_until_ts=excluded.probation_until_ts,
+                    reject_window_start_ts=excluded.reject_window_start_ts,
+                    reject_counts_json=excluded.reject_counts_json,
+                    updated_at_ts=excluded.updated_at_ts
+                """,
+                (
+                    symbol,
+                    ensure_utc(last_selected_ts).isoformat() if last_selected_ts else None,
+                    ensure_utc(cooldown_until_ts).isoformat() if cooldown_until_ts else None,
+                    ensure_utc(probation_until_ts).isoformat() if probation_until_ts else None,
+                    ensure_utc(reject_window_start_ts).isoformat() if reject_window_start_ts else None,
+                    json.dumps(reject_counts or {}, sort_keys=True),
+                    ensure_utc(updated_at).isoformat(),
+                ),
+            )
 
     def record_cycle_audit(
         self,
