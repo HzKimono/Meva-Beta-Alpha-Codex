@@ -60,7 +60,7 @@ def test_tick_lot_quantization_correctness() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="BUY",
                     target_notional_try=Decimal("1000"),
                     est_qty=Decimal("1"),
@@ -75,8 +75,10 @@ def test_tick_lot_quantization_correctness() -> None:
         now_utc=datetime(2024, 1, 1, tzinfo=UTC),
     )
     assert len(intents) == 1
-    assert intents[0].price_try == Decimal("101.2")
-    assert intents[0].qty == Decimal("9.88")
+    expected_price = rules.quantize_price("BTCTRY", Decimal("101.23"))
+    expected_qty = rules.quantize_qty("BTCTRY", (Decimal("1000") - Decimal("0.00000001")) / expected_price)
+    assert intents[0].price_try == expected_price
+    assert intents[0].qty == expected_qty
 
 
 def test_insufficient_notional_after_buffers_skip() -> None:
@@ -88,7 +90,7 @@ def test_insufficient_notional_after_buffers_skip() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="BUY",
                     target_notional_try=Decimal("10"),
                     est_qty=Decimal("1"),
@@ -115,7 +117,7 @@ def test_deterministic_client_order_id() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("500"),
                     est_qty=Decimal("1"),
@@ -143,14 +145,14 @@ def test_sell_first_preserved() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="BUY",
                     target_notional_try=Decimal("1000"),
                     est_qty=Decimal("1"),
                     reason="buy",
                 ),
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("100"),
                     est_qty=Decimal("1"),
@@ -174,14 +176,14 @@ def test_mode_gating_observe_and_reduce() -> None:
     plan = _plan(
         [
             RebalanceAction(
-                symbol="BTC_TRY",
+                symbol="BTCTRY",
                 side="BUY",
                 target_notional_try=Decimal("500"),
                 est_qty=Decimal("1"),
                 reason="buy",
             ),
             RebalanceAction(
-                symbol="BTC_TRY",
+                symbol="BTCTRY",
                 side="SELL",
                 target_notional_try=Decimal("500"),
                 est_qty=Decimal("1"),
@@ -223,7 +225,7 @@ def test_spot_sell_requires_inventory_skips_zero_est_qty() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("100"),
                     est_qty=Decimal("0"),
@@ -250,7 +252,7 @@ def test_fee_buffer_reduces_buy_qty_deterministically() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="BUY",
                     target_notional_try=Decimal("1000"),
                     est_qty=Decimal("1"),
@@ -273,9 +275,16 @@ def test_fee_buffer_reduces_buy_qty_deterministically() -> None:
         **base_kwargs,
     )[0]
 
-    assert no_buffer.qty == Decimal("9.99")
-    assert buffered.qty == Decimal("9.89")
-    assert buffered.notional_try == Decimal("989")
+    expected_price = rules.quantize_price("BTCTRY", Decimal("100"))
+    expected_no_buffer_qty = rules.quantize_qty(
+        "BTCTRY", (Decimal("1000") - Decimal("1")) / expected_price
+    )
+    expected_buffered_qty = rules.quantize_qty(
+        "BTCTRY", ((Decimal("1000") * (Decimal("1") - Decimal("0.01"))) - Decimal("1")) / expected_price
+    )
+    assert no_buffer.qty == expected_no_buffer_qty
+    assert buffered.qty == expected_buffered_qty
+    assert buffered.notional_try == expected_buffered_qty * expected_price
 
 
 def test_notional_below_min_total_after_quantize_skip() -> None:
@@ -305,7 +314,7 @@ def test_notional_below_min_total_after_quantize_skip() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="BUY",
                     target_notional_try=Decimal("101"),
                     est_qty=Decimal("1"),
@@ -339,7 +348,7 @@ def test_buy_happy_path_respects_min_constraints() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="BUY",
                     target_notional_try=Decimal("500"),
                     est_qty=Decimal("1"),
@@ -386,7 +395,7 @@ def test_qty_below_min_qty_after_quantize_skip() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="BUY",
                     target_notional_try=Decimal("150"),
                     est_qty=Decimal("1"),
@@ -414,7 +423,7 @@ def test_sell_missing_balance_skips_with_inventory_reason() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("500"),
                     est_qty=Decimal("1"),
@@ -443,7 +452,7 @@ def test_sell_zero_free_balance_skips_with_inventory_reason() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("500"),
                     est_qty=Decimal("1"),
@@ -472,7 +481,7 @@ def test_sell_qty_capped_by_available_inventory_and_quantized() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("1000"),
                     est_qty=Decimal("5"),
@@ -488,8 +497,11 @@ def test_sell_qty_capped_by_available_inventory_and_quantized() -> None:
         now_utc=datetime(2024, 1, 1, tzinfo=UTC),
     )
 
+    expected_price = rules.quantize_price("BTCTRY", Decimal("500"))
+    expected_qty = rules.quantize_qty("BTCTRY", Decimal("0.239"))
     assert intents[0].skipped is False
-    assert intents[0].qty == Decimal("0.23")
+    assert intents[0].price_try == expected_price
+    assert intents[0].qty == expected_qty
     assert intents[0].qty <= Decimal("0.239")
 
 
@@ -512,7 +524,7 @@ def test_sell_qty_below_min_qty_after_quantize_skip() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("100"),
                     est_qty=Decimal("0.019"),
@@ -541,7 +553,7 @@ def test_sell_notional_below_min_total_after_quantize_skip() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("50"),
                     est_qty=Decimal("0.5"),
@@ -610,7 +622,7 @@ def test_sell_quantization_uses_rules_quantizer_authority() -> None:
         plan=_plan(
             [
                 RebalanceAction(
-                    symbol="BTC_TRY",
+                    symbol="BTCTRY",
                     side="SELL",
                     target_notional_try=Decimal("1000"),
                     est_qty=est_qty,

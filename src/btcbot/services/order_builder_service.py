@@ -145,6 +145,7 @@ class OrderBuilderService:
 
         target_notional = Decimal(str(action.target_notional_try))
         max_spend_try = target_notional
+        qty: Decimal | None = None
         sell_metrics: dict[str, str] = {}
         if side == "BUY":
             max_spend_try = self._max_spend_after_buffers(
@@ -184,10 +185,11 @@ class OrderBuilderService:
                     now_utc=now_utc,
                     constraints_extra=sell_metrics,
                 )
-            max_spend_try = sell_gate["qty"] * price_try
+            qty = sell_gate["qty"]
 
-        qty_raw = max_spend_try / price_try
-        qty = rules.quantize_qty(symbol, qty_raw) if qty_raw > 0 else Decimal("0")
+        if qty is None:
+            qty_raw = max_spend_try / price_try
+            qty = rules.quantize_qty(symbol, qty_raw) if qty_raw > 0 else Decimal("0")
         if qty <= 0:
             return self._skipped(
                 cycle_id=cycle_id,
