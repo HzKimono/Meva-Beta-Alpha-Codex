@@ -10,6 +10,43 @@ from typing import Any
 from btcbot.logging_context import get_logging_context
 from btcbot.security.redaction import redact_data, sanitize_text
 
+_STANDARD_LOG_RECORD_FIELDS = {
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+    "message",
+    "asctime",
+}
+
+
+def _extract_structured_fields(record: logging.LogRecord) -> dict[str, Any]:
+    structured: dict[str, Any] = {}
+    extras = getattr(record, "extra", None)
+    if isinstance(extras, dict):
+        structured.update(extras)
+    for key, value in record.__dict__.items():
+        if key in _STANDARD_LOG_RECORD_FIELDS or key == "extra":
+            continue
+        structured[key] = value
+    return structured
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -19,9 +56,7 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": sanitize_text(record.getMessage()),
         }
-        extras = getattr(record, "extra", None)
-        if isinstance(extras, dict):
-            payload.update(redact_data(extras))
+        payload.update(redact_data(_extract_structured_fields(record)))
 
         context = get_logging_context()
         for field in ("run_id", "cycle_id", "client_order_id", "order_id", "symbol"):

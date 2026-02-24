@@ -113,3 +113,20 @@ def test_json_formatter_exception_redacts_traceback_message() -> None:
         )
     rendered = formatter.format(record)
     assert "TOPSECRET123456" not in rendered
+
+
+def test_json_formatter_redacts_non_record_extra_fields() -> None:
+    formatter = JsonFormatter()
+    record = logging.LogRecord(
+        name="btcbot.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="ok",
+        args=(),
+        exc_info=None,
+    )
+    record.authorization = "Bearer SUPERSECRET"
+    rendered = formatter.format(record)
+    assert "SUPERSECRET" not in rendered
+

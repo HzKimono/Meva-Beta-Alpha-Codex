@@ -11,6 +11,8 @@ from btcbot.security.redaction import REDACTED
 
 from btcbot.observability import get_instrumentation
 
+logger = logging.getLogger(__name__)
+
 TRADING_BLOCKED_BY_POLICY = False
 
 
@@ -44,33 +46,34 @@ def enforce_secret_rotation_hygiene(
             "secret_rotation_policy_invalid_date",
             extra={"extra": {"api_key_rotated_at": "[REDACTED]"}},
         )
+        get_instrumentation().counter("secret_rotation_policy_invalid_date_total", 1)
         set_trading_blocked_by_policy(False)
         return False
 
+    warn_threshold = max(0, int(warn_days))
+    max_age_threshold = max(0, int(max_age_days))
     age_days = (_utc_today().date() - rotated_date.date()).days
     blocked = False
 
-    if age_days >= warn_days:
+    if age_days >= warn_threshold:
         logger.warning(
             "secret_rotation_policy_warn",
-            extra={"extra": {"age_days": age_days, "warn_days": warn_days}},
+            extra={"extra": {"age_days": age_days, "warn_days": warn_threshold}},
         )
         get_instrumentation().counter("secret_rotation_policy_warn_total", 1)
 
-    if age_days >= max_age_days:
+    if age_days >= max_age_threshold:
         blocked = True
         set_trading_blocked_by_policy(True)
         logger.error(
             "secret_rotation_policy_expired",
-            extra={"extra": {"age_days": age_days, "max_age_days": max_age_days}},
+            extra={"extra": {"age_days": age_days, "max_age_days": max_age_threshold}},
         )
         get_instrumentation().counter("secret_rotation_policy_expired_total", 1)
     else:
         set_trading_blocked_by_policy(False)
 
     return blocked
-
-logger = logging.getLogger(__name__)
 
 
 class SecretProvider(Protocol):

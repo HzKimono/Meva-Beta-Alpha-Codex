@@ -131,3 +131,8 @@ def test_redact_data_and_mapping_deep_redaction() -> None:
     assert sanitized["auth"] != "tiny"
     assert sanitized["items"][0]["access_token"] != "1234567890abcdef"
     assert sanitized["child"]["apiKey"] != "abcdef1234567890"
+
+
+def test_sanitize_text_accepts_none_known_secrets() -> None:
+    value = sanitize_text("token=abc123", known_secrets=None)
+    assert value == "token=[REDACTED]"

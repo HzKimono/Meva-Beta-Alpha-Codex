@@ -138,3 +138,21 @@ def test_rotation_hygiene_expired_blocks_trading_and_metrics(monkeypatch, caplog
     assert secrets.is_trading_blocked_by_policy() is True
     assert "secret_rotation_policy_expired_total" in inst.calls
     assert any("secret_rotation_policy_expired" in rec.message for rec in caplog.records)
+
+
+def test_rotation_hygiene_invalid_date_logs_and_metric(monkeypatch, caplog) -> None:
+    from btcbot.security import secrets
+
+    inst = _DummyInstrumentation()
+    monkeypatch.setattr(secrets, "get_instrumentation", lambda: inst)
+
+    with caplog.at_level(logging.WARNING):
+        blocked = secrets.enforce_secret_rotation_hygiene(
+            api_key_rotated_at="2025-99-99",
+            warn_days=30,
+            max_age_days=90,
+        )
+
+    assert blocked is False
+    assert "secret_rotation_policy_invalid_date_total" in inst.calls
+    assert any("secret_rotation_policy_invalid_date" in rec.message for rec in caplog.records)

@@ -219,6 +219,10 @@ class ExecutionService:
         kill_enabled, _reason, _until = self.state_store.get_kill_switch(self.process_role)
         if kill_enabled or is_trading_blocked_by_policy():
             return True
+        if is_trading_blocked_by_policy():
+            logger.warning("submission_blocked_by_policy_rotation_hygiene")
+            get_instrumentation().counter("trading_blocked_by_policy_total", 1)
+            return True
         snapshot = self._api_degrade_snapshot()
         return bool(snapshot.get("degraded", False) or snapshot.get("breaker_open", False))
 
