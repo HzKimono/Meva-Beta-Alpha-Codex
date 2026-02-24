@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
@@ -28,8 +29,11 @@ from btcbot.domain.stage4 import (
     Quantizer,
 )
 from btcbot.domain.strategy_core import OrderBookSummary, PositionSummary
+from btcbot.obs.alert_engine import AlertDedupe, AlertRuleEvaluator, LogNotifier, MetricWindowStore
+from btcbot.obs.alerts import BASELINE_ALERT_RULES
 from btcbot.obs.metrics import observe_histogram, set_gauge
 from btcbot.obs.process_role import coerce_process_role
+from btcbot.obs.stage4_alarm_hook import build_cycle_metrics
 from btcbot.observability_decisions import emit_decision
 from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.planning_kernel import ExecutionPort, Plan
@@ -103,6 +107,16 @@ class Stage4InvariantError(RuntimeError):
 @dataclass(frozen=True)
 class Stage4CycleRunner:
     command: str = "stage4-run"
+    _alert_store: MetricWindowStore = dataclass_field(init=False, repr=False)
+    _alert_evaluator: AlertRuleEvaluator = dataclass_field(init=False, repr=False)
+    _alert_dedupe: AlertDedupe = dataclass_field(init=False, repr=False)
+    _alert_notifier: LogNotifier = dataclass_field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_alert_store", MetricWindowStore())
+        object.__setattr__(self, "_alert_evaluator", AlertRuleEvaluator())
+        object.__setattr__(self, "_alert_dedupe", AlertDedupe())
+        object.__setattr__(self, "_alert_notifier", LogNotifier(logger))
 
     @staticmethod
     def norm(symbol: str) -> str:
@@ -1022,6 +1036,8 @@ class Stage4CycleRunner:
                     for key, value in dict(bootstrap_drop_reasons).items()
                 }
             )
+            api_snapshot: dict[str, object] = {}
+            rejects_by_code: dict[str, int] = {}
             try:
                 health_snapshot_fn = getattr(exchange, "health_snapshot", None)
                 api_snapshot = health_snapshot_fn() if callable(health_snapshot_fn) else {}
@@ -1061,6 +1077,51 @@ class Stage4CycleRunner:
                         "extra": {
                             "cycle_id": cycle_id,
                             "reason_code": "stage4_run_metrics_persist_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                    },
+                )
+
+            try:
+                stage4_alert_metrics = build_cycle_metrics(
+                    stage4_cycle_summary={
+                        "cycle_duration_ms": updated_cycle_duration_ms,
+                        "intents_created": len(intents),
+                        "intents_executed": execution_report.executed_total,
+                        "orders_submitted": execution_report.submitted,
+                        "orders_failed": execution_report.rejected,
+                        "rejects_by_code": rejects_by_code,
+                        "breaker_open": bool((api_snapshot or {}).get("breaker_open", False)),
+                        "unknown_order_present": int(counts.get("unknown_closed", 0) > 0),
+                    },
+                    reconcile_result={
+                        "api_429_backoff_total": int((api_snapshot or {}).get("api_429_backoff_total", 0)),
+                        "cursor_stall_by_symbol": cursor_stall_by_symbol,
+                    },
+                    health_snapshot=api_snapshot if isinstance(api_snapshot, dict) else {},
+                    final_mode={
+                        "mode": final_mode.value,
+                        "observe_only": final_mode == Mode.MONITOR,
+                        "kill_switch": bool(settings.kill_switch),
+                    },
+                    cursor_diag=cursor_diag,
+                )
+                now_epoch = int(datetime.now(UTC).timestamp())
+                for metric_name, metric_value in stage4_alert_metrics.items():
+                    self._alert_store.record(metric_name, metric_value, now_epoch)
+                alert_events = self._alert_evaluator.evaluate_rules(
+                    BASELINE_ALERT_RULES,
+                    self._alert_store,
+                    now_epoch,
+                )
+                for event in self._alert_dedupe.filter(alert_events):
+                    self._alert_notifier.notify(event)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "alert_eval_failed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
                             "error_type": type(exc).__name__,
                         }
                     },
