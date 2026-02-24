@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from btcbot.domain.risk_budget import Mode
 from btcbot.obs.alert_engine import AlertDedupe, AlertRuleEvaluator, MetricWindowStore
 from btcbot.obs.alerts import AlertRule
 from btcbot.obs.stage4_alarm_hook import build_cycle_metrics
@@ -125,3 +126,23 @@ def test_integration_smoke_breaker_rule_once_then_cooldown() -> None:
         fired += len(dedupe.filter(events))
 
     assert fired == 2
+
+
+def test_observe_only_mapping_uses_mode_observe_only() -> None:
+    metrics_monitor = build_cycle_metrics(
+        stage4_cycle_summary={},
+        reconcile_result=None,
+        health_snapshot={"degraded": False},
+        final_mode={"observe_only": Mode.NORMAL == Mode.OBSERVE_ONLY, "kill_switch": False},
+        cursor_diag=None,
+    )
+    metrics_observe_only = build_cycle_metrics(
+        stage4_cycle_summary={},
+        reconcile_result=None,
+        health_snapshot={"degraded": False},
+        final_mode={"observe_only": Mode.OBSERVE_ONLY == Mode.OBSERVE_ONLY, "kill_switch": False},
+        cursor_diag=None,
+    )
+
+    assert metrics_monitor["bot_degraded_mode"] == 0
+    assert metrics_observe_only["bot_degraded_mode"] == 1

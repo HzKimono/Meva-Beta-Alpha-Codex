@@ -1101,7 +1101,7 @@ class Stage4CycleRunner:
                     health_snapshot=api_snapshot if isinstance(api_snapshot, dict) else {},
                     final_mode={
                         "mode": final_mode.value,
-                        "observe_only": final_mode == Mode.MONITOR,
+                        "observe_only": final_mode == Mode.OBSERVE_ONLY,
                         "kill_switch": bool(settings.kill_switch),
                     },
                     cursor_diag=cursor_diag,
