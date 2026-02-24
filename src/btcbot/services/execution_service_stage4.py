@@ -391,8 +391,11 @@ class ExecutionService:
             return None
 
     def _get_active_symbol_cooldown(self, symbol: str, now_ts: int):
+        getter = getattr(self.state_store, "get_symbol_cooldown", None)
+        if not callable(getter):
+            return None
         try:
-            return self.state_store.get_symbol_cooldown(symbol=symbol, now_ts=now_ts)
+            return getter(symbol=symbol, now_ts=now_ts)
         except Exception:  # noqa: BLE001
             logger.exception("stage4_symbol_cooldown_read_failed", extra={"symbol": symbol})
             return "READ_FAILED"

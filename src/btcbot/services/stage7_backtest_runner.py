@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from btcbot.config import Settings
@@ -53,10 +53,12 @@ class Stage7BacktestRunner:
             pair_info_snapshot=pair_info_snapshot,
         )
         param_changes, params_checkpoints = _read_adaptation_counts(out_db_path)
+        started_at = _coerce_iso_utc(summary.started_at)
+        ended_at = _coerce_iso_utc(summary.ended_at)
         final_fingerprint = compute_run_fingerprint(
             out_db_path,
-            datetime.fromisoformat(summary.started_at),
-            datetime.fromisoformat(summary.ended_at),
+            started_at,
+            ended_at,
             include_adaptation=not disable_adaptation,
         )
         return BacktestSummary(
@@ -78,3 +80,10 @@ def _read_adaptation_counts(db_path: Path) -> tuple[int, int]:
             conn.execute("SELECT COUNT(*) FROM stage7_params_checkpoints").fetchone()[0]
         )
     return param_changes, checkpoints
+
+
+def _coerce_iso_utc(raw: str) -> datetime:
+    parsed = datetime.fromisoformat(str(raw))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

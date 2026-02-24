@@ -601,6 +601,20 @@ def _command_touches_state_db(command_name: str) -> bool:
 
 
 def _enforce_role_db_convention_for_command(command_name: str) -> bool:
+    return command_name in {
+        "run",
+        "canary",
+        "stage4-run",
+        "health",
+        "stage7-report",
+        "stage7-export",
+        "stage7-alerts",
+        "stage7-db-count",
+        "doctor",
+    }
+
+
+def _strict_role_db_convention_for_command(command_name: str) -> bool:
     return command_name in {"run", "canary", "stage4-run", "health"}
 
 
@@ -630,11 +644,25 @@ def _prepare_runtime(
         else:
             settings.state_db_path = str(db_path)
         if _enforce_role_db_convention_for_command(command_name):
-            enforce_role_db_convention(
-                getattr(settings, "process_role", ""),
-                bool(getattr(settings, "live_trading", False)),
-                db_path,
-            )
+            try:
+                enforce_role_db_convention(
+                    getattr(settings, "process_role", ""),
+                    bool(getattr(settings, "live_trading", False)),
+                    db_path,
+                )
+            except ValueError:
+                if _strict_role_db_convention_for_command(command_name):
+                    raise
+                logger.warning(
+                    "role_db_convention_mismatch",
+                    extra={
+                        "extra": {
+                            "command": command_name,
+                            "role": getattr(settings, "process_role", ""),
+                            "db_path": str(db_path),
+                        }
+                    },
+                )
 
     logger.info(
         "startup",
