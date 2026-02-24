@@ -1580,3 +1580,116 @@ def test_replace_local_missing_record_defers(store: StateStore) -> None:
     ]
     report = svc.execute_with_report(actions)
     assert report.submitted == 0
+
+
+def test_execution_gate_blocks_submit_when_symbol_on_1123_cooldown(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    store.record_symbol_reject("BTC_TRY", 1123, 1000, threshold=1, cooldown_minutes=60)
+
+    class FrozenDateTime:
+        @staticmethod
+        def now(tz):
+            return datetime.fromtimestamp(1200, tz=tz)
+
+    svc_module = __import__("btcbot.services.execution_service_stage4", fromlist=["datetime"])
+    original_datetime = svc_module.datetime
+    svc_module.datetime = FrozenDateTime
+    try:
+        svc = ExecutionService(
+            exchange=exchange,
+            state_store=store,
+            settings=Settings(
+                DRY_RUN=False,
+                KILL_SWITCH=False,
+                LIVE_TRADING=True,
+                SAFE_MODE=False,
+                LIVE_TRADING_ACK="I_UNDERSTAND",
+                BTCTURK_API_KEY="key",
+                BTCTURK_API_SECRET="secret",
+            ),
+            rules_service=ExchangeRulesService(exchange),
+        )
+        action = LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("120"),
+            qty=Decimal("1"),
+            reason="gate",
+            client_order_id="cid-gate",
+        )
+        report = svc.execute_with_report([action])
+    finally:
+        svc_module.datetime = original_datetime
+
+    assert report.submitted == 0
+    assert report.rejected == 1
+    assert exchange.submits == []
+    rejected = store.get_stage4_order_by_client_id("cid-gate")
+    assert rejected is not None
+    assert rejected.status == "rejected"
+    with store._connect() as conn:
+        last_error_row = conn.execute(
+            "SELECT last_error FROM stage4_orders WHERE client_order_id = ?",
+            ("cid-gate",),
+        ).fetchone()
+    assert last_error_row is not None
+    assert "symbol_on_cooldown_1123" in str(last_error_row["last_error"] or "")
+
+
+def test_exchange_reject_1123_records_symbol_cooldown(store: StateStore) -> None:
+    from btcbot.domain.models import ExchangeError
+
+    class RejectingExchange(FakeExchangeStage4):
+        def submit_limit_order(self, symbol, side, price, qty, client_order_id):  # type: ignore[override]
+            raise ExchangeError(
+                "rejected",
+                status_code=400,
+                error_code=1123,
+                error_message="FAILED_MIN_TOTAL_AMOUNT",
+            )
+
+    exchange = RejectingExchange()
+
+    class FrozenDateTime:
+        @staticmethod
+        def now(tz):
+            return datetime.fromtimestamp(3000, tz=tz)
+
+    svc_module = __import__("btcbot.services.execution_service_stage4", fromlist=["datetime"])
+    original_datetime = svc_module.datetime
+    svc_module.datetime = FrozenDateTime
+    try:
+        svc = ExecutionService(
+            exchange=exchange,
+            state_store=store,
+            settings=Settings(
+                DRY_RUN=False,
+                KILL_SWITCH=False,
+                LIVE_TRADING=True,
+                SAFE_MODE=False,
+                LIVE_TRADING_ACK="I_UNDERSTAND",
+                BTCTURK_API_KEY="key",
+                BTCTURK_API_SECRET="secret",
+                REJECT1123_THRESHOLD=1,
+                REJECT1123_COOLDOWN_MINUTES=5,
+            ),
+            rules_service=ExchangeRulesService(exchange),
+        )
+        action = LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("120"),
+            qty=Decimal("1"),
+            reason="reject",
+            client_order_id="cid-1123",
+        )
+        report = svc.execute_with_report([action])
+    finally:
+        svc_module.datetime = original_datetime
+
+    assert report.rejected == 1
+    state = store.get_symbol_cooldown("BTC_TRY", now_ts=3001)
+    assert state is not None
+    assert state.cooldown_until_ts == 3000 + 300

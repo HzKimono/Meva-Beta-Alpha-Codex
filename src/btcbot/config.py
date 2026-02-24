@@ -263,6 +263,17 @@ class Settings(BaseSettings):
 
     stale_market_data_seconds: int = Field(default=30, alias="STALE_MARKET_DATA_SECONDS")
     reject_spike_threshold: int = Field(default=3, alias="REJECT_SPIKE_THRESHOLD")
+    reject1123_window_minutes: int = Field(default=60, alias="REJECT1123_WINDOW_MINUTES")
+    reject1123_threshold: int = Field(default=3, alias="REJECT1123_THRESHOLD")
+    reject1123_cooldown_minutes: int = Field(default=240, alias="REJECT1123_COOLDOWN_MINUTES")
+    reject1123_probation_penalty: float = Field(
+        default=0.50,
+        alias="REJECT1123_PROBATION_PENALTY",
+    )
+    reject1123_enforce_execution_gate: bool = Field(
+        default=True,
+        alias="REJECT1123_ENFORCE_EXECUTION_GATE",
+    )
     latency_spike_ms: int | None = Field(default=2000, alias="LATENCY_SPIKE_MS")
     cursor_stall_cycles: int = Field(default=5, alias="CURSOR_STALL_CYCLES")
     pnl_divergence_try_warn: Decimal = Field(default=Decimal("50"), alias="PNL_DIVERGENCE_TRY_WARN")

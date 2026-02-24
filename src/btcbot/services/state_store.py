@@ -195,6 +195,16 @@ class ReplaceTxRecord:
     last_updated_at: datetime
 
 
+@dataclass(frozen=True)
+class CooldownState:
+    symbol: str
+    reason: str
+    cooldown_until_ts: int
+    rolling_count: int
+    window_start_ts: int
+    updated_at_ts: int
+
+
 def _serialize_decimal_for_db(value: Decimal, *, field_name: str) -> str:
     if not isinstance(value, Decimal):
         raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
@@ -1736,6 +1746,24 @@ class StateStore:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS symbol_cooldowns (
+                symbol TEXT PRIMARY KEY,
+                reason TEXT NOT NULL,
+                cooldown_until_ts INTEGER NOT NULL,
+                rolling_count INTEGER NOT NULL,
+                window_start_ts INTEGER NOT NULL,
+                updated_at_ts INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_symbol_cooldowns_until
+            ON symbol_cooldowns(cooldown_until_ts)
             """
         )
         conn.execute(
@@ -3312,6 +3340,123 @@ class StateStore:
                 qty=qty,
                 mode=mode,
             )
+
+    @staticmethod
+    def _coerce_epoch_seconds(now_ts: int | float | str) -> int:
+        if isinstance(now_ts, bool):
+            raise TypeError("now_ts cannot be bool")
+        return int(now_ts)
+
+    def record_symbol_reject(
+        self,
+        symbol: str,
+        reject_code: int,
+        now_ts: int,
+        *,
+        window_minutes: int = 60,
+        threshold: int = 3,
+        cooldown_minutes: int = 240,
+    ) -> dict[str, int | bool]:
+        normalized_symbol = normalize_symbol(symbol)
+        current_ts = self._coerce_epoch_seconds(now_ts)
+        if int(reject_code) != 1123:
+            state = self.get_symbol_cooldown(normalized_symbol, current_ts)
+            return {
+                "cooldown_active": bool(state and state.cooldown_until_ts > current_ts),
+                "cooldown_until_ts": state.cooldown_until_ts if state else 0,
+                "rolling_count": state.rolling_count if state else 0,
+                "window_start_ts": state.window_start_ts if state else current_ts,
+            }
+
+        window_seconds = max(1, int(window_minutes) * 60)
+        cooldown_seconds = max(0, int(cooldown_minutes) * 60)
+        threshold_value = max(1, int(threshold))
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM symbol_cooldowns WHERE symbol = ?",
+                (normalized_symbol,),
+            ).fetchone()
+            rolling_count = int(row["rolling_count"]) if row is not None else 0
+            window_start_ts = int(row["window_start_ts"]) if row is not None else current_ts
+            cooldown_until_ts = int(row["cooldown_until_ts"]) if row is not None else 0
+
+            if current_ts - window_start_ts > window_seconds:
+                rolling_count = 0
+                window_start_ts = current_ts
+            rolling_count += 1
+
+            if rolling_count >= threshold_value and cooldown_seconds > 0:
+                cooldown_until_ts = max(cooldown_until_ts, current_ts + cooldown_seconds)
+
+            conn.execute(
+                """
+                INSERT INTO symbol_cooldowns(
+                    symbol, reason, cooldown_until_ts, rolling_count, window_start_ts, updated_at_ts
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    reason=excluded.reason,
+                    cooldown_until_ts=excluded.cooldown_until_ts,
+                    rolling_count=excluded.rolling_count,
+                    window_start_ts=excluded.window_start_ts,
+                    updated_at_ts=excluded.updated_at_ts
+                """,
+                (
+                    normalized_symbol,
+                    "1123_min_total",
+                    cooldown_until_ts,
+                    rolling_count,
+                    window_start_ts,
+                    current_ts,
+                ),
+            )
+        return {
+            "cooldown_active": cooldown_until_ts > current_ts,
+            "cooldown_until_ts": cooldown_until_ts,
+            "rolling_count": rolling_count,
+            "window_start_ts": window_start_ts,
+        }
+
+    def get_symbol_cooldown(self, symbol: str, now_ts: int) -> CooldownState | None:
+        normalized_symbol = normalize_symbol(symbol)
+        current_ts = self._coerce_epoch_seconds(now_ts)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM symbol_cooldowns WHERE symbol = ?",
+                (normalized_symbol,),
+            ).fetchone()
+        if row is None:
+            return None
+        state = CooldownState(
+            symbol=str(row["symbol"]),
+            reason=str(row["reason"]),
+            cooldown_until_ts=int(row["cooldown_until_ts"]),
+            rolling_count=int(row["rolling_count"]),
+            window_start_ts=int(row["window_start_ts"]),
+            updated_at_ts=int(row["updated_at_ts"]),
+        )
+        if state.cooldown_until_ts <= current_ts:
+            return None
+        return state
+
+    def list_active_cooldowns(self, now_ts: int) -> dict[str, CooldownState]:
+        current_ts = self._coerce_epoch_seconds(now_ts)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM symbol_cooldowns WHERE cooldown_until_ts > ? ORDER BY symbol",
+                (current_ts,),
+            ).fetchall()
+        out: dict[str, CooldownState] = {}
+        for row in rows:
+            state = CooldownState(
+                symbol=str(row["symbol"]),
+                reason=str(row["reason"]),
+                cooldown_until_ts=int(row["cooldown_until_ts"]),
+                rolling_count=int(row["rolling_count"]),
+                window_start_ts=int(row["window_start_ts"]),
+                updated_at_ts=int(row["updated_at_ts"]),
+            )
+            out[state.symbol] = state
+        return out
 
     @staticmethod
     def _parse_replace_old_ids(raw: object) -> tuple[str, ...]:

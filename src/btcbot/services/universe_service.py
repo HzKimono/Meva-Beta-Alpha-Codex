@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+import logging
+
+from btcbot.domain.models import normalize_symbol
 
 from btcbot.domain.strategy_core import OrderBookSummary
 from btcbot.domain.symbols import canonical_symbol, quote_currency
 from btcbot.domain.universe_models import SymbolInfo, UniverseKnobs
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -42,15 +48,34 @@ def select_universe(
     symbols: list[SymbolInfo],
     orderbooks: dict[str, OrderBookSummary] | None,
     knobs: UniverseKnobs,
+    active_cooldowns: dict[str, object] | None = None,
+    state_store: object | None = None,
+    now_ts: int | None = None,
 ) -> list[str]:
     """Select and rank a deterministic trading universe offline for future Stage 5 integration."""
 
+    if active_cooldowns is None and state_store is not None:
+        if now_ts is None:
+            logger.warning("universe_selection_cooldown_state_unavailable")
+            return []
+        getter = getattr(state_store, "list_active_cooldowns", None)
+        if callable(getter):
+            try:
+                active_cooldowns = getter(now_ts=now_ts)
+            except Exception:  # noqa: BLE001
+                logger.exception("universe_selection_cooldown_read_failed")
+                return []
     expected_quote = knobs.quote_currency.upper()
     allow_set = _normalize_symbols(knobs.allow_symbols)
     deny_set = _normalize_symbols(knobs.deny_symbols)
     normalized_orderbooks = {
         canonical_symbol(symbol): value for symbol, value in (orderbooks or {}).items()
     }
+
+    cooldown_symbols = {
+        normalize_symbol(symbol) for symbol in (active_cooldowns or {}).keys()
+    }
+    excluded_by_cooldown: list[str] = []
 
     ranked: list[_RankedSymbol] = []
     for item in symbols:
@@ -63,6 +88,9 @@ def select_universe(
             volume_try=item.volume_try,
         )
 
+        if symbol.symbol in cooldown_symbols:
+            excluded_by_cooldown.append(symbol.symbol)
+            continue
         if allow_set and symbol.symbol not in allow_set:
             continue
         if symbol.symbol in deny_set:
@@ -98,4 +126,15 @@ def select_universe(
 
     ranked.sort(key=_sort_key)
     max_size = max(0, knobs.max_universe_size)
-    return [item.symbol for item in ranked[:max_size]]
+    selected = [item.symbol for item in ranked[:max_size]]
+    logger.info(
+        "universe_selection_cooldown_filter",
+        extra={
+            "extra": {
+                "num_candidates": len(symbols),
+                "num_excluded_by_cooldown": len(excluded_by_cooldown),
+                "excluded_symbols_sample": excluded_by_cooldown[:5],
+            }
+        },
+    )
+    return selected
