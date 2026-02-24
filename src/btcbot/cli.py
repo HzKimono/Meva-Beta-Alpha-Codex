@@ -799,12 +799,18 @@ def run_with_optional_loop(
         return last_rc
 
 
-def _build_state_store(db_path: str, *, strict_instance_lock: bool) -> StateStore:
+def _build_state_store(
+    db_path: str,
+    *,
+    strict_instance_lock: bool,
+    settings: Settings | None = None,
+) -> StateStore:
+    resolved_settings = settings or Settings()
     try:
         return StateStore(
             db_path=db_path,
             strict_instance_lock=strict_instance_lock,
-            process_instance_ttl_seconds=int(os.getenv("PROCESS_INSTANCE_TTL_SECONDS", "180")),
+            process_instance_ttl_seconds=int(getattr(resolved_settings, "process_instance_ttl_seconds", 180)),
         )
     except TypeError:
         return StateStore(db_path=db_path)
@@ -832,11 +838,24 @@ def run_stage3_runtime(
                 force_dry_run=force_dry_run,
                 include_safe_mode=True,
             )
-            strict_lock = bool((force_dry_run is False) and runtime_live_policy.allowed)
-            runtime_state_store = _build_state_store(
-                settings.state_db_path,
-                strict_instance_lock=strict_lock,
+            live_armed = bool(
+                (force_dry_run is False)
+                and bool(getattr(settings, "live_trading", False))
+                and (str(getattr(settings, "live_trading_ack", "")) == "I_UNDERSTAND")
+                and (not bool(getattr(settings, "kill_switch", False)))
             )
+            strict_lock = True if live_armed else bool(getattr(settings, "state_db_strict_lock", True))
+            try:
+                runtime_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                    settings=settings,
+                )
+            except TypeError:
+                runtime_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                )
             logger.info(
                 "state_store_runtime_owner",
                 extra={
@@ -1122,10 +1141,17 @@ def run_canary(
             if doctor_rc != 0:
                 return doctor_rc
 
-            runtime_state_store = _build_state_store(
-                resolved_db_path,
-                strict_instance_lock=True,
-            )
+            try:
+                runtime_state_store = _build_state_store(
+                    resolved_db_path,
+                    strict_instance_lock=True,
+                    settings=canary_settings,
+                )
+            except TypeError:
+                runtime_state_store = _build_state_store(
+                    resolved_db_path,
+                    strict_instance_lock=True,
+                )
             logger.info(
                 "state_store_runtime_owner",
                 extra={
@@ -1350,11 +1376,28 @@ def run_cycle(
         return 2
 
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
+    live_armed = bool(
+        (not dry_run)
+        and bool(getattr(settings, "live_trading", False))
+        and (str(getattr(settings, "live_trading_ack", "")) == "I_UNDERSTAND")
+        and (not bool(getattr(settings, "kill_switch", False)))
+    )
+    strict_lock = True if live_armed else bool(getattr(settings, "state_db_strict_lock", True))
     try:
-        resolved_state_store = state_store or _build_state_store(
-            settings.state_db_path,
-            strict_instance_lock=bool((not dry_run) and live_policy.allowed),
-        )
+        if state_store is None:
+            try:
+                resolved_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                    settings=settings,
+                )
+            except TypeError:
+                resolved_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                )
+        else:
+            resolved_state_store = state_store
     except RuntimeError as exc:
         if "STATE_DB_LOCK_CONFLICT" in str(exc):
             logger.error("db_instance_lock_conflict", extra={"extra": {"error": str(exc)}})
