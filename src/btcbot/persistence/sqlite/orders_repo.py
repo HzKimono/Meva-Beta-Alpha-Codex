@@ -252,6 +252,7 @@ class SqliteOrdersRepo:
         qty: Decimal,
         mode: str,
         status: str = "error",
+        error_code: int | None = None,
     ) -> None:
         self._ensure_writable()
         now = datetime.now(UTC).isoformat()
@@ -264,8 +265,8 @@ class SqliteOrdersRepo:
                 """
                 INSERT INTO stage4_orders(
                     symbol, client_order_id, exchange_client_id, exchange_order_id,
-                    side, price, qty, status, mode, last_error, created_at, updated_at
-                ) VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                    side, price, qty, status, mode, last_error, last_error_code, created_at, updated_at
+                ) VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalize_symbol(symbol),
@@ -276,6 +277,7 @@ class SqliteOrdersRepo:
                     status,
                     mode,
                     reason,
+                    error_code,
                     now,
                     now,
                 ),
@@ -285,7 +287,7 @@ class SqliteOrdersRepo:
                 """
                 UPDATE stage4_orders
                 SET symbol=?, side=?, price=?, qty=?,
-                    status=?, mode=?, last_error=?, updated_at=?
+                    status=?, mode=?, last_error=?, last_error_code=?, updated_at=?
                 WHERE client_order_id=?
                 """,
                 (
@@ -296,6 +298,7 @@ class SqliteOrdersRepo:
                     status,
                     mode,
                     reason,
+                    error_code,
                     now,
                     client_order_id,
                 ),
@@ -311,6 +314,7 @@ class SqliteOrdersRepo:
         price: Decimal = Decimal("0"),
         qty: Decimal = Decimal("0"),
         mode: str = "dry_run",
+        error_code: int | None = None,
     ) -> None:
         self.record_stage4_order_error(
             client_order_id=client_order_id,
@@ -321,6 +325,7 @@ class SqliteOrdersRepo:
             qty=qty,
             mode=mode,
             status="rejected",
+            error_code=error_code,
         )
 
     def update_stage4_order_exchange_id(self, client_order_id: str, exchange_order_id: str) -> None:

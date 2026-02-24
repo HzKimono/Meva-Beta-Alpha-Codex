@@ -80,6 +80,7 @@ class OrdersRepoProtocol(Protocol):
         qty: Decimal,
         mode: str,
         status: str = "error",
+        error_code: int | None = None,
     ) -> None: ...
 
     def record_stage4_order_rejected(
@@ -92,6 +93,7 @@ class OrdersRepoProtocol(Protocol):
         price: Decimal = Decimal("0"),
         qty: Decimal = Decimal("0"),
         mode: str = "dry_run",
+        error_code: int | None = None,
     ) -> None: ...
 
     def update_stage4_order_exchange_id(

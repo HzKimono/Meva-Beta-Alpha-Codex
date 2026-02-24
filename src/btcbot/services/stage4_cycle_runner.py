@@ -67,6 +67,7 @@ NO_ACTION_REASON_ENUM = {
     "QTY_BELOW_MIN_QTY_AFTER_QUANTIZE",
     "NOTIONAL_BELOW_MIN_TOTAL_AFTER_QUANTIZE",
     "NOTIONAL_BELOW_INTERNAL_MIN_AFTER_QUANTIZE",
+    "SYMBOL_ON_COOLDOWN_1123",
 }
 
 
@@ -1027,6 +1028,9 @@ class Stage4CycleRunner:
                 breaker_is_open = bool((api_snapshot or {}).get("breaker_open", False))
                 degraded_mode = bool((api_snapshot or {}).get("degraded", False) or breaker_is_open)
                 rejects_by_code = self._extract_rejects_by_code(decision_report.counters)
+                for code, count in dict(getattr(execution_report, "rejected_by_code", {})).items():
+                    rejects_by_code[str(code)] = rejects_by_code.get(str(code), 0) + int(count)
+                rejects_by_code = dict(sorted(rejects_by_code.items()))
                 state_store.save_stage4_run_metrics(
                     cycle_id=cycle_id,
                     ts=cycle_ended_at,
@@ -1035,6 +1039,7 @@ class Stage4CycleRunner:
                         intents_after_risk=len(accepted_actions),
                         intents_executed=execution_report.executed_total,
                         orders_submitted=execution_report.submitted,
+                        rejects_by_code=rejects_by_code,
                         intent_skip_reasons=[
                             getattr(item, "skip_reason", None)
                             for item in intents
@@ -1747,6 +1752,7 @@ class Stage4CycleRunner:
         intents_after_risk: int,
         intents_executed: int,
         orders_submitted: int,
+        rejects_by_code: Mapping[str, int] | None = None,
         intent_skip_reasons: list[str | None] | None = None,
     ) -> list[str]:
         reasons: list[str] = []
@@ -1758,6 +1764,8 @@ class Stage4CycleRunner:
             reasons.append("NO_EXECUTABLE_ACTIONS")
         if intents_executed > 0 and orders_submitted <= 0:
             reasons.append("NO_SUBMISSIONS")
+            if int((rejects_by_code or {}).get("1123", 0)) > 0:
+                reasons.append("SYMBOL_ON_COOLDOWN_1123")
         if intents_executed <= 0:
             for item in intent_skip_reasons or []:
                 mapped = str(item or "").strip().upper()

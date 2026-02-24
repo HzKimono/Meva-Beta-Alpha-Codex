@@ -26,6 +26,7 @@ def ensure_stage4_schema(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             mode TEXT NOT NULL DEFAULT 'dry_run',
             last_error TEXT,
+            last_error_code INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -51,6 +52,8 @@ def ensure_stage4_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE stage4_orders ADD COLUMN mode TEXT NOT NULL DEFAULT 'dry_run'")
     if "last_error" not in order_columns:
         conn.execute("ALTER TABLE stage4_orders ADD COLUMN last_error TEXT")
+    if "last_error_code" not in order_columns:
+        conn.execute("ALTER TABLE stage4_orders ADD COLUMN last_error_code INTEGER")
     if "exchange_order_id" not in order_columns:
         conn.execute("ALTER TABLE stage4_orders ADD COLUMN exchange_order_id TEXT")
     if "exchange_client_id" not in order_columns:

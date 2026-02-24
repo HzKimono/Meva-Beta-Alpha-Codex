@@ -157,3 +157,19 @@ def test_deterministic_with_order_variations() -> None:
 
     assert first == second
     assert first == ["BTCTRY", "ETHTRY"]
+
+
+def test_universe_excludes_symbols_with_active_cooldown() -> None:
+    symbols = [
+        SymbolInfo(symbol="BTC_TRY", base="BTC", quote="TRY"),
+        SymbolInfo(symbol="ETH_TRY", base="ETH", quote="TRY"),
+    ]
+
+    result = select_universe(
+        symbols=symbols,
+        orderbooks=None,
+        knobs=UniverseKnobs(),
+        active_cooldowns={"BTCTRY": {"cooldown_until_ts": 9999999999}},
+    )
+
+    assert result == ["ETHTRY"]
