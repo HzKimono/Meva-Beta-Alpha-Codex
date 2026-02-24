@@ -37,6 +37,7 @@ from btcbot.obs.metrics import inc_counter
 from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
+from btcbot.security.secrets import is_trading_blocked_by_policy
 from btcbot.services.execution_errors import ExecutionErrorCategory, classify_exchange_error
 from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
 from btcbot.services.market_data_service import MarketDataService
@@ -216,7 +217,7 @@ class ExecutionService:
         if self.dry_run:
             return False
         kill_enabled, _reason, _until = self.state_store.get_kill_switch(self.process_role)
-        if kill_enabled:
+        if kill_enabled or is_trading_blocked_by_policy():
             return True
         snapshot = self._api_degrade_snapshot()
         return bool(snapshot.get("degraded", False) or snapshot.get("breaker_open", False))
