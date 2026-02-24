@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
@@ -17,6 +18,7 @@ from btcbot.services.state_store import StateStore
 logger = logging.getLogger(__name__)
 
 TERMINAL_OLD_ORDER_STATUSES = {"canceled", "filled", "rejected", "unknown_closed"}
+REJECT_1123_CODE = 1123
 
 
 @dataclass(frozen=True)
@@ -362,6 +364,21 @@ class ExecutionService:
 
         return True, "confirmed"
 
+    @staticmethod
+    def _extract_exchange_error_code(exc: Exception) -> int | None:
+        raw_code = getattr(exc, "error_code", None)
+        try:
+            return int(raw_code) if raw_code is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _get_active_symbol_cooldown(self, symbol: str, now_ts: int):
+        try:
+            return self.state_store.get_symbol_cooldown(symbol=symbol, now_ts=now_ts)
+        except Exception:  # noqa: BLE001
+            logger.exception("stage4_symbol_cooldown_read_failed", extra={"symbol": symbol})
+            return "READ_FAILED"
+
     def _execute_submit_action(
         self, *, action: LifecycleAction, live_mode: bool
     ) -> tuple[int, int, int, int]:
@@ -376,6 +393,32 @@ class ExecutionService:
         if not action.client_order_id:
             logger.warning("submit_missing_client_order_id", extra={"symbol": action.symbol})
             return 0, 0, 0, 0
+
+        now_ts = int(datetime.now(UTC).timestamp())
+        if self.settings.reject1123_enforce_execution_gate:
+            cooldown_state = self._get_active_symbol_cooldown(action.symbol, now_ts)
+            if cooldown_state == "READ_FAILED":
+                self.state_store.record_stage4_order_rejected(
+                    action.client_order_id,
+                    "symbol_on_cooldown_1123:state_read_failed",
+                    symbol=action.symbol,
+                    side=action.side,
+                    price=action.price,
+                    qty=action.qty,
+                    mode=("live" if live_mode else "dry_run"),
+                )
+                return 0, 0, 1, 0
+            if cooldown_state is not None and cooldown_state.cooldown_until_ts > now_ts:
+                self.state_store.record_stage4_order_rejected(
+                    action.client_order_id,
+                    f"symbol_on_cooldown_1123:until={cooldown_state.cooldown_until_ts}",
+                    symbol=action.symbol,
+                    side=action.side,
+                    price=action.price,
+                    qty=action.qty,
+                    mode=("live" if live_mode else "dry_run"),
+                )
+                return 0, 0, 1, 0
 
         exchange_client_id = build_exchange_client_id(
             internal_client_id=action.client_order_id,
@@ -444,13 +487,39 @@ class ExecutionService:
             )
             return 0, 1, 0, 0
 
-        ack_or_uncertain = self.execution_wrapper.submit_limit_order(
-            symbol=action.symbol,
-            side=action.side,
-            price=q_price,
-            qty=q_qty,
-            client_order_id=exchange_client_id,
-        )
+        try:
+            ack_or_uncertain = self.execution_wrapper.submit_limit_order(
+                symbol=action.symbol,
+                side=action.side,
+                price=q_price,
+                qty=q_qty,
+                client_order_id=exchange_client_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_code = self._extract_exchange_error_code(exc)
+            if error_code == REJECT_1123_CODE:
+                reject_state = self.state_store.record_symbol_reject(
+                    action.symbol,
+                    REJECT_1123_CODE,
+                    int(datetime.now(UTC).timestamp()),
+                    window_minutes=self.settings.reject1123_window_minutes,
+                    threshold=self.settings.reject1123_threshold,
+                    cooldown_minutes=self.settings.reject1123_cooldown_minutes,
+                )
+                self.state_store.record_stage4_order_rejected(
+                    action.client_order_id,
+                    "exchange_reject_1123"
+                    f":rolling_count={reject_state['rolling_count']}"
+                    f":window_start_ts={reject_state['window_start_ts']}"
+                    f":cooldown_until_ts={reject_state['cooldown_until_ts']}",
+                    symbol=action.symbol,
+                    side=action.side,
+                    price=q_price,
+                    qty=q_qty,
+                    mode="live",
+                )
+                return 0, 0, 1, 1
+            raise
         if isinstance(ack_or_uncertain, UncertainResult):
             self.state_store.record_stage4_order_error(
                 client_order_id=action.client_order_id,

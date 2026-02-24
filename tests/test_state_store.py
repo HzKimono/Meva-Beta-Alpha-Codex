@@ -1013,3 +1013,33 @@ def test_stage7_schema_upgrade_from_minimal_legacy_db_supports_parity(tmp_path) 
     )
     assert isinstance(fingerprint, str)
     assert len(fingerprint) == 64
+
+
+def test_reject1123_rolling_window_reset(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    first = store.record_symbol_reject("btc_try", 1123, 1000)
+    second = store.record_symbol_reject("btc_try", 1123, 1020)
+
+    assert first["rolling_count"] == 1
+    assert second["rolling_count"] == 2
+    assert second["cooldown_active"] is False
+
+    rolled = store.record_symbol_reject("btc_try", 1123, 1000 + 61 * 60)
+    assert rolled["rolling_count"] == 1
+    assert rolled["window_start_ts"] == 1000 + 61 * 60
+
+
+def test_reject1123_threshold_triggers_and_extends_cooldown(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    store.record_symbol_reject("eth_try", 1123, 2000, threshold=3, cooldown_minutes=10)
+    store.record_symbol_reject("eth_try", 1123, 2010, threshold=3, cooldown_minutes=10)
+    triggered = store.record_symbol_reject("eth_try", 1123, 2020, threshold=3, cooldown_minutes=10)
+
+    assert triggered["cooldown_active"] is True
+    assert triggered["cooldown_until_ts"] == 2020 + 600
+
+    extended = store.record_symbol_reject("eth_try", 1123, 2050, threshold=3, cooldown_minutes=10)
+    assert extended["cooldown_until_ts"] == 2050 + 600
+
+    active = store.list_active_cooldowns(2051)
+    assert "ETHTRY" in active
