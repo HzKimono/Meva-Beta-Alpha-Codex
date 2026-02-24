@@ -139,13 +139,12 @@ class PortfolioPolicyService:
             "min_order_notional_try": str(min_order_notional_try),
             "final_mode": final_mode.value,
             "snapshot": str(snapshot.to_dict()),
-            "balances": {
-                str(balance.asset).upper(): {
-                    "free": str(Decimal(str(balance.free))),
-                    "locked": str(Decimal(str(balance.locked))),
-                }
-                for balance in balances
-            },
+            "balances": self._filtered_balance_snapshot(
+                balances=balances,
+                quote_ccy=quote_ccy,
+                universe=filtered_universe,
+                actions=constrained_actions,
+            ),
             "planned_turnover_try": str(planned_turnover_try),
             "target_weights": {symbol: str(weight) for symbol, weight in target_weights.items()},
         }
@@ -397,3 +396,28 @@ class PortfolioPolicyService:
         sells = sorted((action for action in kept if action.side == "SELL"), key=lambda a: a.symbol)
         buys = sorted((action for action in kept if action.side == "BUY"), key=lambda a: a.symbol)
         return sells + buys, notes
+
+    @staticmethod
+    def _filtered_balance_snapshot(
+        *,
+        balances: list[Balance],
+        quote_ccy: str,
+        universe: list[str],
+        actions: list[RebalanceAction],
+    ) -> dict[str, dict[str, str]]:
+        needed_assets: set[str] = {str(quote_ccy).upper()}
+        for symbol in [*universe, *(item.symbol for item in actions)]:
+            base_asset, parsed_quote = split_symbol(symbol, quote_ccy)
+            if base_asset and parsed_quote == str(quote_ccy).upper():
+                needed_assets.add(base_asset)
+
+        filtered: dict[str, dict[str, str]] = {}
+        for balance in balances:
+            asset = str(balance.asset).upper()
+            if asset not in needed_assets:
+                continue
+            filtered[asset] = {
+                "free": str(Decimal(str(balance.free))),
+                "locked": str(Decimal(str(balance.locked))),
+            }
+        return filtered

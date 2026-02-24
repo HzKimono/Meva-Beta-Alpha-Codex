@@ -559,3 +559,74 @@ def test_sell_notional_below_min_total_after_quantize_skip() -> None:
 
     assert intents[0].skipped is True
     assert intents[0].skip_reason == "notional_below_min_total_after_quantize"
+
+
+def test_sell_invalid_symbol_skips_for_inventory_resolution() -> None:
+    class WeirdQuotePair(_Pair):
+        def __init__(self, symbol: str) -> None:
+            super().__init__(symbol)
+            self.name = "BTCXYZ"
+            self.nameNormalized = "BTCXYZ"
+
+    class WeirdQuoteExchange:
+        def get_exchange_info(self):
+            return [WeirdQuotePair("BTC_XYZ")]
+
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(WeirdQuoteExchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_ORDER_OFFSET_BPS=Decimal("0"))
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_XYZ",
+                    side="SELL",
+                    target_notional_try=Decimal("100"),
+                    est_qty=Decimal("1"),
+                    reason="trim",
+                )
+            ],
+            balances={"BTC": {"free": "2", "locked": "0"}},
+        ),
+        mark_prices_try={"BTCXYZ": Decimal("100")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert intents[0].skipped is True
+    assert intents[0].skip_reason == "invalid_symbol_for_inventory_resolution"
+
+
+def test_sell_quantization_uses_rules_quantizer_authority() -> None:
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(_Exchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_ORDER_OFFSET_BPS=Decimal("0"))
+    est_qty = Decimal("0.239999")
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_TRY",
+                    side="SELL",
+                    target_notional_try=Decimal("1000"),
+                    est_qty=est_qty,
+                    reason="trim",
+                )
+            ],
+            balances={"BTC": {"free": "0.239999", "locked": "0"}},
+        ),
+        mark_prices_try={"BTCTRY": Decimal("500")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    expected_qty = rules.quantize_qty("BTCTRY", est_qty)
+    assert intents[0].skipped is False
+    assert intents[0].qty == expected_qty
+

@@ -170,7 +170,7 @@ class OrderBuilderService:
                 action=action,
                 symbol=symbol,
                 price_try=price_try,
-                qty_step=decision.rules.step_size,
+                rules=rules,
                 plan=plan,
             )
             sell_metrics = sell_gate["metrics"]
@@ -280,11 +280,24 @@ class OrderBuilderService:
         action: RebalanceAction,
         symbol: str,
         price_try: Decimal,
-        qty_step: Decimal,
+        rules: ExchangeRulesService,
         plan: PortfolioPlan,
     ) -> dict[str, str | Decimal | None | dict[str, str]]:
+        base_asset = self._resolve_base_asset_for_inventory(symbol)
+        if base_asset is None:
+            return {
+                "qty": Decimal("0"),
+                "skip_reason": "invalid_symbol_for_inventory_resolution",
+                "metrics": {
+                    "sell_attempted": "true",
+                    "available_qty": "0",
+                    "desired_qty": "0",
+                    "qty_after_quantize": "0",
+                    "notional_try_after_quantize": "0",
+                },
+            }
+
         balances_by_asset = self._plan_balances_by_asset(plan)
-        base_asset, _quote_asset = split_symbol(symbol)
         balance = balances_by_asset.get(base_asset)
         available_qty = max(Decimal("0"), balance) if balance is not None else Decimal("0")
         metrics = {
@@ -323,7 +336,7 @@ class OrderBuilderService:
             }
 
         capped_qty = min(desired_qty, available_qty)
-        qty = (capped_qty / qty_step).to_integral_value(rounding=ROUND_DOWN) * qty_step
+        qty = rules.quantize_qty(symbol, capped_qty) if capped_qty > 0 else Decimal("0")
         notional_try = qty * price_try
         metrics.update(
             {
@@ -334,6 +347,16 @@ class OrderBuilderService:
         )
 
         return {"qty": qty, "skip_reason": None, "metrics": metrics}
+
+    @staticmethod
+    def _resolve_base_asset_for_inventory(symbol: str) -> str | None:
+        try:
+            base_asset, quote_asset = split_symbol(symbol)
+        except ValueError:
+            return None
+        if not base_asset or not quote_asset:
+            return None
+        return base_asset.upper()
 
     @staticmethod
     def _plan_balances_by_asset(plan: PortfolioPlan) -> dict[str, Decimal]:
