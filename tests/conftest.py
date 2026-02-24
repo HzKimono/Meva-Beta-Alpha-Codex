@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -12,34 +13,48 @@ def isolate_settings_from_host_env(monkeypatch: pytest.MonkeyPatch):
     original_env_file = Settings.model_config.get("env_file")
     Settings.model_config["env_file"] = None
 
-    prefixes = (
-        "BTCTURK_",
-        "STAGE7_",
-        "LIVE_TRADING",
-        "KILL_SWITCH",
-        "DRY_RUN",
-        "UNIVERSE_",
-        "SYMBOLS",
-    )
-    explicit = {
-        "LIVE_TRADING_ACK",
-        "STATE_DB_PATH",
-        "NOTIONAL_CAP_TRY_PER_CYCLE",
-        "MAX_NOTIONAL_PER_ORDER_TRY",
-        "MIN_ORDER_NOTIONAL_TRY",
-        "MAX_ORDERS_PER_CYCLE",
-        "TRY_CASH_TARGET",
-        "DYNAMIC_UNIVERSE_ENABLED",
-        "UNIVERSE_TOP_N",
-        "UNIVERSE_AUTO_CORRECT",
-    }
+    explicit = {"PYTEST_CURRENT_TEST"}
+    settings_env_keys: set[str] = set()
+    for field in Settings.model_fields.values():
+        if isinstance(field.alias, str):
+            settings_env_keys.add(field.alias)
+        validation_alias = getattr(field, "validation_alias", None)
+        choices = getattr(validation_alias, "choices", ())
+        for choice in choices:
+            if isinstance(choice, str):
+                settings_env_keys.add(choice)
+
     for key in list(os.environ):
-        if key.startswith(prefixes) or key in explicit:
+        if key in settings_env_keys and key not in explicit:
             monkeypatch.delenv(key, raising=False)
+
+    for shared_db in (
+        Path("/tmp/monitor_state.db"),
+        Path("/tmp/health_monitor.db"),
+        Path("/tmp/btcbot_state.db"),
+    ):
+        try:
+            shared_db.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     yield
 
     Settings.model_config["env_file"] = original_env_file
+
+
+@pytest.fixture(autouse=True)
+def isolate_default_state_db_per_test(
+    isolate_settings_from_host_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    del isolate_settings_from_host_env
+    worker_id = os.getenv("PYTEST_XDIST_WORKER", "gw0")
+    test_slug = request.node.nodeid.replace(os.sep, "_").replace("/", "_").replace("::", "_")
+    db_name = f"{worker_id}-{test_slug}.sqlite"
+    monkeypatch.setenv("STATE_DB_PATH", str(tmp_path / db_name))
 
 
 @pytest.fixture
