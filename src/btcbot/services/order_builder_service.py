@@ -3,13 +3,14 @@ from __future__ import annotations
 import ast
 import hashlib
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from btcbot.config import Settings
 from btcbot.domain.models import normalize_symbol
 from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.portfolio_policy_models import PortfolioPlan, RebalanceAction
 from btcbot.domain.risk_budget import Mode
+from btcbot.domain.symbols import split_symbol
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 
 
@@ -144,6 +145,7 @@ class OrderBuilderService:
 
         target_notional = Decimal(str(action.target_notional_try))
         max_spend_try = target_notional
+        sell_metrics: dict[str, str] = {}
         if side == "BUY":
             max_spend_try = self._max_spend_after_buffers(
                 action=action,
@@ -163,6 +165,26 @@ class OrderBuilderService:
                     skip_reason="insufficient_notional_after_buffers",
                     now_utc=now_utc,
                 )
+        else:
+            sell_gate = self._resolve_sell_qty(
+                action=action,
+                symbol=symbol,
+                price_try=price_try,
+                qty_step=decision.rules.step_size,
+                plan=plan,
+            )
+            sell_metrics = sell_gate["metrics"]
+            if sell_gate["skip_reason"] is not None:
+                return self._skipped(
+                    cycle_id=cycle_id,
+                    symbol=symbol,
+                    side=side,
+                    reason=action.reason,
+                    skip_reason=sell_gate["skip_reason"],
+                    now_utc=now_utc,
+                    constraints_extra=sell_metrics,
+                )
+            max_spend_try = sell_gate["qty"] * price_try
 
         qty_raw = max_spend_try / price_try
         qty = rules.quantize_qty(symbol, qty_raw) if qty_raw > 0 else Decimal("0")
@@ -174,9 +196,10 @@ class OrderBuilderService:
                 reason=action.reason,
                 skip_reason="qty_rounds_to_zero",
                 now_utc=now_utc,
+                constraints_extra=sell_metrics if side == "SELL" else None,
             )
 
-        if side == "BUY" and decision.rules.min_qty is not None and qty < decision.rules.min_qty:
+        if decision.rules.min_qty is not None and qty < decision.rules.min_qty:
             return self._skipped(
                 cycle_id=cycle_id,
                 symbol=symbol,
@@ -184,10 +207,11 @@ class OrderBuilderService:
                 reason=action.reason,
                 skip_reason="qty_below_min_qty_after_quantize",
                 now_utc=now_utc,
+                constraints_extra=sell_metrics if side == "SELL" else None,
             )
 
         notional_try = price_try * qty
-        if side == "BUY" and notional_try < decision.rules.min_notional_try:
+        if notional_try < decision.rules.min_notional_try:
             return self._skipped(
                 cycle_id=cycle_id,
                 symbol=symbol,
@@ -195,6 +219,19 @@ class OrderBuilderService:
                 reason=action.reason,
                 skip_reason="notional_below_min_total_after_quantize",
                 now_utc=now_utc,
+                constraints_extra=sell_metrics if side == "SELL" else None,
+            )
+
+        internal_min_notional = Decimal(str(settings.min_order_notional_try))
+        if side == "SELL" and notional_try < internal_min_notional:
+            return self._skipped(
+                cycle_id=cycle_id,
+                symbol=symbol,
+                side=side,
+                reason=action.reason,
+                skip_reason="notional_below_internal_min_after_quantize",
+                now_utc=now_utc,
+                constraints_extra=sell_metrics,
             )
 
         valid, reason = rules.validate_notional(symbol, price_try, qty)
@@ -206,6 +243,7 @@ class OrderBuilderService:
                 reason=action.reason,
                 skip_reason=reason,
                 now_utc=now_utc,
+                constraints_extra=sell_metrics if side == "SELL" else None,
             )
 
         client_order_id = self._client_order_id(
@@ -230,10 +268,87 @@ class OrderBuilderService:
                 "offset_bps": str(offset_bps),
                 "quantized": "true",
                 "created_at": now_utc.isoformat(),
+                **sell_metrics,
             },
             skipped=False,
             skip_reason=None,
         )
+
+    def _resolve_sell_qty(
+        self,
+        *,
+        action: RebalanceAction,
+        symbol: str,
+        price_try: Decimal,
+        qty_step: Decimal,
+        plan: PortfolioPlan,
+    ) -> dict[str, str | Decimal | None | dict[str, str]]:
+        balances_by_asset = self._plan_balances_by_asset(plan)
+        base_asset, _quote_asset = split_symbol(symbol)
+        balance = balances_by_asset.get(base_asset)
+        available_qty = max(Decimal("0"), balance) if balance is not None else Decimal("0")
+        metrics = {
+            "sell_attempted": "true",
+            "available_qty": str(available_qty),
+        }
+        if available_qty <= 0:
+            metrics.update(
+                {
+                    "desired_qty": "0",
+                    "qty_after_quantize": "0",
+                    "notional_try_after_quantize": "0",
+                }
+            )
+            return {
+                "qty": Decimal("0"),
+                "skip_reason": "insufficient_inventory_free_qty",
+                "metrics": metrics,
+            }
+
+        desired_qty = Decimal(str(action.est_qty))
+        if desired_qty <= 0 and price_try > 0:
+            desired_qty = Decimal(str(action.target_notional_try)) / price_try
+        if desired_qty <= 0:
+            metrics.update(
+                {
+                    "desired_qty": "0",
+                    "qty_after_quantize": "0",
+                    "notional_try_after_quantize": "0",
+                }
+            )
+            return {
+                "qty": Decimal("0"),
+                "skip_reason": "insufficient_sell_qty_input",
+                "metrics": metrics,
+            }
+
+        capped_qty = min(desired_qty, available_qty)
+        qty = (capped_qty / qty_step).to_integral_value(rounding=ROUND_DOWN) * qty_step
+        notional_try = qty * price_try
+        metrics.update(
+            {
+                "desired_qty": str(desired_qty),
+                "qty_after_quantize": str(qty),
+                "notional_try_after_quantize": str(notional_try),
+            }
+        )
+
+        return {"qty": qty, "skip_reason": None, "metrics": metrics}
+
+    @staticmethod
+    def _plan_balances_by_asset(plan: PortfolioPlan) -> dict[str, Decimal]:
+        raw_snapshot = plan.constraints_summary.get("balances")
+        if not isinstance(raw_snapshot, dict):
+            return {}
+        balances: dict[str, Decimal] = {}
+        for asset, payload in raw_snapshot.items():
+            if not isinstance(payload, dict):
+                continue
+            try:
+                balances[str(asset).upper()] = Decimal(str(payload.get("free", "0")))
+            except Exception:  # noqa: BLE001
+                continue
+        return balances
 
     def _max_spend_after_buffers(
         self,
@@ -307,7 +422,11 @@ class OrderBuilderService:
         reason: str,
         skip_reason: str,
         now_utc: datetime,
+        constraints_extra: dict[str, str] | None = None,
     ) -> OrderIntent:
+        applied = {"skipped": "true", "created_at": now_utc.isoformat()}
+        if constraints_extra:
+            applied.update(constraints_extra)
         return OrderIntent(
             cycle_id=cycle_id,
             symbol=symbol,
@@ -325,7 +444,7 @@ class OrderBuilderService:
                 reason=reason,
             ),
             reason=reason,
-            constraints_applied={"skipped": "true", "created_at": now_utc.isoformat()},
+            constraints_applied=applied,
             skipped=True,
             skip_reason=skip_reason,
         )

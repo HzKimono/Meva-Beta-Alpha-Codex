@@ -139,6 +139,13 @@ class PortfolioPolicyService:
             "min_order_notional_try": str(min_order_notional_try),
             "final_mode": final_mode.value,
             "snapshot": str(snapshot.to_dict()),
+            "balances": {
+                str(balance.asset).upper(): {
+                    "free": str(Decimal(str(balance.free))),
+                    "locked": str(Decimal(str(balance.locked))),
+                }
+                for balance in balances
+            },
             "planned_turnover_try": str(planned_turnover_try),
             "target_weights": {symbol: str(weight) for symbol, weight in target_weights.items()},
         }

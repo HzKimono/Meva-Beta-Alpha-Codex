@@ -29,7 +29,10 @@ class _Exchange:
         return [_Pair("BTC_TRY")]
 
 
-def _plan(actions: list[RebalanceAction]) -> PortfolioPlan:
+def _plan(
+    actions: list[RebalanceAction],
+    balances: dict[str, dict[str, Decimal | str]] | None = None,
+) -> PortfolioPlan:
     return PortfolioPlan(
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         universe=["BTCTRY"],
@@ -40,7 +43,10 @@ def _plan(actions: list[RebalanceAction]) -> PortfolioPlan:
             )
         ],
         actions=actions,
-        constraints_summary={},
+        constraints_summary={
+            "balances": balances
+            or {"BTC": {"free": "10", "locked": "0"}, "TRY": {"free": "0", "locked": "0"}}
+        },
         notes=[],
     )
 
@@ -117,7 +123,7 @@ def test_deterministic_client_order_id() -> None:
                 )
             ]
         ),
-        mark_prices_try={"BTCTRY": Decimal("100")},
+        mark_prices_try={"BTCTRY": Decimal("500")},
         rules=rules,
         settings=settings,
         final_mode=Mode.NORMAL,
@@ -397,3 +403,159 @@ def test_qty_below_min_qty_after_quantize_skip() -> None:
 
     assert intents[0].skipped is True
     assert intents[0].skip_reason == "qty_below_min_qty_after_quantize"
+
+
+def test_sell_missing_balance_skips_with_inventory_reason() -> None:
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(_Exchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_ORDER_OFFSET_BPS=Decimal("0"))
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_TRY",
+                    side="SELL",
+                    target_notional_try=Decimal("500"),
+                    est_qty=Decimal("1"),
+                    reason="trim",
+                )
+            ],
+            balances={"TRY": {"free": "1000", "locked": "0"}},
+        ),
+        mark_prices_try={"BTCTRY": Decimal("100")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert intents[0].skipped is True
+    assert intents[0].skip_reason == "insufficient_inventory_free_qty"
+
+
+def test_sell_zero_free_balance_skips_with_inventory_reason() -> None:
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(_Exchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_ORDER_OFFSET_BPS=Decimal("0"))
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_TRY",
+                    side="SELL",
+                    target_notional_try=Decimal("500"),
+                    est_qty=Decimal("1"),
+                    reason="trim",
+                )
+            ],
+            balances={"BTC": {"free": "0", "locked": "1"}},
+        ),
+        mark_prices_try={"BTCTRY": Decimal("100")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert intents[0].skipped is True
+    assert intents[0].skip_reason == "insufficient_inventory_free_qty"
+
+
+def test_sell_qty_capped_by_available_inventory_and_quantized() -> None:
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(_Exchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_ORDER_OFFSET_BPS=Decimal("0"))
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_TRY",
+                    side="SELL",
+                    target_notional_try=Decimal("1000"),
+                    est_qty=Decimal("5"),
+                    reason="trim",
+                )
+            ],
+            balances={"BTC": {"free": "0.239", "locked": "1"}},
+        ),
+        mark_prices_try={"BTCTRY": Decimal("500")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert intents[0].skipped is False
+    assert intents[0].qty == Decimal("0.23")
+    assert intents[0].qty <= Decimal("0.239")
+
+
+def test_sell_qty_below_min_qty_after_quantize_skip() -> None:
+    class MinQtySellPair(_Pair):
+        def __init__(self, symbol: str) -> None:
+            super().__init__(symbol)
+            self.minQuantity = Decimal("0.02")
+            self.minTotalAmount = Decimal("1")
+
+    class MinQtySellExchange:
+        def get_exchange_info(self):
+            return [MinQtySellPair("BTC_TRY")]
+
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(MinQtySellExchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_ORDER_OFFSET_BPS=Decimal("0"))
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_TRY",
+                    side="SELL",
+                    target_notional_try=Decimal("100"),
+                    est_qty=Decimal("0.019"),
+                    reason="trim",
+                )
+            ],
+            balances={"BTC": {"free": "0.019", "locked": "0"}},
+        ),
+        mark_prices_try={"BTCTRY": Decimal("100")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert intents[0].skipped is True
+    assert intents[0].skip_reason == "qty_below_min_qty_after_quantize"
+
+
+def test_sell_notional_below_min_total_after_quantize_skip() -> None:
+    builder = OrderBuilderService()
+    rules = ExchangeRulesService(_Exchange())
+    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True, STAGE7_ORDER_OFFSET_BPS=Decimal("0"))
+    intents = builder.build_intents(
+        cycle_id="c1",
+        plan=_plan(
+            [
+                RebalanceAction(
+                    symbol="BTC_TRY",
+                    side="SELL",
+                    target_notional_try=Decimal("50"),
+                    est_qty=Decimal("0.5"),
+                    reason="trim",
+                )
+            ],
+            balances={"BTC": {"free": "0.5", "locked": "0"}},
+        ),
+        mark_prices_try={"BTCTRY": Decimal("150")},
+        rules=rules,
+        settings=settings,
+        final_mode=Mode.NORMAL,
+        now_utc=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert intents[0].skipped is True
+    assert intents[0].skip_reason == "notional_below_min_total_after_quantize"
