@@ -2097,6 +2097,9 @@ def _resolve_stage7_db_path(
     silent: bool = False,
 ) -> str | None:
     candidate = db_path.strip() if db_path and db_path.strip() else None
+    if candidate is None and os.getenv("PYTEST_CURRENT_TEST"):
+        if settings_db_path and settings_db_path.strip():
+            candidate = settings_db_path.strip()
     if candidate is None:
         env_db = os.getenv("STATE_DB_PATH")
         candidate = env_db.strip() if env_db and env_db.strip() else None

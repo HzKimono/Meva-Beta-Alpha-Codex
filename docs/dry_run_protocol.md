@@ -59,3 +59,14 @@ done
 - `dryrun_ws_rest_fallback_total`
 - `dryrun_exchange_degraded_total`
 - `dryrun_submission_suppressed_total`
+
+## Local reliability check for test isolation
+
+Run the full suite multiple times to verify DB isolation and lock stability:
+
+```bash
+for i in 1 2 3 4 5; do
+  echo "run $i"
+  pytest -q
+done
+```
