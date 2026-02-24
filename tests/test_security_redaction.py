@@ -105,3 +105,34 @@ def test_cli_json_outputs_doctor_and_canary_are_sanitized(monkeypatch, capsys) -
     assert FAKE_SECRET not in canary_out
     payload = json.loads(canary_out)
     assert payload["final_doctor_status"] == "OK"
+
+
+def test_sanitize_text_redacts_bearer_query_and_json() -> None:
+    bearer = sanitize_text("Authorization: Bearer supersecrettoken")
+    query = sanitize_text("https://example.com?a=1&apiKey=supersecrettoken&token=anothertoken")
+    json_text = sanitize_text('{"token":"supersecrettoken","nested":{"signature":"abc123456789"}}')
+
+    assert "supersecrettoken" not in bearer
+    assert "supersecrettoken" not in query
+    assert "anothertoken" not in query
+    assert "supersecrettoken" not in json_text
+    assert "abc123456789" not in json_text
+
+
+def test_redact_data_and_mapping_deep_redaction() -> None:
+    payload = {
+        "auth": "tiny",
+        "items": [{"access_token": "1234567890abcdef"}, "ok"],
+        "child": {"apiKey": "abcdef1234567890"},
+    }
+
+    sanitized = sanitize_mapping(payload)
+
+    assert sanitized["auth"] != "tiny"
+    assert sanitized["items"][0]["access_token"] != "1234567890abcdef"
+    assert sanitized["child"]["apiKey"] != "abcdef1234567890"
+
+
+def test_sanitize_text_accepts_none_known_secrets() -> None:
+    value = sanitize_text("token=abc123", known_secrets=None)
+    assert value == "token=[REDACTED]"

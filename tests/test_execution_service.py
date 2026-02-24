@@ -1628,3 +1628,38 @@ def test_known_min_total_reject_does_not_crash_pipeline(tmp_path, caplog) -> Non
     assert placed == 0
     assert service.last_execute_summary["orders_failed_exchange"] == 1
     assert any(r.message == "exchange_submit_failed" for r in caplog.records)
+
+
+def test_submission_guarded_by_policy_emits_log_and_metric(monkeypatch, caplog) -> None:
+    class _StateStore:
+        def get_kill_switch(self, _process_role):
+            return (False, "", None)
+
+    class _Exchange:
+        def health_snapshot(self):
+            return {"degraded": False, "breaker_open": False}
+
+    class _Instrumentation:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def counter(self, name: str, value: int, attrs: dict[str, object] | None = None) -> None:
+            del value, attrs
+            self.calls.append(name)
+
+    inst = _Instrumentation()
+    monkeypatch.setattr(execution_service_module, "is_trading_blocked_by_policy", lambda: True)
+    monkeypatch.setattr(execution_service_module, "get_instrumentation", lambda: inst)
+
+    service = ExecutionService.__new__(ExecutionService)
+    service.dry_run = False
+    service.state_store = _StateStore()
+    service.process_role = "MONITOR"
+    service.exchange = _Exchange()
+
+    with caplog.at_level("WARNING"):
+        guarded = service._submission_guarded_by_runtime_state()
+
+    assert guarded is True
+    assert "trading_blocked_by_policy_total" in inst.calls
+    assert any("submission_blocked_by_policy_rotation_hygiene" in rec.message for rec in caplog.records)

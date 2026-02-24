@@ -15,7 +15,10 @@ from btcbot.security.secrets import (
     SecretValidationResult,
     build_default_provider,
     inject_runtime_secrets,
+    is_trading_blocked_by_policy,
     log_secret_validation,
+    enforce_secret_rotation_hygiene,
+    set_trading_blocked_by_policy,
     validate_secret_controls,
 )
 
@@ -34,6 +37,9 @@ __all__ = [
     "SecretValidationResult",
     "build_default_provider",
     "inject_runtime_secrets",
+    "is_trading_blocked_by_policy",
+    "set_trading_blocked_by_policy",
+    "enforce_secret_rotation_hygiene",
     "validate_secret_controls",
     "log_secret_validation",
 ]
