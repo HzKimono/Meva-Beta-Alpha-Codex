@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 
 def create_sqlite_connection(db_path: str) -> sqlite3.Connection:
@@ -8,7 +10,21 @@ def create_sqlite_connection(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+@contextmanager
+def sqlite_connection_context(db_path: str) -> Iterator[sqlite3.Connection]:
+    conn = create_sqlite_connection(db_path)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def ensure_stage4_schema(conn: sqlite3.Connection) -> None:

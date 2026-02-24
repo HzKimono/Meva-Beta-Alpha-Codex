@@ -31,6 +31,7 @@ from btcbot.observability import (
     get_instrumentation,
 )
 from btcbot.observability_decisions import emit_decision
+from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_replay_dataset
 from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
@@ -1034,8 +1035,7 @@ def _run_canary_doctor_gate(
 
 def _canary_summary_counts(db_path: str, started_at_iso: str) -> dict[str, int]:
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with sqlite_connection_context(db_path) as conn:
             orders_submitted = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM orders WHERE created_at >= ?",
@@ -2565,7 +2565,7 @@ def run_stage7_db_count(*, settings: Settings, db_path: str | None) -> int:
     ]
 
     with single_instance_lock(db_path=resolved_db_path, account_key="stage7-db-count"):
-        with sqlite3.connect(resolved_db_path) as connection:
+        with sqlite_connection_context(resolved_db_path) as connection:
             cursor = connection.cursor()
             for table_name in tracked_tables:
                 exists = cursor.execute(

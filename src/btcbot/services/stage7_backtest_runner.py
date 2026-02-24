@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from btcbot.config import Settings
 from btcbot.domain.models import PairInfo
+from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.services.market_data_replay import MarketDataReplay
 from btcbot.services.parity import compute_run_fingerprint
 from btcbot.services.stage7_single_cycle_driver import (
@@ -72,7 +72,7 @@ class Stage7BacktestRunner:
 
 
 def _read_adaptation_counts(db_path: Path) -> tuple[int, int]:
-    with sqlite3.connect(str(db_path)) as conn:
+    with sqlite_connection_context(str(db_path)) as conn:
         param_changes = int(conn.execute("SELECT COUNT(*) FROM stage7_param_changes").fetchone()[0])
         checkpoints = int(
             conn.execute("SELECT COUNT(*) FROM stage7_params_checkpoints").fetchone()[0]

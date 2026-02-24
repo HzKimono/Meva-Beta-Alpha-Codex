@@ -20,6 +20,7 @@ python -m btcbot stage4-run --dry-run --loop --cycle-seconds 10 --max-cycles -1
 ```
 
 On startup, verify the policy banner shows side effects blocked (`dry_run=True`, kill switch/safe mode active).
+Look for: `Effective Side-Effects State: BLOCKED`.
 
 ## Monitor / health loop
 
@@ -69,4 +70,13 @@ for i in 1 2 3 4 5; do
   echo "run $i"
   pytest -q
 done
+```
+
+PowerShell equivalent:
+
+```powershell
+1..5 | ForEach-Object {
+  Write-Host "run $_"
+  pytest -q
+}
 ```

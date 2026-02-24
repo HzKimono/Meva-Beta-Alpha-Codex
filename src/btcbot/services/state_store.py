@@ -28,6 +28,7 @@ from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
 from btcbot.persistence.uow import UnitOfWorkFactory
+from btcbot.persistence.sqlite.sqlite_connection import create_sqlite_connection
 
 if TYPE_CHECKING:
     from btcbot.domain.anomalies import AnomalyEvent
@@ -259,10 +260,7 @@ class StateStore:
         if tx_conn is not None:
             yield tx_conn
             return
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 30000")
-        conn.execute("PRAGMA journal_mode = WAL")
+        conn = create_sqlite_connection(self.db_path)
         try:
             yield conn
             conn.commit()
@@ -281,10 +279,7 @@ class StateStore:
         if tx_conn is not None:
             yield tx_conn
             return
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 30000")
-        conn.execute("PRAGMA journal_mode = WAL")
+        conn = create_sqlite_connection(self.db_path)
         conn.execute("BEGIN IMMEDIATE")
         self._transaction_conn = conn
         try:
