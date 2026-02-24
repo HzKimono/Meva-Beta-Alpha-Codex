@@ -48,6 +48,41 @@ BASELINE_ALERT_RULES: list[AlertRule] = [
         severity="high",
         window="5m",
     ),
+    AlertRule(
+        name="stuck_cycles",
+        metric_name="bot_orders_submitted_total",
+        condition="delta == 0",
+        severity="high",
+        window="10m",
+    ),
+    AlertRule(
+        name="breaker_open_persistent",
+        metric_name="bot_breaker_open",
+        condition="value == 1",
+        severity="high",
+        window="5m",
+    ),
+    AlertRule(
+        name="reject_spike_1123",
+        metric_name="bot_reject_1123_total",
+        condition="rate_per_minute > 3",
+        severity="medium",
+        window="10m",
+    ),
+    AlertRule(
+        name="cursor_stall_spike",
+        metric_name="bot_cursor_stall_total",
+        condition="delta > 0",
+        severity="medium",
+        window="10m",
+    ),
+    AlertRule(
+        name="degraded_mode_stuck",
+        metric_name="bot_degraded_mode",
+        condition="value == 1",
+        severity="high",
+        window="10m",
+    ),
 ]
 
 
