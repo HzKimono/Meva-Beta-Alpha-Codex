@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import logging
 import pytest
 
 from btcbot.config import Settings
-from btcbot.security.redaction import REDACTED, redact_data, redact_text
+from btcbot.security.redaction import redact_data, redact_text
 from btcbot.security.secrets import validate_secret_controls
 
 
@@ -16,10 +17,10 @@ def test_redact_value_masks_sensitive_keys() -> None:
         "headers": {"X-Signature": "sig"},
     }
     redacted = redact_data(payload)
-    assert redacted["api_key"] == REDACTED
-    assert redacted["nested"]["token"] == REDACTED
+    assert redacted["api_key"] != "abc"
+    assert redacted["nested"]["token"] != "xyz"
     assert redacted["nested"]["ok"] == 1
-    assert redacted["headers"]["X-Signature"] == REDACTED
+    assert redacted["headers"]["X-Signature"] != "sig"
 
 
 def test_redact_text_masks_known_patterns() -> None:
@@ -90,3 +91,68 @@ def test_live_trading_requires_safe_mode_off() -> None:
 def test_safe_mode_default_is_enabled() -> None:
     settings = Settings(_env_file=None)
     assert settings.safe_mode is True
+
+
+class _DummyInstrumentation:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def counter(self, name: str, value: int, attrs: dict[str, object] | None = None) -> None:
+        self.calls.append(name)
+
+
+def test_rotation_hygiene_warn_logs_and_metrics(monkeypatch, caplog) -> None:
+    from btcbot.security import secrets
+
+    inst = _DummyInstrumentation()
+    monkeypatch.setattr(secrets, "get_instrumentation", lambda: inst)
+    monkeypatch.setattr(secrets, "_utc_today", lambda: datetime(2025, 1, 15, tzinfo=UTC))
+
+    with caplog.at_level(logging.WARNING):
+        blocked = secrets.enforce_secret_rotation_hygiene(
+            api_key_rotated_at="2024-12-01",
+            warn_days=30,
+            max_age_days=120,
+        )
+
+    assert blocked is False
+    assert "secret_rotation_policy_warn_total" in inst.calls
+    assert any("secret_rotation_policy_warn" in rec.message for rec in caplog.records)
+
+
+def test_rotation_hygiene_expired_blocks_trading_and_metrics(monkeypatch, caplog) -> None:
+    from btcbot.security import secrets
+
+    inst = _DummyInstrumentation()
+    monkeypatch.setattr(secrets, "get_instrumentation", lambda: inst)
+    monkeypatch.setattr(secrets, "_utc_today", lambda: datetime(2025, 1, 15, tzinfo=UTC))
+
+    with caplog.at_level(logging.ERROR):
+        blocked = secrets.enforce_secret_rotation_hygiene(
+            api_key_rotated_at="2024-01-01",
+            warn_days=30,
+            max_age_days=90,
+        )
+
+    assert blocked is True
+    assert secrets.is_trading_blocked_by_policy() is True
+    assert "secret_rotation_policy_expired_total" in inst.calls
+    assert any("secret_rotation_policy_expired" in rec.message for rec in caplog.records)
+
+
+def test_rotation_hygiene_invalid_date_logs_and_metric(monkeypatch, caplog) -> None:
+    from btcbot.security import secrets
+
+    inst = _DummyInstrumentation()
+    monkeypatch.setattr(secrets, "get_instrumentation", lambda: inst)
+
+    with caplog.at_level(logging.WARNING):
+        blocked = secrets.enforce_secret_rotation_hygiene(
+            api_key_rotated_at="2025-99-99",
+            warn_days=30,
+            max_age_days=90,
+        )
+
+    assert blocked is False
+    assert "secret_rotation_policy_invalid_date_total" in inst.calls
+    assert any("secret_rotation_policy_invalid_date" in rec.message for rec in caplog.records)

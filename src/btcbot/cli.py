@@ -44,6 +44,7 @@ from btcbot.security.redaction import redact_data
 from btcbot.security.secrets import (
     build_default_provider,
     inject_runtime_secrets,
+    enforce_secret_rotation_hygiene,
     log_secret_validation,
     validate_secret_controls,
 )
@@ -675,6 +676,11 @@ def _load_settings(env_file: str | None) -> Settings:
     log_secret_validation(validation)
     if not validation.ok:
         raise ValueError("Secret controls validation failed")
+    enforce_secret_rotation_hygiene(
+        api_key_rotated_at=getattr(settings, "api_key_rotated_at", None),
+        warn_days=int(getattr(settings, "secret_rotation_warn_days", 30)),
+        max_age_days=int(getattr(settings, "secret_max_age_days", 90)),
+    )
     return settings
 
 
