@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import parse_qsl, urlencode
 
 REDACTED = "***REDACTED***"
 _TEXT_REDACTED = "[REDACTED]"
@@ -40,6 +41,21 @@ _SENSITIVE_EXACT_KEYS = {
 }
 _SENSITIVE_COMPACT_KEYS = {part.replace("_", "") for part in _SENSITIVE_EXACT_KEYS}
 _SENSITIVE_PARTS = tuple(part.casefold() for part in SENSITIVE_KEYS)
+_SENSITIVE_EXACT_KEYS = {
+    "api_key",
+    "apikey",
+    "secret",
+    "api_secret",
+    "passphrase",
+    "password",
+    "token",
+    "access_token",
+    "refresh_token",
+    "signature",
+    "authorization",
+    "auth",
+}
+_SENSITIVE_EXACT_COMPACT_KEYS = {k.replace("_", "") for k in _SENSITIVE_EXACT_KEYS}
 
 _PLAIN_SECRET_PATTERNS = (
     re.compile(r"(?im)(authorization\s*[:=]\s*)(bearer\s+)?([^\s,;]+)"),
