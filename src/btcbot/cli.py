@@ -687,6 +687,7 @@ def run_with_optional_loop(
     max_cycles: int | None,
     jitter_seconds: int,
     stop_loop_fn: Callable[[], bool] | None = None,
+    idle_hook_fn: Callable[[], None] | None = None,
 ) -> int:
     if cycle_seconds < 0 or jitter_seconds < 0:
         print("cycle-seconds and jitter-seconds must be >= 0")
@@ -752,7 +753,11 @@ def run_with_optional_loop(
                             }
                         },
                     )
-                    time.sleep(backoff)
+                    sleep_until = time.monotonic() + backoff
+                    while time.monotonic() < sleep_until:
+                        time.sleep(min(1.0, max(0.0, sleep_until - time.monotonic())))
+                        if callable(idle_hook_fn):
+                            idle_hook_fn()
 
             if callable(stop_loop_fn) and stop_loop_fn():
                 logger.warning(
@@ -773,7 +778,11 @@ def run_with_optional_loop(
             )
             if sleep_for <= 0:
                 sleep_for = 1
-            time.sleep(sleep_for)
+            sleep_until = time.monotonic() + sleep_for
+            while time.monotonic() < sleep_until:
+                time.sleep(min(1.0, max(0.0, sleep_until - time.monotonic())))
+                if callable(idle_hook_fn):
+                    idle_hook_fn()
     except KeyboardInterrupt:
         logger.info(
             "loop_runner_stopped",
@@ -790,9 +799,19 @@ def run_with_optional_loop(
         return last_rc
 
 
-def _build_state_store(db_path: str, *, strict_instance_lock: bool) -> StateStore:
+def _build_state_store(
+    db_path: str,
+    *,
+    strict_instance_lock: bool,
+    settings: Settings | None = None,
+) -> StateStore:
+    resolved_settings = settings or Settings()
     try:
-        return StateStore(db_path=db_path, strict_instance_lock=strict_instance_lock)
+        return StateStore(
+            db_path=db_path,
+            strict_instance_lock=strict_instance_lock,
+            process_instance_ttl_seconds=int(getattr(resolved_settings, "process_instance_ttl_seconds", 180)),
+        )
     except TypeError:
         return StateStore(db_path=db_path)
 
@@ -819,11 +838,24 @@ def run_stage3_runtime(
                 force_dry_run=force_dry_run,
                 include_safe_mode=True,
             )
-            strict_lock = bool((force_dry_run is False) and runtime_live_policy.allowed)
-            runtime_state_store = _build_state_store(
-                settings.state_db_path,
-                strict_instance_lock=strict_lock,
+            live_armed = bool(
+                (force_dry_run is False)
+                and bool(getattr(settings, "live_trading", False))
+                and (str(getattr(settings, "live_trading_ack", "")) == "I_UNDERSTAND")
+                and (not bool(getattr(settings, "kill_switch", False)))
             )
+            strict_lock = True if live_armed else bool(getattr(settings, "state_db_strict_lock", True))
+            try:
+                runtime_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                    settings=settings,
+                )
+            except TypeError:
+                runtime_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                )
             logger.info(
                 "state_store_runtime_owner",
                 extra={
@@ -833,10 +865,44 @@ def run_stage3_runtime(
                         ),
                         "instance_id": getattr(runtime_state_store, "instance_id", ""),
                         "strict_lock": strict_lock,
-                        "heartbeat_interval_seconds": max(1, cycle_seconds),
+                        "heartbeat_interval_seconds": int(
+                            getattr(settings, "process_instance_heartbeat_interval_seconds", 30)
+                        ),
                     }
                 },
             )
+            heartbeat_interval_seconds = max(
+                1,
+                int(getattr(settings, "process_instance_heartbeat_interval_seconds", 30)),
+            )
+            next_heartbeat_at = time.monotonic() + heartbeat_interval_seconds
+            heartbeat_error_count = 0
+
+            def _heartbeat_idle_hook() -> None:
+                nonlocal next_heartbeat_at, heartbeat_error_count
+                if time.monotonic() < next_heartbeat_at:
+                    return
+                heartbeat_instance_lock = getattr(runtime_state_store, "heartbeat_instance_lock", None)
+                if not callable(heartbeat_instance_lock):
+                    return
+                try:
+                    heartbeat_instance_lock()
+                    heartbeat_error_count = 0
+                except Exception as exc:  # noqa: BLE001
+                    heartbeat_error_count += 1
+                    get_instrumentation().counter("heartbeat_failures", 1)
+                    if heartbeat_error_count <= 1 or heartbeat_error_count % 10 == 0:
+                        logger.warning(
+                            "instance_heartbeat_failure",
+                            extra={
+                                "extra": {
+                                    "error": str(exc),
+                                    "error_type": type(exc).__name__,
+                                    "heartbeat_error_count": heartbeat_error_count,
+                                }
+                            },
+                        )
+                next_heartbeat_at = time.monotonic() + heartbeat_interval_seconds
             process_role = str(getattr(settings, "process_role", "monitor"))
             is_live_role = process_role.lower() == "live"
 
@@ -858,6 +924,7 @@ def run_stage3_runtime(
                 max_cycles=max_cycles,
                 jitter_seconds=jitter_seconds,
                 stop_loop_fn=_stop_loop_if_killed,
+                idle_hook_fn=_heartbeat_idle_hook,
             )
     except RuntimeError as exc:
         logger.error("stage3_runtime_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
@@ -1074,10 +1141,17 @@ def run_canary(
             if doctor_rc != 0:
                 return doctor_rc
 
-            runtime_state_store = _build_state_store(
-                resolved_db_path,
-                strict_instance_lock=True,
-            )
+            try:
+                runtime_state_store = _build_state_store(
+                    resolved_db_path,
+                    strict_instance_lock=True,
+                    settings=canary_settings,
+                )
+            except TypeError:
+                runtime_state_store = _build_state_store(
+                    resolved_db_path,
+                    strict_instance_lock=True,
+                )
             logger.info(
                 "state_store_runtime_owner",
                 extra={
@@ -1302,11 +1376,28 @@ def run_cycle(
         return 2
 
     exchange = build_exchange_stage3(settings, force_dry_run=dry_run)
+    live_armed = bool(
+        (not dry_run)
+        and bool(getattr(settings, "live_trading", False))
+        and (str(getattr(settings, "live_trading_ack", "")) == "I_UNDERSTAND")
+        and (not bool(getattr(settings, "kill_switch", False)))
+    )
+    strict_lock = True if live_armed else bool(getattr(settings, "state_db_strict_lock", True))
     try:
-        resolved_state_store = state_store or _build_state_store(
-            settings.state_db_path,
-            strict_instance_lock=bool((not dry_run) and live_policy.allowed),
-        )
+        if state_store is None:
+            try:
+                resolved_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                    settings=settings,
+                )
+            except TypeError:
+                resolved_state_store = _build_state_store(
+                    settings.state_db_path,
+                    strict_instance_lock=strict_lock,
+                )
+        else:
+            resolved_state_store = state_store
     except RuntimeError as exc:
         if "STATE_DB_LOCK_CONFLICT" in str(exc):
             logger.error("db_instance_lock_conflict", extra={"extra": {"error": str(exc)}})
@@ -1459,6 +1550,7 @@ def run_cycle(
                     portfolio_service=portfolio_service,
                     mark_prices=startup_mark_prices,
                     do_refresh_lifecycle=False,
+                    state_store=resolved_state_store,
                 )
                 if recovery.observe_only_required:
                     logger.error(

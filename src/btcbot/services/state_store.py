@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from btcbot.domain.account_snapshot import AccountSnapshot, Holding
 from btcbot.domain.accounting import Position, TradeFill
@@ -220,14 +221,16 @@ class StateStore:
         *,
         strict_instance_lock: bool = False,
         read_only: bool = False,
+        process_instance_ttl_seconds: int = 180,
     ) -> None:
         self.db_path = db_path
         self.db_path_abs = str(Path(db_path).expanduser().resolve())
         self.strict_instance_lock = strict_instance_lock
         self.read_only = read_only
+        self.process_instance_ttl_seconds = max(1, int(process_instance_ttl_seconds))
         self._uow_factory = UnitOfWorkFactory(db_path, read_only=read_only)
         scope_digest = hashlib.sha256(self.db_path_abs.encode("utf-8")).hexdigest()[:12]
-        self.instance_id = f"{os.getpid()}-{scope_digest}"
+        self.instance_id = f"{os.getpid()}-{scope_digest}-{uuid4().hex[:8]}"
         self._transaction_conn: sqlite3.Connection | None = None
         self._init_db()
         with self._connect() as conn:
@@ -2117,49 +2120,98 @@ class StateStore:
                 pid INTEGER NOT NULL,
                 db_path TEXT NOT NULL,
                 started_at_epoch INTEGER NOT NULL,
-                heartbeat_at_epoch INTEGER NOT NULL
+                heartbeat_at_epoch INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                ended_at_epoch INTEGER
             )
             """
         )
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(process_instances)")}
+        if "status" not in columns:
+            conn.execute(
+                "ALTER TABLE process_instances ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"
+            )
+        if "ended_at_epoch" not in columns:
+            conn.execute("ALTER TABLE process_instances ADD COLUMN ended_at_epoch INTEGER")
 
     def _register_instance_lock(self, conn: sqlite3.Connection) -> None:
-        # Strict mode protects live trading by refusing concurrent writers on same DB scope.
         now_epoch = int(datetime.now(UTC).timestamp())
-        recent = conn.execute(
+        ttl_cutoff = now_epoch - self.process_instance_ttl_seconds
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
             """
-            SELECT instance_id, pid, heartbeat_at_epoch
+            SELECT instance_id, pid, heartbeat_at_epoch, status
             FROM process_instances
             WHERE db_path = ?
               AND instance_id != ?
-              AND heartbeat_at_epoch >= ?
+              AND status = 'active'
             ORDER BY heartbeat_at_epoch DESC
-            LIMIT 1
             """,
-            (self.db_path_abs, self.instance_id, now_epoch - 120),
-        ).fetchone()
-        if recent is not None:
+            (self.db_path_abs, self.instance_id),
+        ).fetchall()
+        active_row = next((row for row in rows if int(row["heartbeat_at_epoch"]) >= ttl_cutoff), None)
+        if active_row is not None:
             conflict_payload = {
                 "db_path": self.db_path_abs,
                 "instance_id": self.instance_id,
-                "conflict_instance_id": str(recent["instance_id"]),
-                "conflict_pid": int(recent["pid"]),
+                "conflict_instance_id": str(active_row["instance_id"]),
+                "conflict_pid": int(active_row["pid"]),
                 "strict_instance_lock": bool(self.strict_instance_lock),
             }
-            logger.warning("db_instance_lock_conflict", extra={"extra": conflict_payload})
+            logger.warning("instance_active_conflict", extra={"extra": conflict_payload})
+            try:
+                from btcbot.observability import get_instrumentation
+
+                get_instrumentation().counter("active_conflict_count", 1)
+            except Exception:  # pragma: no cover
+                pass
             if self.strict_instance_lock:
                 raise RuntimeError(
                     "STATE_DB_LOCK_CONFLICT: active process instance already registered "
-                    f"for db_path={self.db_path_abs} conflict_pid={int(recent['pid'])}"
+                    f"for db_path={self.db_path_abs} conflict_pid={int(active_row['pid'])}"
                 )
+
+        stale_ids = [
+            str(row["instance_id"])
+            for row in rows
+            if int(row["heartbeat_at_epoch"]) < ttl_cutoff
+        ]
+        if stale_ids:
+            logger.warning(
+                "instance_stale_detected",
+                extra={"extra": {"db_path": self.db_path_abs, "stale_instance_ids": stale_ids}},
+            )
+            try:
+                from btcbot.observability import get_instrumentation
+
+                get_instrumentation().counter("stale_detected_count", len(stale_ids))
+            except Exception:  # pragma: no cover
+                pass
+            conn.execute(
+                f"UPDATE process_instances SET status='stale', ended_at_epoch=? WHERE instance_id IN ({','.join('?' for _ in stale_ids)})",
+                (now_epoch, *stale_ids),
+            )
+
         conn.execute(
             """
-            INSERT INTO process_instances(instance_id, pid, db_path, started_at_epoch, heartbeat_at_epoch)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(instance_id) DO UPDATE SET
-                heartbeat_at_epoch=excluded.heartbeat_at_epoch
+            INSERT INTO process_instances(
+                instance_id, pid, db_path, started_at_epoch, heartbeat_at_epoch, status, ended_at_epoch
+            )
+            VALUES (?, ?, ?, ?, ?, 'active', NULL)
             """,
             (self.instance_id, os.getpid(), self.db_path_abs, now_epoch, now_epoch),
         )
+        if stale_ids:
+            logger.info(
+                "instance_takeover_success",
+                extra={"extra": {"db_path": self.db_path_abs, "instance_id": self.instance_id}},
+            )
+            try:
+                from btcbot.observability import get_instrumentation
+
+                get_instrumentation().counter("takeover_success_count", 1)
+            except Exception:  # pragma: no cover
+                pass
 
     def heartbeat_instance_lock(self) -> None:
         now_epoch = int(datetime.now(UTC).timestamp())
@@ -2168,6 +2220,10 @@ class StateStore:
                 "UPDATE process_instances SET heartbeat_at_epoch = ? WHERE instance_id = ?",
                 (now_epoch, self.instance_id),
             )
+        logger.info(
+            "instance_heartbeat_update",
+            extra={"extra": {"instance_id": self.instance_id, "heartbeat_at_epoch": now_epoch}},
+        )
 
     def _ensure_op_state_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
