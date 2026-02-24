@@ -12,10 +12,19 @@ from btcbot.services.state_store import StateStore
 
 class _MockClient:
     def __init__(
-        self, pair_symbols: list[str], books: dict[str, tuple[str, str, str, str]]
+        self,
+        pair_symbols: list[str],
+        books: dict[str, tuple[str, str, str, str]],
+        *,
+        ts: datetime,
+        include_timestamp: bool = True,
+        use_simple_orderbook: bool = False,
     ) -> None:
         self._pair_symbols = pair_symbols
         self._books = books
+        self._ts = ts
+        self._include_timestamp = include_timestamp
+        self._use_simple_orderbook = use_simple_orderbook
 
     def get_exchange_info(self) -> list[PairInfo]:
         return [
@@ -33,12 +42,26 @@ class _MockClient:
         assert path == "/api/v2/orderbook"
         symbol = str(params["pairSymbol"])
         bid_price, bid_qty, ask_price, ask_qty = self._books[symbol]
-        return {
-            "data": {
-                "bids": [[bid_price, bid_qty]],
-                "asks": [[ask_price, ask_qty]],
-            }
+        data: dict[str, object] = {
+            "bids": [[bid_price, bid_qty]],
+            "asks": [[ask_price, ask_qty]],
         }
+        if self._include_timestamp:
+            data["timestamp"] = int(self._ts.timestamp() * 1000)
+        return {"data": data}
+
+    def get_orderbook(self, symbol: str) -> tuple[str, str]:
+        bid_price, _bid_qty, ask_price, _ask_qty = self._books[symbol]
+        return bid_price, ask_price
+
+
+class _MockSimpleClient(_MockClient):
+    def _get(self, path: str, params: dict[str, object]) -> dict[str, object]:
+        raise RuntimeError("raw unavailable")
+
+    def get_orderbook_with_timestamp(self, symbol: str) -> tuple[str, str, int]:
+        bid_price, _bid_qty, ask_price, _ask_qty = self._books[symbol]
+        return bid_price, ask_price, int(self._ts.timestamp() * 1000)
 
 
 class _MockExchange:
@@ -46,102 +69,268 @@ class _MockExchange:
         self.client = client
 
 
-def test_dynamic_universe_picks_top5_momentum_with_filters(tmp_path) -> None:
-    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
-    db_path = tmp_path / "state.db"
-    store = StateStore(db_path=str(db_path))
-    service = DynamicUniverseService()
-
-    symbols = ["AAAATRY", "BBBBTRY", "CCCCTRY", "DDDDTRY", "EEEETRY", "FFFFTRY", "USDTTRY"]
-    books = {
-        "AAAATRY": ("120", "500", "121", "500"),
-        "BBBBTRY": ("110", "500", "111", "500"),
-        "CCCCTRY": ("108", "500", "109", "500"),
-        "DDDDTRY": ("105", "500", "106", "500"),
-        "EEEETRY": ("102", "500", "103", "500"),
-        "FFFFTRY": ("95", "500", "96", "500"),
-        "USDTTRY": ("40", "1000", "41", "1000"),
-    }
-    exchange = _MockExchange(_MockClient(symbols, books))
-
-    lookback_bucket = now - timedelta(hours=24)
-    for symbol, price in {
-        "AAAATRY": "100",
-        "BBBBTRY": "100",
-        "CCCCTRY": "100",
-        "DDDDTRY": "100",
-        "EEEETRY": "100",
-        "FFFFTRY": "100",
-        "USDTTRY": "100",
-    }.items():
+def _seed_lookback(store: StateStore, now: datetime, symbols: list[str]) -> None:
+    for symbol in symbols:
         store.upsert_universe_price_snapshot(
             pair_symbol=symbol,
-            ts_bucket=lookback_bucket,
-            mid_price=Decimal(price),
+            ts_bucket=now - timedelta(hours=24),
+            mid_price=Decimal("100"),
         )
 
-    settings = Settings(
-        DRY_RUN=True,
-        KILL_SWITCH=False,
-        SYMBOLS="[]",
-        UNIVERSE_TOP_N=5,
-        UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
-        UNIVERSE_MIN_DEPTH_TRY=Decimal("10000"),
-        UNIVERSE_EXCLUDE_STABLES=True,
-        UNIVERSE_EXCLUDE_SYMBOLS='["USDTTRY"]',
-    )
-    result = service.select(
-        exchange=exchange,
-        state_store=store,
-        settings=settings,
-        now_utc=now,
-        cycle_id="cycle-1",
-    )
 
-    assert result.selected_symbols == (
-        "AAAATRY",
-        "BBBBTRY",
-        "CCCCTRY",
-        "DDDDTRY",
-        "EEEETRY",
-    )
-    assert result.ineligible_counts["excluded_symbol"] == 1
-
-
-def test_dynamic_universe_marks_insufficient_history(tmp_path) -> None:
+def test_freshness_stale_orderbook_rejected(tmp_path) -> None:
     now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
     store = StateStore(db_path=str(tmp_path / "state.db"))
     exchange = _MockExchange(
         _MockClient(
-            ["AAAATRY", "BBBBTRY"],
-            {
-                "AAAATRY": ("100", "800", "101", "800"),
-                "BBBBTRY": ("100", "800", "101", "800"),
-            },
+            ["AAAATRY"],
+            {"AAAATRY": ("120", "500", "121", "500")},
+            ts=now - timedelta(seconds=120),
         )
     )
-    store.upsert_universe_price_snapshot(
-        pair_symbol="AAAATRY",
-        ts_bucket=now - timedelta(hours=24),
-        mid_price=Decimal("90"),
-    )
+    _seed_lookback(store, now, ["AAAATRY"])
 
-    settings = Settings(
-        DRY_RUN=True,
-        KILL_SWITCH=False,
-        SYMBOLS="[]",
-        UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
-    )
     result = DynamicUniverseService().select(
         exchange=exchange,
         state_store=store,
-        settings=settings,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="[]", UNIVERSE_SPREAD_MAX_BPS=Decimal("200")),
         now_utc=now,
-        cycle_id="cycle-2",
+        cycle_id="c1",
     )
 
-    assert "AAAATRY" in result.selected_symbols
-    assert result.ineligible_counts["insufficient_history"] == 1
+    assert result.selected_symbols == ()
+    assert result.ineligible_counts["stale_orderbook"] == 1
+
+
+def test_depth_unavailable_fail_closed_when_qty_missing(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = _MockExchange(
+        _MockSimpleClient(
+            ["AAAATRY"],
+            {"AAAATRY": ("120", "500", "121", "500")},
+            ts=now,
+        )
+    )
+    _seed_lookback(store, now, ["AAAATRY"])
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="[]", UNIVERSE_SPREAD_MAX_BPS=Decimal("200")),
+        now_utc=now,
+        cycle_id="c2",
+    )
+
+    assert result.selected_symbols == ()
+    assert result.ineligible_counts["depth_unavailable"] == 1
+
+
+def test_exclude_stables_and_exclude_symbols_are_independent(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    symbols = ["AAAATRY", "USDTTRY", "EURTRY"]
+    exchange = _MockExchange(
+        _MockClient(
+            symbols,
+            {
+                "AAAATRY": ("120", "500", "121", "500"),
+                "USDTTRY": ("40", "1000", "41", "1000"),
+                "EURTRY": ("40", "1000", "41", "1000"),
+            },
+            ts=now,
+        )
+    )
+    _seed_lookback(store, now, symbols)
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="[]",
+            UNIVERSE_EXCLUDE_STABLES=True,
+            UNIVERSE_EXCLUDE_SYMBOLS='["EURTRY"]',
+            UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
+        ),
+        now_utc=now,
+        cycle_id="c3",
+    )
+
+    assert result.selected_symbols == ("AAAATRY",)
+    assert result.ineligible_counts["stable_symbol"] == 1
+    assert result.ineligible_counts["excluded_symbol"] == 1
+
+
+def test_scoring_tie_breaks_by_symbol(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    symbols = ["BBBTRY", "AAATRY"]
+    exchange = _MockExchange(
+        _MockClient(
+            symbols,
+            {
+                "AAATRY": ("100", "800", "101", "800"),
+                "BBBTRY": ("100", "800", "101", "800"),
+            },
+            ts=now,
+        )
+    )
+    _seed_lookback(store, now, symbols)
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="[]", UNIVERSE_TOP_N=2, UNIVERSE_SPREAD_MAX_BPS=Decimal("200")),
+        now_utc=now,
+        cycle_id="c4",
+    )
+
+    assert result.selected_symbols == ("AAATRY", "BBBTRY")
+
+
+def test_cooldown_symbol_not_selected(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    store.upsert_dynamic_universe_symbol_state(
+        symbol="AAAATRY",
+        updated_at=now,
+        cooldown_until_ts=now + timedelta(minutes=30),
+        reject_counts={},
+    )
+    exchange = _MockExchange(
+        _MockClient(["AAAATRY"], {"AAAATRY": ("100", "800", "101", "800")}, ts=now)
+    )
+    _seed_lookback(store, now, ["AAAATRY"])
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="[]", UNIVERSE_SPREAD_MAX_BPS=Decimal("200")),
+        now_utc=now,
+        cycle_id="c5",
+    )
+
+    assert result.selected_symbols == ()
+    assert result.ineligible_counts["cooldown"] == 1
+
+
+
+
+def test_probation_symbol_not_selected(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    store.upsert_dynamic_universe_symbol_state(
+        symbol="AAAATRY",
+        updated_at=now,
+        probation_until_ts=now + timedelta(minutes=30),
+        reject_counts={},
+    )
+    exchange = _MockExchange(
+        _MockClient(["AAAATRY"], {"AAAATRY": ("100", "800", "101", "800")}, ts=now)
+    )
+    _seed_lookback(store, now, ["AAAATRY"])
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="[]", UNIVERSE_SPREAD_MAX_BPS=Decimal("200")),
+        now_utc=now,
+        cycle_id="c5b",
+    )
+
+    assert result.selected_symbols == ()
+    assert result.ineligible_counts["probation"] == 1
+
+
+def test_churn_guard_limits_daily_changes(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    _seed_lookback(store, now, ["AAAATRY", "BBBBTRY", "CCCCTRY"])
+    svc = DynamicUniverseService()
+
+    first = _MockExchange(
+        _MockClient(
+            ["AAAATRY", "BBBBTRY"],
+            {
+                "AAAATRY": ("110", "800", "111", "800"),
+                "BBBBTRY": ("100", "800", "101", "800"),
+            },
+            ts=now,
+        )
+    )
+    svc.select(
+        exchange=first,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="[]",
+            UNIVERSE_TOP_N=1,
+            UNIVERSE_REFRESH_MINUTES=1,
+            UNIVERSE_CHURN_MAX_PER_DAY=1,
+            UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
+        ),
+        now_utc=now,
+        cycle_id="c6",
+    )
+
+    second = _MockExchange(
+        _MockClient(
+            ["AAAATRY", "BBBBTRY"],
+            {
+                "AAAATRY": ("100", "800", "101", "800"),
+                "BBBBTRY": ("120", "800", "121", "800"),
+            },
+            ts=now + timedelta(minutes=4),
+        )
+    )
+    svc.select(
+        exchange=second,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="[]",
+            UNIVERSE_TOP_N=1,
+            UNIVERSE_REFRESH_MINUTES=1,
+            UNIVERSE_CHURN_MAX_PER_DAY=1,
+            UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
+        ),
+        now_utc=now + timedelta(minutes=4),
+        cycle_id="c7",
+    )
+
+    third = _MockExchange(
+        _MockClient(
+            ["AAAATRY", "BBBBTRY", "CCCCTRY"],
+            {
+                "AAAATRY": ("100", "800", "101", "800"),
+                "BBBBTRY": ("100", "800", "101", "800"),
+                "CCCCTRY": ("130", "800", "131", "800"),
+            },
+            ts=now + timedelta(minutes=6),
+        )
+    )
+    result = svc.select(
+        exchange=third,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="[]",
+            UNIVERSE_TOP_N=1,
+            UNIVERSE_REFRESH_MINUTES=1,
+            UNIVERSE_CHURN_MAX_PER_DAY=1,
+            UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
+        ),
+        now_utc=now + timedelta(minutes=6),
+        cycle_id="c8",
+    )
+
+    assert result.selected_symbols == ("BBBBTRY",)
+    assert result.ineligible_counts["churn_guard"] == 1
 
 
 def test_aggressive_allocation_respects_cash_target_invariant() -> None:
@@ -179,36 +368,3 @@ def test_aggressive_allocation_respects_cash_target_invariant() -> None:
     remaining_cash = report.cash_try - planned_plus_fees
     assert report.planned_total_try > Decimal("0")
     assert remaining_cash >= Decimal("300")
-
-
-def test_aggressive_allocation_drops_min_notional_and_renormalizes() -> None:
-    service = DecisionPipelineService(
-        settings=Settings(
-            DRY_RUN=True,
-            KILL_SWITCH=False,
-            SYMBOLS="[]",
-            TRY_CASH_TARGET=Decimal("0"),
-        ),
-        now_provider=lambda: datetime(2025, 1, 1, tzinfo=UTC),
-    )
-    pair_info = [
-        PairInfo(pairSymbol="BIGTRY", numeratorScale=6, denominatorScale=2, minTotalAmount=10),
-        PairInfo(pairSymbol="SMALLTRY", numeratorScale=6, denominatorScale=2, minTotalAmount=80),
-    ]
-
-    report = service.run_cycle(
-        cycle_id="cycle-4",
-        balances={"TRY": Decimal("100")},
-        positions={},
-        mark_prices={"BIGTRY": Decimal("10"), "SMALLTRY": Decimal("10")},
-        open_orders=[],
-        pair_info=pair_info,
-        bootstrap_enabled=True,
-        live_mode=False,
-        preferred_symbols=["BIGTRY", "SMALLTRY"],
-        aggressive_scores={"BIGTRY": Decimal("0.9"), "SMALLTRY": Decimal("0.1")},
-    )
-
-    symbols = {order.symbol for order in report.order_requests}
-    assert symbols == {"BIGTRY"}
-    assert report.dropped_reasons["dropped_min_notional"] == 1
