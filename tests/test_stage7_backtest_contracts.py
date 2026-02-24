@@ -105,6 +105,8 @@ def test_stage7_backtest_no_adaptation_has_zero_param_changes(tmp_path: Path) ->
     )
 
     assert summary.param_changes == 0
+    assert summary.started_at.endswith("+00:00")
+    assert summary.ended_at.endswith("+00:00")
 
 
 def test_stage7_backtest_rerun_same_db_is_idempotent_for_cycle_rows(tmp_path: Path) -> None:
@@ -264,3 +266,13 @@ def test_stage7_backtest_never_calls_live_order_endpoints(
         freeze_params=True,
         disable_adaptation=True,
     )
+
+
+def test_stage7_backtest_adaptation_counts_missing_tables_returns_zero(tmp_path: Path) -> None:
+    out_db = tmp_path / "backtest_missing_tables.db"
+    with sqlite3.connect(out_db) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY)")
+
+    from btcbot.services.stage7_backtest_runner import _read_adaptation_counts
+
+    assert _read_adaptation_counts(out_db) == (0, 0)

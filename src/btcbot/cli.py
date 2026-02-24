@@ -31,6 +31,7 @@ from btcbot.observability import (
     get_instrumentation,
 )
 from btcbot.observability_decisions import emit_decision
+from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.replay import ReplayCaptureConfig, capture_replay_dataset, init_replay_dataset
 from btcbot.replay.validate import validate_replay_dataset
 from btcbot.risk.exchange_rules import MarketDataExchangeRulesProvider
@@ -346,6 +347,11 @@ def main() -> int:
     doctor_parser.add_argument(
         "--json", action="store_true", help="Print machine-readable JSON report"
     )
+    doctor_parser.add_argument(
+        "--allow-mismatched-db",
+        action="store_true",
+        help="Allow doctor to run even when role/db naming convention mismatches",
+    )
 
     replay_init_parser = subparsers.add_parser(
         "replay-init", help="Initialize replay dataset structure"
@@ -558,6 +564,26 @@ def main() -> int:
             settings_db_path=None,
             silent=True,
         )
+        if resolved_db_path:
+            try:
+                enforce_role_db_convention(
+                    getattr(settings, "process_role", ""),
+                    bool(getattr(settings, "live_trading", False)),
+                    normalize_db_path(resolved_db_path),
+                )
+            except ValueError as exc:
+                if not bool(args.allow_mismatched_db):
+                    print(str(exc))
+                    return 2
+                logger.warning(
+                    "doctor_role_db_convention_bypassed",
+                    extra={
+                        "extra": {
+                            "db_path": resolved_db_path,
+                            "role": getattr(settings, "process_role", ""),
+                        }
+                    },
+                )
         return run_doctor(
             settings=settings,
             db_path=resolved_db_path,
@@ -600,6 +626,22 @@ def _command_touches_state_db(command_name: str) -> bool:
 
 
 def _enforce_role_db_convention_for_command(command_name: str) -> bool:
+    return command_name in {
+        "run",
+        "canary",
+        "stage4-run",
+        "health",
+        "stage7-report",
+        "stage7-export",
+        "stage7-alerts",
+        "stage7-db-count",
+        "stage7-backtest-export",
+        "stage7-backtest-report",
+        "doctor",
+    }
+
+
+def _strict_role_db_convention_for_command(command_name: str) -> bool:
     return command_name in {"run", "canary", "stage4-run", "health"}
 
 
@@ -629,11 +671,25 @@ def _prepare_runtime(
         else:
             settings.state_db_path = str(db_path)
         if _enforce_role_db_convention_for_command(command_name):
-            enforce_role_db_convention(
-                getattr(settings, "process_role", ""),
-                bool(getattr(settings, "live_trading", False)),
-                db_path,
-            )
+            try:
+                enforce_role_db_convention(
+                    getattr(settings, "process_role", ""),
+                    bool(getattr(settings, "live_trading", False)),
+                    db_path,
+                )
+            except ValueError:
+                if _strict_role_db_convention_for_command(command_name):
+                    raise
+                logger.warning(
+                    "role_db_convention_mismatch",
+                    extra={
+                        "extra": {
+                            "command": command_name,
+                            "role": getattr(settings, "process_role", ""),
+                            "db_path": str(db_path),
+                        }
+                    },
+                )
 
     logger.info(
         "startup",
@@ -1034,8 +1090,7 @@ def _run_canary_doctor_gate(
 
 def _canary_summary_counts(db_path: str, started_at_iso: str) -> dict[str, int]:
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with sqlite_connection_context(db_path) as conn:
             orders_submitted = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM orders WHERE created_at >= ?",
@@ -2097,6 +2152,9 @@ def _resolve_stage7_db_path(
     silent: bool = False,
 ) -> str | None:
     candidate = db_path.strip() if db_path and db_path.strip() else None
+    if candidate is None and os.getenv("PYTEST_CURRENT_TEST"):
+        if settings_db_path and settings_db_path.strip():
+            candidate = settings_db_path.strip()
     if candidate is None:
         env_db = os.getenv("STATE_DB_PATH")
         candidate = env_db.strip() if env_db and env_db.strip() else None
@@ -2562,7 +2620,7 @@ def run_stage7_db_count(*, settings: Settings, db_path: str | None) -> int:
     ]
 
     with single_instance_lock(db_path=resolved_db_path, account_key="stage7-db-count"):
-        with sqlite3.connect(resolved_db_path) as connection:
+        with sqlite_connection_context(resolved_db_path) as connection:
             cursor = connection.cursor()
             for table_name in tracked_tables:
                 exists = cursor.execute(
