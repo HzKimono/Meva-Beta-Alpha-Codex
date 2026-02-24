@@ -19,6 +19,7 @@ class StartupRecoveryResult:
     observe_only_reason: str | None
     invariant_errors: tuple[str, ...]
     fills_inserted: int
+    recovered_reason: str | None = None
 
 
 class StartupRecoveryService:
@@ -32,6 +33,7 @@ class StartupRecoveryService:
         portfolio_service: PortfolioService,
         mark_prices: Mapping[str, Decimal] | None = None,
         do_refresh_lifecycle: bool = False,
+        state_store: object | None = None,
     ) -> StartupRecoveryResult:
         logger.info("startup_recovery_started", extra={"extra": {"cycle_id": cycle_id}})
 
@@ -92,6 +94,24 @@ class StartupRecoveryService:
                 extra={"extra": {"errors": invariant_errors, "cycle_id": cycle_id}},
             )
 
+        recovered_reason: str | None = None
+        if state_store is not None:
+            list_open_replace_txs = getattr(state_store, "list_open_replace_txs", None)
+            if callable(list_open_replace_txs):
+                open_replace_txs = list_open_replace_txs()
+                if open_replace_txs:
+                    recovered_reason = "open_replace_transactions_detected"
+                    logger.warning(
+                        "startup_recovery_partial_state_detected",
+                        extra={
+                            "extra": {
+                                "cycle_id": cycle_id,
+                                "open_replace_tx_count": len(open_replace_txs),
+                                "recovered_reason": recovered_reason,
+                            }
+                        },
+                    )
+
         logger.info(
             "startup_recovery_completed",
             extra={
@@ -100,6 +120,7 @@ class StartupRecoveryService:
                     "observe_only_reason": observe_only_reason,
                     "fills_inserted": fills_inserted,
                     "invariant_error_count": len(invariant_errors),
+                    "recovered_reason": recovered_reason,
                     "ts_utc": datetime.now(UTC).isoformat(),
                 }
             },
@@ -109,4 +130,5 @@ class StartupRecoveryService:
             observe_only_reason=observe_only_reason,
             invariant_errors=tuple(invariant_errors),
             fills_inserted=fills_inserted,
+            recovered_reason=recovered_reason,
         )
