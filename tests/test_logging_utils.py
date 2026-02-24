@@ -80,3 +80,53 @@ def test_json_formatter_includes_correlation_fields_even_when_unset() -> None:
     assert "client_order_id" in payload
     assert "order_id" in payload
     assert "symbol" in payload
+
+
+def test_json_formatter_info_redacts_token_in_output() -> None:
+    formatter = JsonFormatter()
+    record = logging.LogRecord(
+        name="btcbot.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="token=abcd1234SECRETzz",
+        args=(),
+        exc_info=None,
+    )
+    payload = formatter.format(record)
+    assert "abcd1234SECRETzz" not in payload
+
+
+def test_json_formatter_exception_redacts_traceback_message() -> None:
+    formatter = JsonFormatter()
+    try:
+        raise RuntimeError("Authorization: Bearer TOPSECRET123456")
+    except RuntimeError:
+        record = logging.LogRecord(
+            name="btcbot.test",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="failure",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+    rendered = formatter.format(record)
+    assert "TOPSECRET123456" not in rendered
+
+
+def test_json_formatter_redacts_non_record_extra_fields() -> None:
+    formatter = JsonFormatter()
+    record = logging.LogRecord(
+        name="btcbot.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="ok",
+        args=(),
+        exc_info=None,
+    )
+    record.authorization = "Bearer SUPERSECRET"
+    rendered = formatter.format(record)
+    assert "SUPERSECRET" not in rendered
+

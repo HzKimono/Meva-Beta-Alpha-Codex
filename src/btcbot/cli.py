@@ -44,6 +44,7 @@ from btcbot.security.redaction import redact_data
 from btcbot.security.secrets import (
     build_default_provider,
     inject_runtime_secrets,
+    enforce_secret_rotation_hygiene,
     log_secret_validation,
     validate_secret_controls,
 )
@@ -675,6 +676,32 @@ def _load_settings(env_file: str | None) -> Settings:
     log_secret_validation(validation)
     if not validation.ok:
         raise ValueError("Secret controls validation failed")
+    rotated_at_raw = getattr(settings, "api_key_rotated_at", None)
+    policy_blocked = enforce_secret_rotation_hygiene(
+        api_key_rotated_at=rotated_at_raw,
+        warn_days=int(getattr(settings, "secret_rotation_warn_days", 30)),
+        max_age_days=int(getattr(settings, "secret_max_age_days", 90)),
+    )
+    rotation_age_days: int | None = None
+    if rotated_at_raw:
+        try:
+            rotated_date = datetime.strptime(str(rotated_at_raw), "%Y-%m-%d").date()
+            rotation_age_days = (datetime.now(UTC).date() - rotated_date).days
+        except ValueError:
+            rotation_age_days = None
+    logger.info(
+        "secret_policy_evaluation_summary",
+        extra={
+            "extra": {
+                "rotation_age_days": rotation_age_days,
+                "rotation_blocked": bool(policy_blocked),
+                "btcturk_controls_ok": bool(validation.ok),
+                "btcturk_errors_count": len(validation.errors),
+                "btcturk_warnings_count": len(validation.warnings),
+                "live_trading": bool(getattr(settings, "live_trading", False)),
+            }
+        },
+    )
     return settings
 
 
