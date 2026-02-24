@@ -217,20 +217,7 @@ class ExecutionService:
         if self.dry_run:
             return False
         kill_enabled, _reason, _until = self.state_store.get_kill_switch(self.process_role)
-        if kill_enabled or is_trading_blocked_by_policy():
-            return True
-        if is_trading_blocked_by_policy():
-            logger.warning("submission_blocked_by_policy_rotation_hygiene")
-            get_instrumentation().counter("trading_blocked_by_policy_total", 1)
-            return True
-        if is_trading_blocked_by_policy():
-            logger.warning("submission_blocked_by_policy_rotation_hygiene")
-            get_instrumentation().counter("trading_blocked_by_policy_total", 1)
-            return True
-        policy_blocked = is_trading_blocked_by_policy()
-        if policy_blocked:
-            logger.warning("submission_blocked_by_policy_rotation_hygiene")
-            get_instrumentation().counter("trading_blocked_by_policy_total", 1)
+        if kill_enabled:
             return True
         policy_blocked = is_trading_blocked_by_policy()
         if policy_blocked:
