@@ -94,3 +94,42 @@ def format_alert_rules(rules: list[AlertRule] | None = None) -> str:
             f"{rule.name},{rule.metric_name},{rule.condition},{rule.severity},{rule.window}"
         )
     return "\n".join(lines)
+
+
+DRY_RUN_ALERT_RULES: list[AlertRule] = [
+    AlertRule(
+        name="dryrun_market_data_stale_ratio_high",
+        metric_name="dryrun_market_data_stale_ratio",
+        condition="value > 0.30",
+        severity="high",
+        window="5m",
+    ),
+    AlertRule(
+        name="dryrun_exchange_degraded_consecutive",
+        metric_name="dryrun_exchange_degraded_consecutive",
+        condition="value >= 3",
+        severity="high",
+        window="5m",
+    ),
+    AlertRule(
+        name="dryrun_ws_rest_fallback_spike",
+        metric_name="dryrun_ws_rest_fallback_total",
+        condition="delta > 5",
+        severity="medium",
+        window="5m",
+    ),
+    AlertRule(
+        name="dryrun_cycle_duration_p95_high",
+        metric_name="dryrun_cycle_duration_ms",
+        condition="p95 > 5000",
+        severity="medium",
+        window="10m",
+    ),
+    AlertRule(
+        name="dryrun_cycle_stalled",
+        metric_name="dryrun_cycle_stall_seconds",
+        condition="value > 90",
+        severity="high",
+        window="5m",
+    ),
+]

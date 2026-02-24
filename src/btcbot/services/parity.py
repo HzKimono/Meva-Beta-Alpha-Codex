@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TypeVar
+
+from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 
 _REQUIRED_PARITY_TABLES = ("stage7_cycle_trace", "stage7_ledger_metrics")
 
@@ -14,14 +15,11 @@ _TJsonFallback = TypeVar("_TJsonFallback", dict[str, object], list[object])
 
 
 def find_missing_stage7_parity_tables(db_path: str | Path) -> list[str]:
-    conn = sqlite3.connect(str(db_path))
-    try:
+    with sqlite_connection_context(str(db_path)) as conn:
         existing = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-    finally:
-        conn.close()
     return [name for name in _REQUIRED_PARITY_TABLES if name not in existing]
 
 
@@ -47,9 +45,7 @@ def compute_run_fingerprint(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
+    with sqlite_connection_context(str(db_path)) as conn:
         rows = conn.execute(
             """
             SELECT
@@ -71,8 +67,6 @@ def compute_run_fingerprint(
             """,
             (start, end),
         ).fetchall()
-    finally:
-        conn.close()
 
     canonical: list[dict[str, object]] = []
     for row in rows:

@@ -773,3 +773,23 @@ def test_stage4_cycle_duration_ms_uses_real_end_timestamps(monkeypatch, tmp_path
     assert len(captured) >= 2
     assert captured[0] is not None and captured[1] is not None
     assert int(captured[1]) >= int(captured[0])
+
+
+def test_stage4_dry_run_never_submits_or_cancels(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "stage4_dryrun_nowrites.sqlite"),
+        SYMBOLS="BTC_TRY",
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+    assert "submit" not in exchange.calls
+    assert "cancel" not in exchange.calls

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -123,3 +124,16 @@ def test_attach_action_metadata_persists_intent_identity(tmp_path) -> None:
     payload = json.loads(str(row["metadata_json"]))
     assert payload["idempotency_key"] == "idem-1"
     assert payload["intent_id"] == "intent-1"
+
+
+def test_state_store_concurrent_open_close_does_not_lock(tmp_path) -> None:
+    def _worker(worker_id: int) -> None:
+        for i in range(15):
+            db_path = str(tmp_path / f"concurrent_state_{worker_id}_{i}.db")
+            store = StateStore(db_path=db_path)
+            store.record_action(f"c-{worker_id}-{i}", "noop", f"hash-{worker_id}-{i}")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(_worker, worker_id) for worker_id in range(4)]
+        for future in futures:
+            future.result()
