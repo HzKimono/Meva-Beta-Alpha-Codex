@@ -93,12 +93,16 @@ def test_preflight_releases_strict_instance_lock_and_cleans_probe(tmp_path) -> N
     assert report["passed"] is True
 
     second = StateStore(str(db_path), strict_instance_lock=True)
-    with second._connect() as conn:
-        probe_row = conn.execute(
-            "SELECT key FROM op_state WHERE key = ?",
-            ("preflight_probe",),
-        ).fetchone()
-    assert probe_row is None
+    try:
+        # Introspection-only assertion in tests; production paths should avoid private helpers.
+        with second._connect() as conn:
+            probe_row = conn.execute(
+                "SELECT key FROM op_state WHERE key = ?",
+                ("preflight_probe",),
+            ).fetchone()
+        assert probe_row is None
+    finally:
+        second.release_instance_lock()
 
 def test_preflight_passes_for_dry_run_profile(tmp_path) -> None:
     settings = Settings(
