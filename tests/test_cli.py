@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import threading
+from types import SimpleNamespace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -2635,21 +2636,36 @@ def test_stage4_freeze_clear_requires_yes(tmp_path, capsys) -> None:
     assert "--yes" in out
 
 
-def test_stage4_freeze_status_and_clear(tmp_path, capsys) -> None:
+def test_stage4_freeze_status_and_clear_uses_canonical_role(tmp_path, capsys) -> None:
     db_path = tmp_path / "freeze_status.db"
-    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path))
+    settings = SimpleNamespace(process_role=" Live ", state_db_path=str(db_path))
     store = cli.StateStore(str(db_path))
-    store.stage4_set_freeze("MONITOR", reason="unknown_open_orders", details={"count": 2})
+    store.stage4_set_freeze("LIVE", reason="unknown_open_orders", details={"count": 2})
 
     assert cli.run_stage4_freeze_status(settings=settings, db_path=str(db_path)) == 0
     status_payload = json.loads(capsys.readouterr().out.strip())
+    assert status_payload["process_role"] == "LIVE"
     assert status_payload["active"] is True
     assert status_payload["reason"] == "unknown_open_orders"
 
     assert cli.run_stage4_freeze_clear(settings=settings, db_path=str(db_path), confirmed=True) == 0
     clear_payload = json.loads(capsys.readouterr().out.strip())
+    assert clear_payload["process_role"] == "LIVE"
     assert clear_payload["cleared"] is True
 
     assert cli.run_stage4_freeze_status(settings=settings, db_path=str(db_path)) == 0
     post_payload = json.loads(capsys.readouterr().out.strip())
+    assert post_payload["process_role"] == "LIVE"
     assert post_payload["active"] is False
+
+
+def test_should_stop_loop_if_killed_uses_canonical_live_role(tmp_path) -> None:
+    db_path = tmp_path / "kill_switch.db"
+    store = cli.StateStore(str(db_path))
+    store.set_kill_switch("LIVE", True, "test", None)
+
+    live_settings = SimpleNamespace(process_role="live", state_db_path=str(db_path))
+    monitor_settings = SimpleNamespace(process_role="monitor", state_db_path=str(db_path))
+
+    assert cli._should_stop_loop_if_killed(state_store=store, settings=live_settings) is True
+    assert cli._should_stop_loop_if_killed(state_store=store, settings=monitor_settings) is False
