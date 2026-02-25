@@ -167,6 +167,18 @@ class Stage4CycleRunner:
         pair_info = self._resolve_pair_info(exchange) or []
         active_symbols = [self.norm(symbol) for symbol in settings.symbols]
         aggressive_scores: dict[str, Decimal] | None = None
+        pre_cycle_degrade_state = state_store.get_degrade_state_current()
+        pre_cycle_reasons = self._safe_json_dict(pre_cycle_degrade_state.get("last_reasons_json"), default={})
+        pre_cycle_level = int(pre_cycle_reasons.get("level", 0) or 0)
+        pre_cycle_universe_cap_raw = pre_cycle_reasons.get("universe_cap")
+        pre_cycle_universe_cap = None
+        if pre_cycle_universe_cap_raw is not None:
+            try:
+                pre_cycle_universe_cap = max(1, int(pre_cycle_universe_cap_raw))
+            except (TypeError, ValueError):
+                pre_cycle_universe_cap = None
+        if pre_cycle_level >= 1 and pre_cycle_universe_cap is not None:
+            active_symbols = active_symbols[:pre_cycle_universe_cap]
         if settings.dynamic_universe_enabled:
             selection = DynamicUniverseService().select(
                 exchange=exchange,
@@ -882,7 +894,12 @@ class Stage4CycleRunner:
                 if current_override_raw in {m.value for m in Mode}
                 else None
             )
-            last_reasons = self._safe_json_list(degrade_state.get("last_reasons_json"), default=[])
+            last_reasons_payload = self._safe_json_dict(
+                degrade_state.get("last_reasons_json"), default={}
+            )
+            last_reasons = [str(item) for item in last_reasons_payload.get("reasons", [])]
+            previous_level = int(last_reasons_payload.get("level", 0) or 0)
+            previous_recovery_streak = int(last_reasons_payload.get("recovery_streak", 0) or 0)
             prev_warn_codes = self._parse_warn_codes(
                 self._safe_json_list(degrade_state.get("last_warn_codes_json"), default=[])
             )
@@ -935,6 +952,9 @@ class Stage4CycleRunner:
             warn_window_count = (prev_warn_window_count + 1) if has_warn else 0
             recent_warn_codes = current_warn_codes or prev_warn_codes
 
+            health_snapshot_fn = getattr(exchange, "health_snapshot", None)
+            api_snapshot = health_snapshot_fn() if callable(health_snapshot_fn) else {}
+            breaker_is_open = bool((api_snapshot or {}).get("breaker_open", False))
             degrade_decision = decide_degrade(
                 anomalies=anomalies,
                 now=cycle_now,
@@ -945,9 +965,42 @@ class Stage4CycleRunner:
                 warn_threshold=settings.degrade_warn_threshold,
                 warn_codes=warn_codes,
                 recent_warn_codes=recent_warn_codes,
+                previous_level=previous_level,
+                breaker_open=breaker_is_open,
+                freeze_active=False,
+                stability_streak=previous_recovery_streak,
             )
 
             final_mode = combine_modes(risk_decision.mode, degrade_decision.mode_override)
+            if degrade_decision.universe_cap is not None:
+                allowed_symbols = set(active_symbols[: degrade_decision.universe_cap])
+                accepted_actions = [
+                    action for action in accepted_actions if self.norm(action.symbol) in allowed_symbols
+                ]
+            if degrade_decision.shrink_notional_factor < 1:
+                shrinked_actions: list[LifecycleAction] = []
+                shrink_factor = Decimal(str(degrade_decision.shrink_notional_factor))
+                for action in accepted_actions:
+                    if (
+                        action.action_type == LifecycleActionType.SUBMIT
+                        and str(action.side).upper() == "BUY"
+                    ):
+                        shrinked_actions.append(
+                            LifecycleAction(
+                                action_type=action.action_type,
+                                symbol=action.symbol,
+                                side=action.side,
+                                price=action.price,
+                                qty=action.qty * shrink_factor,
+                                reason=action.reason,
+                                client_order_id=action.client_order_id,
+                                exchange_order_id=action.exchange_order_id,
+                                replace_for_client_order_id=action.replace_for_client_order_id,
+                            )
+                        )
+                        continue
+                    shrinked_actions.append(action)
+                accepted_actions = shrinked_actions
             gated_actions = self._gate_actions_by_mode(accepted_actions, final_mode)
             prefiltered_actions, prefilter_min_notional_dropped = (
                 self._prefilter_submit_actions_min_notional(
@@ -973,7 +1026,7 @@ class Stage4CycleRunner:
             )
             prefiltered_actions, freeze_suppressed_counts = self._suppress_actions_for_unknown_freeze(
                 actions=prefiltered_actions,
-                freeze_active=freeze_state.active,
+                freeze_active=False,
                 freeze_all=bool(settings.kill_switch_freeze_all),
                 process_role=process_role,
                 instrumentation=instrumentation,
@@ -1023,6 +1076,10 @@ class Stage4CycleRunner:
                 warn_threshold=settings.degrade_warn_threshold,
                 warn_codes=warn_codes,
                 recent_warn_codes=updated_recent_warn_codes,
+                previous_level=degrade_decision.level,
+                breaker_open=breaker_is_open,
+                freeze_active=False,
+                stability_streak=degrade_decision.recovery_streak,
             )
 
             anomaly_codes = [event.code.value for event in updated_anomalies]
@@ -1042,17 +1099,23 @@ class Stage4CycleRunner:
                 extra={
                     "extra": {
                         "cycle_id": cycle_id,
-                        "override": (
+                        "applied_override": (
+                            degrade_decision.mode_override.value
+                            if degrade_decision.mode_override
+                            else None
+                        ),
+                        "applied_cooldown_until": (
+                            degrade_decision.cooldown_until.isoformat()
+                            if degrade_decision.cooldown_until
+                            else None
+                        ),
+                        "applied_reasons": degrade_decision.reasons,
+                        "next_override": (
                             updated_decision.mode_override.value
                             if updated_decision.mode_override
                             else None
                         ),
-                        "cooldown_until": (
-                            updated_decision.cooldown_until.isoformat()
-                            if updated_decision.cooldown_until
-                            else None
-                        ),
-                        "reasons": updated_decision.reasons,
+                        "next_level": updated_decision.level,
                         "warn_window_count": updated_warn_window_count,
                     }
                 },
@@ -1079,16 +1142,36 @@ class Stage4CycleRunner:
                     cycle_id=cycle_id,
                     events=updated_anomalies,
                     cooldown_until=(
-                        updated_decision.cooldown_until.isoformat()
-                        if updated_decision.cooldown_until
+                        degrade_decision.cooldown_until.isoformat()
+                        if degrade_decision.cooldown_until
                         else None
                     ),
                     current_override_mode=(
-                        updated_decision.mode_override.value
-                        if updated_decision.mode_override
+                        degrade_decision.mode_override.value
+                        if degrade_decision.mode_override
                         else None
                     ),
-                    last_reasons_json=json.dumps(updated_decision.reasons, sort_keys=True),
+                    last_reasons_json=json.dumps(
+                        {
+                            "level": degrade_decision.level,
+                            "override_mode": (
+                                degrade_decision.mode_override.value
+                                if degrade_decision.mode_override
+                                else None
+                            ),
+                            "reasons": degrade_decision.reasons,
+                            "shrink_notional_factor": degrade_decision.shrink_notional_factor,
+                            "universe_cap": degrade_decision.universe_cap,
+                            "recovery_streak": degrade_decision.recovery_streak,
+                            "next_level": updated_decision.level,
+                            "next_override_mode": (
+                                updated_decision.mode_override.value
+                                if updated_decision.mode_override
+                                else None
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
                     warn_window_count=updated_warn_window_count,
                     last_warn_codes_json=json.dumps(
                         sorted(code.value for code in updated_recent_warn_codes),
@@ -1725,6 +1808,9 @@ class Stage4CycleRunner:
             return intents
 
         policy = self._resolve_agent_policy(settings)
+        effective_kill_switch = bool(
+            getattr(settings, "kill_switch_effective", settings.kill_switch)
+        )
         context = AgentContext(
             cycle_id=cycle_id,
             generated_at=cycle_now,
@@ -2387,6 +2473,18 @@ class Stage4CycleRunner:
             except ValueError:
                 continue
         return parsed
+
+    @staticmethod
+    def _safe_json_dict(raw: str | None, *, default: dict[str, object]) -> dict[str, object]:
+        if raw is None:
+            return dict(default)
+        try:
+            parsed = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return dict(default)
+        if not isinstance(parsed, dict):
+            return dict(default)
+        return dict(parsed)
 
     @staticmethod
     def _safe_json_list(raw: str | None, *, default: list[str]) -> list[str]:

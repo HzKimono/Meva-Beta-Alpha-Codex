@@ -4949,6 +4949,15 @@ class StateStore:
         with self._connect() as conn:
             self._save_anomaly_events_with_conn(conn=conn, cycle_id=cycle_id, events=events)
 
+    def fetch_recent_anomaly_codes(self, *, limit: int = 10) -> list[str]:
+        effective_limit = max(1, int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT code FROM anomaly_events ORDER BY ts DESC, id DESC LIMIT ?",
+                (effective_limit,),
+            ).fetchall()
+        return [str(row["code"]) for row in rows]
+
     def get_degrade_state_current(self) -> dict[str, str]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM degrade_state_current WHERE state_id = 1").fetchone()

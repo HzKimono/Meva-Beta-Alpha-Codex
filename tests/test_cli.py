@@ -2669,3 +2669,34 @@ def test_should_stop_loop_if_killed_uses_canonical_live_role(tmp_path) -> None:
 
     assert cli._should_stop_loop_if_killed(state_store=store, settings=live_settings) is True
     assert cli._should_stop_loop_if_killed(state_store=store, settings=monitor_settings) is False
+
+
+def test_degrade_override_status_and_clear(tmp_path, capsys) -> None:
+    db_path = tmp_path / "cli_degrade.db"
+    settings = Settings(DRY_RUN=True, STATE_DB_PATH=str(db_path))
+
+    assert cli.run_degrade_override(
+        settings=settings,
+        db_path=str(db_path),
+        mode="OBSERVE_ONLY",
+        cooldown_seconds=60,
+        reason="operator_test",
+    ) == 0
+    override_out = json.loads(capsys.readouterr().out)
+    assert override_out["override_mode"] == "OBSERVE_ONLY"
+
+    assert cli.run_degrade_status(settings=settings, db_path=str(db_path)) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["degrade_state_current"]["current_override_mode"] == "OBSERVE_ONLY"
+    assert "MANUAL_OVERRIDE" in status_payload["last_anomaly_codes"]
+
+    assert cli.run_degrade_clear(settings=settings, db_path=str(db_path)) == 0
+    _ = capsys.readouterr()
+    assert cli.run_degrade_status(settings=settings, db_path=str(db_path)) == 0
+    cleared = json.loads(capsys.readouterr().out)
+    assert cleared["degrade_state_current"].get("current_override_mode") is None
+
+
+def test_degrade_command_is_classified_as_db_touching() -> None:
+    assert cli._command_touches_state_db("degrade") is True
+    assert cli._enforce_role_db_convention_for_command("degrade") is True
