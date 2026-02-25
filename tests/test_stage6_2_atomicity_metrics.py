@@ -167,6 +167,28 @@ def test_accounting_fill_idempotency_unique_applied_fills(tmp_path) -> None:
     assert pos.qty == Decimal("0.1")
 
 
+def test_cursor_not_advanced_when_ingest_fails_mid_transaction(tmp_path) -> None:
+    exchange = ExchangeForAtomicity()
+    store = StateStore(str(tmp_path / "cursor_atomicity.sqlite"))
+    accounting = AccountingService(exchange=exchange, state_store=store)
+
+    fetched = accounting.fetch_new_fills("BTC_TRY")
+    assert fetched.cursor_after is not None
+
+    with pytest.raises(RuntimeError, match="forced_mid_ingest_failure"):
+        with store.transaction():
+            # Simulate failure after fills are fetched but before cursor write.
+            accounting.apply_fills(
+                fetched.fills,
+                mark_prices={"BTCTRY": Decimal("100")},
+                try_cash=Decimal("1000"),
+            )
+            raise RuntimeError("forced_mid_ingest_failure")
+            # no cursor write due to failure
+
+    assert store.get_cursor("fills_cursor:BTCTRY") is None
+
+
 def test_compute_execution_quality_fills_per_submitted_order_and_slippage() -> None:
     ts = datetime.now(UTC)
     fills = [
