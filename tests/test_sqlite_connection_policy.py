@@ -41,14 +41,16 @@ class _ConnectCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _detect_sqlite_connect_call_form(self, func: ast.AST) -> str | None:
-        # sqlite3.connect(...), alias.connect(...)
+        # sqlite3.connect(...), s.connect(...)
         if isinstance(func, ast.Attribute) and func.attr == "connect":
             if isinstance(func.value, ast.Name) and func.value.id in self.sqlite_module_aliases:
-                return "module_alias.connect(...)"
-        # connect(...), alias imported via `from sqlite3 import connect as alias`
+                return f"{func.value.id}.connect(...) (module alias)"
+
+        # connect(...), c(...) where c imported via `from sqlite3 import connect as c`
         if isinstance(func, ast.Name) and func.id in self.connect_function_aliases:
-            return "from sqlite3 import connect; connect(...)"
-        # getattr(sqlite3, "connect")(...), getattr(alias, "connect")(...)
+            return f"{func.id}(...) (from sqlite3 import connect alias)"
+
+        # getattr(sqlite3_alias, "connect")(...)
         if isinstance(func, ast.Call):
             if isinstance(func.func, ast.Name) and func.func.id == "getattr" and len(func.args) >= 2:
                 target = func.args[0]
@@ -59,8 +61,41 @@ class _ConnectCallVisitor(ast.NodeVisitor):
                     and isinstance(attr_name, ast.Constant)
                     and attr_name.value == "connect"
                 ):
-                    return 'getattr(sqlite3_alias, "connect")(...)'
+                    return f'getattr({target.id}, "connect")(... ) (module alias)'
         return None
+
+
+def _collect_offenders_from_source(source: str) -> list[tuple[int, str]]:
+    tree = ast.parse(source)
+    visitor = _ConnectCallVisitor()
+    visitor.visit(tree)
+    return visitor.offenders
+
+
+def test_sqlite_connect_visitor_detects_all_call_forms() -> None:
+    offenders = _collect_offenders_from_source(
+        """
+import sqlite3
+import sqlite3 as s
+from sqlite3 import connect
+from sqlite3 import connect as c
+
+sqlite3.connect('a.db')
+s.connect('b.db')
+connect('c.db')
+c('d.db')
+getattr(sqlite3, 'connect')('e.db')
+getattr(s, 'connect')('f.db')
+"""
+    )
+
+    forms = [form for _, form in offenders]
+    assert "sqlite3.connect(...) (module alias)" in forms
+    assert "s.connect(...) (module alias)" in forms
+    assert "connect(...) (from sqlite3 import connect alias)" in forms
+    assert "c(...) (from sqlite3 import connect alias)" in forms
+    assert 'getattr(sqlite3, "connect")(... ) (module alias)' in forms
+    assert 'getattr(s, "connect")(... ) (module alias)' in forms
 
 
 def test_no_sqlite_connect_calls_outside_helper_module() -> None:

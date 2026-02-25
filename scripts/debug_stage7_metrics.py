@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 
 
 def main() -> int:
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "btcbot_state.db"
+    db_path = sys.argv[1] if len(sys.argv) > 1 else (os.getenv("STATE_DB_PATH") or "btcbot_state.db")
     with sqlite_connection_context(db_path) as conn:
         row = conn.execute(
             """

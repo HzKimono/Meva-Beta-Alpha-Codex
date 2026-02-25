@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -12,7 +13,7 @@ def table_columns(conn: Any, table: str) -> list[str]:
 
 
 def main() -> int:
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "btcbot_state.db"
+    db_path = sys.argv[1] if len(sys.argv) > 1 else (os.getenv("STATE_DB_PATH") or "btcbot_state.db")
     with sqlite_connection_context(db_path) as conn:
         tables = [
             "stage7_run_metrics",
