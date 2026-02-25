@@ -1127,3 +1127,178 @@ def test_reject1123_threshold_triggers_and_extends_cooldown(tmp_path) -> None:
 
     active = store.list_active_cooldowns(2051)
     assert "ETHTRY" in active
+
+
+def test_get_kill_switch_reads_legacy_key_and_migrates_to_canonical(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    payload = json.dumps({"enabled": True, "reason": "x", "until_ts": None}, sort_keys=True)
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO op_state(key, int_value, text_value, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("kill_switch:live", 1, payload, now),
+        )
+
+    enabled, reason, until_ts = store.get_kill_switch("LIVE")
+    assert enabled is True
+    assert reason == "x"
+    assert until_ts is None
+
+    with store._connect() as conn:
+        canonical = conn.execute(
+            "SELECT int_value, text_value FROM op_state WHERE key = ?",
+            ("kill_switch:LIVE",),
+        ).fetchone()
+    assert canonical is not None
+    assert int(canonical["int_value"]) == 1
+    assert json.loads(str(canonical["text_value"]))["reason"] == "x"
+
+    enabled_again, reason_again, until_again = store.get_kill_switch("LIVE")
+    assert enabled_again is True
+    assert reason_again == "x"
+    assert until_again is None
+
+
+def test_stage4_freeze_get_reads_legacy_key_and_migrates_to_canonical(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    payload = {
+        "active": True,
+        "reason": "unknown_open_orders",
+        "since_ts": "2026-01-01T00:00:00+00:00",
+        "last_seen_ts": now,
+        "details": {"count": 2},
+    }
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO op_state(key, int_value, text_value, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("stage4_freeze:live", 1, json.dumps(payload, sort_keys=True), now),
+        )
+
+    freeze = store.stage4_get_freeze("LIVE")
+    assert freeze.active is True
+    assert freeze.reason == "unknown_open_orders"
+    assert freeze.details == {"count": 2}
+
+    with store._connect() as conn:
+        canonical = conn.execute(
+            "SELECT int_value, text_value FROM op_state WHERE key = ?",
+            ("stage4_freeze:LIVE",),
+        ).fetchone()
+    assert canonical is not None
+    assert int(canonical["int_value"]) == 1
+
+
+def test_stage4_freeze_clear_clears_legacy_and_canonical(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    active_payload = json.dumps(
+        {
+            "active": True,
+            "reason": "unknown_open_orders",
+            "since_ts": now,
+            "last_seen_ts": now,
+            "details": {"count": 1},
+        },
+        sort_keys=True,
+    )
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, ?, ?)",
+            ("stage4_freeze:live", 1, active_payload, now),
+        )
+
+    store.stage4_clear_freeze("LIVE")
+
+    with store._connect() as conn:
+        canonical = conn.execute(
+            "SELECT int_value, text_value FROM op_state WHERE key = ?",
+            ("stage4_freeze:LIVE",),
+        ).fetchone()
+        legacy = conn.execute(
+            "SELECT int_value, text_value FROM op_state WHERE key = ?",
+            ("stage4_freeze:live",),
+        ).fetchone()
+    assert canonical is not None
+    assert int(canonical["int_value"]) == 0
+    assert json.loads(str(canonical["text_value"]))["active"] is False
+    assert legacy is not None
+    assert int(legacy["int_value"]) == 0
+
+
+def test_kill_switch_canonical_wins_over_legacy(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    canonical_payload = json.dumps(
+        {"enabled": True, "reason": "canonical", "until_ts": None},
+        sort_keys=True,
+    )
+    legacy_payload = json.dumps(
+        {"enabled": False, "reason": "legacy", "until_ts": None},
+        sort_keys=True,
+    )
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, ?, ?)",
+            ("kill_switch:LIVE", 1, canonical_payload, now),
+        )
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, ?, ?)",
+            ("kill_switch:live", 0, legacy_payload, now),
+        )
+
+    enabled, reason, until_ts = store.get_kill_switch("LIVE")
+    assert enabled is True
+    assert reason == "canonical"
+    assert until_ts is None
+
+    with store._connect() as conn:
+        canonical = conn.execute(
+            "SELECT int_value, text_value FROM op_state WHERE key = ?",
+            ("kill_switch:LIVE",),
+        ).fetchone()
+    assert canonical is not None
+    assert int(canonical["int_value"]) == 1
+    assert json.loads(str(canonical["text_value"]))["reason"] == "canonical"
+
+
+def test_get_consecutive_critical_errors_reads_legacy_key_and_migrates(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, NULL, ?)",
+            ("critical_errors:live", 3, now),
+        )
+
+    assert store.get_consecutive_critical_errors("LIVE") == 3
+
+    with store._connect() as conn:
+        canonical = conn.execute(
+            "SELECT int_value FROM op_state WHERE key = ?",
+            ("critical_errors:LIVE",),
+        ).fetchone()
+    assert canonical is not None
+    assert int(canonical["int_value"]) == 3
+
+
+def test_get_consecutive_critical_errors_canonical_wins_over_legacy(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, NULL, ?)",
+            ("critical_errors:LIVE", 5, now),
+        )
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, NULL, ?)",
+            ("critical_errors:live", 1, now),
+        )
+
+    assert store.get_consecutive_critical_errors("LIVE") == 5

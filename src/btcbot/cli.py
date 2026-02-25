@@ -25,7 +25,7 @@ from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.logging_context import with_logging_context
 from btcbot.logging_utils import setup_logging
 from btcbot.obs.logging import set_base_context
-from btcbot.obs.process_role import ProcessRole
+from btcbot.obs.process_role import ProcessRole, coerce_process_role
 from btcbot.observability import (
     configure_instrumentation,
     flush_instrumentation,
@@ -69,6 +69,7 @@ from btcbot.services.parity import (
     find_missing_stage7_parity_tables,
 )
 from btcbot.services.portfolio_service import PortfolioService
+from btcbot.services.preflight import run_preflight_checks
 from btcbot.services.process_lock import single_instance_lock
 from btcbot.services.risk_service import RiskService
 from btcbot.services.stage4_cycle_runner import (
@@ -91,6 +92,18 @@ logger = logging.getLogger(__name__)
 LIVE_TRADING_NOT_ARMED_MESSAGE = (
     "Live trading is not armed; set LIVE_TRADING=true and LIVE_TRADING_ACK=I_UNDERSTAND"
 )
+
+
+def _canonical_process_role(settings: Settings) -> str:
+    return coerce_process_role(getattr(settings, "process_role", None)).value
+
+
+def _should_stop_loop_if_killed(*, state_store: StateStore, settings: Settings) -> bool:
+    process_role = _canonical_process_role(settings)
+    if process_role != ProcessRole.LIVE.value:
+        return False
+    enabled, _reason, _until = state_store.get_kill_switch(process_role)
+    return bool(enabled)
 
 
 def main() -> int:
@@ -361,6 +374,19 @@ def main() -> int:
         ),
     )
 
+    preflight_parser = subparsers.add_parser("preflight", help="Run fail-fast live/canary readiness checks")
+    preflight_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+    preflight_parser.add_argument(
+        "--profile",
+        choices=["live", "dry-run"],
+        default="live",
+        help="Preflight profile: strict live checks or dry-run readiness",
+    )
+
     doctor_parser = subparsers.add_parser("doctor", help="Validate local config, env, and DB")
     doctor_parser.add_argument(
         "--db", default=None, help="Sqlite DB path (defaults to env STATE_DB_PATH)"
@@ -588,6 +614,9 @@ def main() -> int:
     if args.command == "stage7-db-count":
         return run_stage7_db_count(settings=settings, db_path=args.db)
 
+    if args.command == "preflight":
+        return run_preflight(settings=settings, db_path=args.db, profile=args.profile)
+
     if args.command == "doctor":
         # Doctor remains runnable without DB on first-time setup; SLO coverage then warns/skips.
         resolved_db_path = _resolve_stage7_db_path(
@@ -656,6 +685,7 @@ def _command_touches_state_db(command_name: str) -> bool:
         "stage7-backtest-export",
         "stage7-backtest-report",
         "stage7-db-count",
+        "preflight",
     }
 
 
@@ -674,6 +704,7 @@ def _enforce_role_db_convention_for_command(command_name: str) -> bool:
         "stage7-backtest-export",
         "stage7-backtest-report",
         "doctor",
+        "preflight",
     }
 
 
@@ -1022,14 +1053,8 @@ def run_stage3_runtime(
                             },
                         )
                 next_heartbeat_at = time.monotonic() + heartbeat_interval_seconds
-            process_role = str(getattr(settings, "process_role", "monitor"))
-            is_live_role = process_role.lower() == "live"
-
             def _stop_loop_if_killed() -> bool:
-                if not is_live_role:
-                    return False
-                enabled, _reason, _until = runtime_state_store.get_kill_switch(process_role)
-                return bool(enabled)
+                return _should_stop_loop_if_killed(state_store=runtime_state_store, settings=settings)
 
             return run_with_optional_loop(
                 command="run",
@@ -1955,7 +1980,7 @@ def run_cycle(
 def run_stage4_freeze_status(*, settings: Settings, db_path: str | None = None) -> int:
     resolved_db = normalize_db_path(db_path or settings.state_db_path)
     store = StateStore(str(resolved_db))
-    process_role = str(getattr(settings, "process_role", ProcessRole.MONITOR.value)).upper()
+    process_role = _canonical_process_role(settings)
     freeze = store.stage4_get_freeze(process_role)
     payload = {
         "process_role": process_role,
@@ -1980,7 +2005,7 @@ def run_stage4_freeze_clear(
         return 2
     resolved_db = normalize_db_path(db_path or settings.state_db_path)
     store = StateStore(str(resolved_db))
-    process_role = str(getattr(settings, "process_role", ProcessRole.MONITOR.value)).upper()
+    process_role = _canonical_process_role(settings)
     previous = store.stage4_get_freeze(process_role)
     store.stage4_clear_freeze(process_role)
     duration_seconds = None
@@ -2114,6 +2139,18 @@ def run_cycle_stage7(
             extra={"extra": {"error_type": type(exc).__name__, "safe_message": str(exc)}},
         )
         return 1
+
+
+def run_preflight(*, settings: Settings, db_path: str | None = None, profile: str = "live") -> int:
+    summary = run_preflight_checks(settings=settings, db_path=db_path, profile=profile)
+    passed = bool(summary.get("passed", False))
+    status = "PASS" if passed else "FAIL"
+    print(f"Preflight ({summary.get('profile')}): {status}")
+    for check in summary.get("checks", []):
+        marker = "OK" if check.get("ok") else "FAIL"
+        print(f" - {check.get('name')}: {marker} ({check.get('detail')})")
+    print(json.dumps(summary, sort_keys=True))
+    return 0 if passed else 2
 
 
 def run_health(settings: Settings) -> int:
