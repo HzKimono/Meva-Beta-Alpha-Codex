@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -227,6 +227,7 @@ def _canonicalize_role(role: str) -> str:
 
 
 def _role_key_candidates(prefix: str, role: str) -> list[str]:
+    # Backward compatibility: historical keys used raw/lower role values; prefer canonical first.
     raw_role = str(role)
     stripped_role = raw_role.strip()
     canonical_role = _canonicalize_role(role)
@@ -2717,19 +2718,47 @@ class StateStore:
                 (key, text, now),
             )
 
-    def get_consecutive_critical_errors(self, role: str) -> int:
-        key = f"critical_errors:{role}"
+    def _find_op_state_row_by_keys(self, keys: list[str]) -> tuple[str, sqlite3.Row] | None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT int_value FROM op_state WHERE key = ?",
-                (key,),
-            ).fetchone()
-        if row is None or row["int_value"] is None:
+            for key in keys:
+                row = conn.execute(
+                    "SELECT int_value, text_value FROM op_state WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                if row is not None:
+                    return key, row
+        return None
+
+    def _migrate_op_state_to_canonical(self, *, canonical_key: str, row: sqlite3.Row) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    int_value=excluded.int_value,
+                    text_value=excluded.text_value,
+                    updated_at=excluded.updated_at
+                """,
+                (canonical_key, row["int_value"], row["text_value"], now),
+            )
+
+    def get_consecutive_critical_errors(self, role: str) -> int:
+        keys = _role_key_candidates("critical_errors", role)
+        canonical_key = keys[0]
+        found = self._find_op_state_row_by_keys(keys)
+        if found is None:
+            return 0
+        source_key, row = found
+        if source_key != canonical_key:
+            self._migrate_op_state_to_canonical(canonical_key=canonical_key, row=row)
+        if row["int_value"] is None:
             return 0
         return int(row["int_value"])
 
     def increment_consecutive_critical_errors(self, role: str) -> int:
-        key = f"critical_errors:{role}"
+        key = f"critical_errors:{_canonicalize_role(role)}"
         now = datetime.now(UTC).isoformat()
         with self.transaction() as conn:
             row = conn.execute("SELECT int_value FROM op_state WHERE key = ?", (key,)).fetchone()
@@ -2746,7 +2775,7 @@ class StateStore:
             return value
 
     def reset_consecutive_critical_errors(self, role: str) -> None:
-        key = f"critical_errors:{role}"
+        key = f"critical_errors:{_canonicalize_role(role)}"
         now = datetime.now(UTC).isoformat()
         with self.transaction() as conn:
             conn.execute(
@@ -2787,32 +2816,12 @@ class StateStore:
     def get_kill_switch(self, role: str) -> tuple[bool, str | None, str | None]:
         keys = _role_key_candidates("kill_switch", role)
         canonical_key = keys[0]
-        with self.transaction() as conn:
-            row: sqlite3.Row | None = None
-            source_key: str | None = None
-            for key in keys:
-                row = conn.execute(
-                    "SELECT int_value, text_value FROM op_state WHERE key = ?",
-                    (key,),
-                ).fetchone()
-                if row is not None:
-                    source_key = key
-                    break
-            if row is None:
-                return False, None, None
-            if source_key != canonical_key:
-                now = datetime.now(UTC).isoformat()
-                conn.execute(
-                    """
-                    INSERT INTO op_state(key, int_value, text_value, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
-                        int_value=excluded.int_value,
-                        text_value=excluded.text_value,
-                        updated_at=excluded.updated_at
-                    """,
-                    (canonical_key, row["int_value"], row["text_value"], now),
-                )
+        found = self._find_op_state_row_by_keys(keys)
+        if found is None:
+            return False, None, None
+        source_key, row = found
+        if source_key != canonical_key:
+            self._migrate_op_state_to_canonical(canonical_key=canonical_key, row=row)
         enabled = bool(row["int_value"])
         reason = None
         until_ts = None
@@ -2911,38 +2920,18 @@ class StateStore:
     def stage4_get_freeze(self, process_role: str) -> Stage4FreezeState:
         keys = _role_key_candidates("stage4_freeze", process_role)
         canonical_key = keys[0]
-        with self.transaction() as conn:
-            row: sqlite3.Row | None = None
-            source_key: str | None = None
-            for key in keys:
-                row = conn.execute(
-                    "SELECT int_value, text_value FROM op_state WHERE key = ?",
-                    (key,),
-                ).fetchone()
-                if row is not None:
-                    source_key = key
-                    break
-            if row is None:
-                return Stage4FreezeState(
-                    active=False,
-                    reason=None,
-                    since_ts=None,
-                    details={},
-                    last_seen_ts=None,
-                )
-            if source_key != canonical_key:
-                now = datetime.now(UTC).isoformat()
-                conn.execute(
-                    """
-                    INSERT INTO op_state(key, int_value, text_value, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
-                        int_value=excluded.int_value,
-                        text_value=excluded.text_value,
-                        updated_at=excluded.updated_at
-                    """,
-                    (canonical_key, row["int_value"], row["text_value"], now),
-                )
+        found = self._find_op_state_row_by_keys(keys)
+        if found is None:
+            return Stage4FreezeState(
+                active=False,
+                reason=None,
+                since_ts=None,
+                details={},
+                last_seen_ts=None,
+            )
+        source_key, row = found
+        if source_key != canonical_key:
+            self._migrate_op_state_to_canonical(canonical_key=canonical_key, row=row)
         payload: dict[str, object] = {}
         text_value = row["text_value"]
         if text_value:

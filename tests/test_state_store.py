@@ -1266,3 +1266,39 @@ def test_kill_switch_canonical_wins_over_legacy(tmp_path) -> None:
     assert canonical is not None
     assert int(canonical["int_value"]) == 1
     assert json.loads(str(canonical["text_value"]))["reason"] == "canonical"
+
+
+def test_get_consecutive_critical_errors_reads_legacy_key_and_migrates(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, NULL, ?)",
+            ("critical_errors:live", 3, now),
+        )
+
+    assert store.get_consecutive_critical_errors("LIVE") == 3
+
+    with store._connect() as conn:
+        canonical = conn.execute(
+            "SELECT int_value FROM op_state WHERE key = ?",
+            ("critical_errors:LIVE",),
+        ).fetchone()
+    assert canonical is not None
+    assert int(canonical["int_value"]) == 3
+
+
+def test_get_consecutive_critical_errors_canonical_wins_over_legacy(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    now = datetime.now(UTC).isoformat()
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, NULL, ?)",
+            ("critical_errors:LIVE", 5, now),
+        )
+        conn.execute(
+            "INSERT INTO op_state(key, int_value, text_value, updated_at) VALUES (?, ?, NULL, ?)",
+            ("critical_errors:live", 1, now),
+        )
+
+    assert store.get_consecutive_critical_errors("LIVE") == 5
