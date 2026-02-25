@@ -735,6 +735,7 @@ def _command_touches_state_db(command_name: str) -> bool:
         "stage4-run",
         "stage4-freeze-status",
         "stage4-freeze-clear",
+        "degrade",
         "stage7-run",
         "health",
         "stage7-report",
@@ -754,6 +755,7 @@ def _enforce_role_db_convention_for_command(command_name: str) -> bool:
         "stage4-run",
         "stage4-freeze-status",
         "stage4-freeze-clear",
+        "degrade",
         "health",
         "stage7-report",
         "stage7-export",
@@ -2090,12 +2092,7 @@ def run_stage4_freeze_clear(
 
 def _degrade_status_payload(store: StateStore) -> dict[str, object]:
     state = store.get_degrade_state_current()
-    recent_codes: list[str] = []
-    with store._connect() as conn:
-        rows = conn.execute(
-            "SELECT code FROM anomaly_events ORDER BY ts DESC LIMIT 10"
-        ).fetchall()
-    recent_codes = [str(row["code"]) for row in rows]
+    recent_codes = store.fetch_recent_anomaly_codes(limit=10)
     return {
         "degrade_state_current": state,
         "last_anomaly_codes": recent_codes,

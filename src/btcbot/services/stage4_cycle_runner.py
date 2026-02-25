@@ -967,7 +967,7 @@ class Stage4CycleRunner:
                 recent_warn_codes=recent_warn_codes,
                 previous_level=previous_level,
                 breaker_open=breaker_is_open,
-                freeze_active=freeze_state.active,
+                freeze_active=False,
                 stability_streak=previous_recovery_streak,
             )
 
@@ -1026,7 +1026,7 @@ class Stage4CycleRunner:
             )
             prefiltered_actions, freeze_suppressed_counts = self._suppress_actions_for_unknown_freeze(
                 actions=prefiltered_actions,
-                freeze_active=freeze_state.active,
+                freeze_active=False,
                 freeze_all=bool(settings.kill_switch_freeze_all),
                 process_role=process_role,
                 instrumentation=instrumentation,
@@ -1078,7 +1078,7 @@ class Stage4CycleRunner:
                 recent_warn_codes=updated_recent_warn_codes,
                 previous_level=degrade_decision.level,
                 breaker_open=breaker_is_open,
-                freeze_active=freeze_state.active,
+                freeze_active=False,
                 stability_streak=degrade_decision.recovery_streak,
             )
 
@@ -1099,17 +1099,23 @@ class Stage4CycleRunner:
                 extra={
                     "extra": {
                         "cycle_id": cycle_id,
-                        "override": (
+                        "applied_override": (
+                            degrade_decision.mode_override.value
+                            if degrade_decision.mode_override
+                            else None
+                        ),
+                        "applied_cooldown_until": (
+                            degrade_decision.cooldown_until.isoformat()
+                            if degrade_decision.cooldown_until
+                            else None
+                        ),
+                        "applied_reasons": degrade_decision.reasons,
+                        "next_override": (
                             updated_decision.mode_override.value
                             if updated_decision.mode_override
                             else None
                         ),
-                        "cooldown_until": (
-                            updated_decision.cooldown_until.isoformat()
-                            if updated_decision.cooldown_until
-                            else None
-                        ),
-                        "reasons": updated_decision.reasons,
+                        "next_level": updated_decision.level,
                         "warn_window_count": updated_warn_window_count,
                     }
                 },
@@ -1136,27 +1142,33 @@ class Stage4CycleRunner:
                     cycle_id=cycle_id,
                     events=updated_anomalies,
                     cooldown_until=(
-                        updated_decision.cooldown_until.isoformat()
-                        if updated_decision.cooldown_until
+                        degrade_decision.cooldown_until.isoformat()
+                        if degrade_decision.cooldown_until
                         else None
                     ),
                     current_override_mode=(
-                        updated_decision.mode_override.value
-                        if updated_decision.mode_override
+                        degrade_decision.mode_override.value
+                        if degrade_decision.mode_override
                         else None
                     ),
                     last_reasons_json=json.dumps(
                         {
-                            "level": updated_decision.level,
+                            "level": degrade_decision.level,
                             "override_mode": (
+                                degrade_decision.mode_override.value
+                                if degrade_decision.mode_override
+                                else None
+                            ),
+                            "reasons": degrade_decision.reasons,
+                            "shrink_notional_factor": degrade_decision.shrink_notional_factor,
+                            "universe_cap": degrade_decision.universe_cap,
+                            "recovery_streak": degrade_decision.recovery_streak,
+                            "next_level": updated_decision.level,
+                            "next_override_mode": (
                                 updated_decision.mode_override.value
                                 if updated_decision.mode_override
                                 else None
                             ),
-                            "reasons": updated_decision.reasons,
-                            "shrink_notional_factor": updated_decision.shrink_notional_factor,
-                            "universe_cap": updated_decision.universe_cap,
-                            "recovery_streak": updated_decision.recovery_streak,
                         },
                         sort_keys=True,
                     ),
@@ -1796,6 +1808,9 @@ class Stage4CycleRunner:
             return intents
 
         policy = self._resolve_agent_policy(settings)
+        effective_kill_switch = bool(
+            getattr(settings, "kill_switch_effective", settings.kill_switch)
+        )
         context = AgentContext(
             cycle_id=cycle_id,
             generated_at=cycle_now,

@@ -29,8 +29,11 @@ def test_decide_degrade_cooldown_active_keeps_override_and_reasons() -> None:
         recent_warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
     )
     assert decision.mode_override == Mode.REDUCE_RISK_ONLY
-    assert decision.cooldown_until == now + timedelta(minutes=5)
+    assert decision.cooldown_until == now + timedelta(minutes=15)
     assert decision.reasons == ["ORDER_REJECT_SPIKE"]
+    assert decision.level == 1
+    assert decision.shrink_notional_factor == 0.5
+    assert decision.universe_cap == 8
 
 
 def test_decide_degrade_error_forces_observe_only() -> None:
@@ -358,8 +361,8 @@ def test_runner_reject_and_cursor_stall_anomalies_use_real_inputs(monkeypatch, t
         cooldown_until=None,
         current_override_mode=None,
         last_reasons_json="[]",
-        warn_window_count=0,
-        last_warn_codes_json="[]",
+        warn_window_count=2,
+        last_warn_codes_json=json.dumps(["ORDER_REJECT_SPIKE"]),
         cursor_stall_cycles_json=json.dumps({"BTCTRY": 4}),
         last_reject_count=0,
     )
@@ -374,9 +377,7 @@ def test_runner_reject_and_cursor_stall_anomalies_use_real_inputs(monkeypatch, t
     runner = Stage4CycleRunner()
     assert runner.run_one_cycle(settings) == 0
 
-    with store._connect() as conn:
-        rows = conn.execute("SELECT code FROM anomaly_events").fetchall()
-    codes = {str(row["code"]) for row in rows}
+    codes = set(store.fetch_recent_anomaly_codes(limit=20))
     assert AnomalyCode.ORDER_REJECT_SPIKE.value in codes
     assert AnomalyCode.CURSOR_STALL.value not in codes
     assert AnomalyCode.STALE_MARKET_DATA.value not in codes
@@ -513,3 +514,183 @@ def test_decide_degrade_hysteresis_steps_down_gradually() -> None:
         stability_streak=3,
     )
     assert step_down.level == 1
+
+
+def test_decide_degrade_warn_codes_filter_controls_warn_escalation() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    ignored = decide_degrade(
+        anomalies=[AnomalyEvent(code=AnomalyCode.CLOCK_SKEW, severity="WARN", ts=now, details={})],
+        now=now,
+        current_override=None,
+        cooldown_until=None,
+        last_reasons=[],
+        recent_warn_count=3,
+        warn_threshold=3,
+        warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes={AnomalyCode.CLOCK_SKEW},
+    )
+    assert ignored.level == 0
+    assert ignored.mode_override is None
+
+    accepted = decide_degrade(
+        anomalies=[AnomalyEvent(code=AnomalyCode.ORDER_REJECT_SPIKE, severity="WARN", ts=now, details={})],
+        now=now,
+        current_override=None,
+        cooldown_until=None,
+        last_reasons=[],
+        recent_warn_count=3,
+        warn_threshold=3,
+        warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+    )
+    assert accepted.level == 1
+    assert accepted.mode_override == Mode.REDUCE_RISK_ONLY
+
+
+def test_runner_persists_applied_decision_not_post_execution_next_decision(monkeypatch, tmp_path) -> None:
+    class FakeExchange:
+        def get_orderbook(self, symbol: str):
+            del symbol
+            return (100.0, 101.0)
+
+        def get_balances(self):
+            return [type("B", (), {"asset": "TRY", "free": Decimal("1000")})()]
+
+        def list_open_orders(self, symbol: str):
+            del symbol
+            return []
+
+        def get_recent_fills(self, symbol: str, since_ms: int | None = None):
+            del symbol, since_ms
+            return []
+
+        def get_exchange_info(self):
+            return []
+
+        def health_snapshot(self):
+            return {"degraded": False, "breaker_open": False}
+
+        def close(self):
+            return
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: FakeExchange(),
+    )
+
+    class FakeLifecycle:
+        def __init__(self, stale_after_sec: int) -> None:
+            del stale_after_sec
+
+        def plan(self, intents, current_open_orders, mid_price):
+            del intents, current_open_orders, mid_price
+            actions = [
+                LifecycleAction(
+                    action_type=LifecycleActionType.SUBMIT,
+                    symbol="BTCTRY",
+                    side="BUY",
+                    price=Decimal("100"),
+                    qty=Decimal("0.1"),
+                    reason="test",
+                    client_order_id="buy-1",
+                )
+            ]
+            return type("P", (), {"actions": actions, "audit_reasons": []})()
+
+    class FakeRiskPolicy:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def filter_actions(self, actions, **kwargs):
+            del kwargs
+            return actions, []
+
+    class FakeExecution:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def execute_with_report(self, actions):
+            assert len(actions) == 1
+            return type(
+                "ER",
+                (),
+                {
+                    "executed_total": 0,
+                    "submitted": 1,
+                    "canceled": 0,
+                    "simulated": 0,
+                    "rejected": 3,
+                    "rejected_min_notional": 0,
+                },
+            )()
+
+    class FakeRiskBudgetService:
+        def __init__(self, state_store) -> None:
+            del state_store
+
+        def compute_decision(self, **kwargs):
+            del kwargs
+            decision = type(
+                "D",
+                (),
+                {
+                    "mode": Mode.NORMAL,
+                    "reasons": ["OK"],
+                    "signals": type(
+                        "S",
+                        (),
+                        {
+                            "drawdown_try": Decimal("0"),
+                            "gross_exposure_try": Decimal("0"),
+                            "fees_try_today": Decimal("0"),
+                        },
+                    )(),
+                },
+            )()
+            now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+            return decision, None, Decimal("0"), Decimal("0"), now.date()
+
+        def persist_decision(self, **kwargs):
+            del kwargs
+            return
+
+        def apply_self_financing_checkpoint(self, **kwargs):
+            del kwargs
+            return None
+
+    monkeypatch.setattr(runner_module, "OrderLifecycleService", FakeLifecycle)
+    monkeypatch.setattr(runner_module, "RiskPolicy", FakeRiskPolicy)
+    monkeypatch.setattr(runner_module, "ExecutionService", FakeExecution)
+    monkeypatch.setattr(runner_module, "RiskBudgetService", FakeRiskBudgetService)
+
+    db_path = tmp_path / "stage6_applied_vs_next.sqlite"
+    store = StateStore(str(db_path))
+    store.upsert_degrade_state_current(
+        cooldown_until=None,
+        current_override_mode=None,
+        last_reasons_json=json.dumps({"level": 0, "reasons": []}),
+        warn_window_count=2,
+        last_warn_codes_json=json.dumps(["ORDER_REJECT_SPIKE"]),
+        cursor_stall_cycles_json="{}",
+        last_reject_count=0,
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(db_path),
+        REJECT_SPIKE_THRESHOLD=3,
+        DEGRADE_WARN_THRESHOLD=3,
+        DEGRADE_WARN_CODES_CSV="ORDER_REJECT_SPIKE",
+    )
+    runner = Stage4CycleRunner()
+    assert runner.run_one_cycle(settings) == 0
+
+    degrade = store.get_degrade_state_current()
+    reasons_payload = json.loads(degrade["last_reasons_json"])
+    assert reasons_payload["level"] == 0
+    assert reasons_payload["next_level"] >= 1
+    assert degrade.get("current_override_mode") is None
+    assert int(degrade["last_reject_count"]) == 3
+    codes = set(store.fetch_recent_anomaly_codes(limit=20))
+    assert AnomalyCode.ORDER_REJECT_SPIKE.value in codes

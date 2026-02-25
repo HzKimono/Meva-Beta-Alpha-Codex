@@ -2695,3 +2695,8 @@ def test_degrade_override_status_and_clear(tmp_path, capsys) -> None:
     assert cli.run_degrade_status(settings=settings, db_path=str(db_path)) == 0
     cleared = json.loads(capsys.readouterr().out)
     assert cleared["degrade_state_current"].get("current_override_mode") is None
+
+
+def test_degrade_command_is_classified_as_db_touching() -> None:
+    assert cli._command_touches_state_db("degrade") is True
+    assert cli._enforce_role_db_convention_for_command("degrade") is True

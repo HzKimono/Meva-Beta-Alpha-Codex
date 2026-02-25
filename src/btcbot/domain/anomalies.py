@@ -66,6 +66,20 @@ def decide_degrade(
     freeze_active: bool = False,
     stability_streak: int = 0,
 ) -> DegradeDecision:
+    # Backward-compatible rule: empty/None warn_codes means all WARN codes are allowed.
+    allow_all_warn_codes = not warn_codes
+    allowed_warn_codes = set(warn_codes or set())
+
+    filtered_current_warn_codes = {
+        event.code
+        for event in anomalies
+        if event.severity == "WARN"
+        and (allow_all_warn_codes or event.code in allowed_warn_codes)
+    }
+    filtered_recent_warn_codes = {
+        code for code in recent_warn_codes if allow_all_warn_codes or code in allowed_warn_codes
+    }
+
     def _level_policy(level: int) -> tuple[Mode | None, float, int | None, int]:
         if level >= 3:
             return Mode.OBSERVE_ONLY, 0.0, 2, 1800
@@ -87,15 +101,18 @@ def decide_degrade(
             recovery_streak=recovery,
         )
 
+    def _level_from_override(override: Mode | None) -> int:
+        if override == Mode.OBSERVE_ONLY:
+            return 3
+        if override == Mode.REDUCE_RISK_ONLY:
+            return 1
+        return 0
+
     if cooldown_until is not None and now < cooldown_until and previous_level >= 1:
         return _build(previous_level, list(last_reasons or []), stability_streak)
 
     if cooldown_until is not None and now < cooldown_until:
-        return DegradeDecision(
-            mode_override=current_override,
-            reasons=list(last_reasons or []),
-            cooldown_until=cooldown_until,
-        )
+        return _build(_level_from_override(current_override), list(last_reasons or []), stability_streak)
 
     sorted_codes = sorted({event.code.value for event in anomalies})
     if breaker_open or freeze_active or any(event.severity == "ERROR" for event in anomalies):
@@ -106,11 +123,15 @@ def decide_degrade(
             critical_reasons.append("STAGE4_FREEZE_ACTIVE")
         return _build(3, sorted(set(critical_reasons)), 0)
 
-    if recent_warn_count >= warn_threshold * 2:
-        return _build(2, sorted(code.value for code in recent_warn_codes), 0)
+    warn_count_for_threshold = recent_warn_count
+    if not filtered_current_warn_codes and not filtered_recent_warn_codes:
+        warn_count_for_threshold = 0
 
-    if recent_warn_count >= warn_threshold:
-        warn_reason_codes = sorted(code.value for code in recent_warn_codes)
+    if warn_count_for_threshold >= warn_threshold * 2:
+        return _build(2, sorted(code.value for code in filtered_recent_warn_codes), 0)
+
+    if warn_count_for_threshold >= warn_threshold:
+        warn_reason_codes = sorted(code.value for code in filtered_recent_warn_codes)
         if not warn_reason_codes:
             warn_reason_codes = list(last_reasons or [])
         return _build(1, warn_reason_codes, 0)
