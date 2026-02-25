@@ -1,4 +1,9 @@
-from btcbot.obs.alerts import BASELINE_ALERT_RULES, DRY_RUN_ALERT_RULES, AlertRule, format_alert_rules
+from btcbot.obs.alerts import (
+    BASELINE_ALERT_RULES,
+    DRY_RUN_ALERT_RULES,
+    AlertRule,
+    format_alert_rules,
+)
 from btcbot.obs.logging import cycle_context, get_logger, set_base_context
 from btcbot.obs.metric_registry import REGISTRY, MetricDef, MetricType, validate_registry
 from btcbot.obs.metrics import (

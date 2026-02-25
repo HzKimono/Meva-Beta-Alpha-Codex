@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import logging
 import os
@@ -46,8 +45,8 @@ from btcbot.runtime.guards import (
 from btcbot.security.redaction import redact_data
 from btcbot.security.secrets import (
     build_default_provider,
-    inject_runtime_secrets,
     enforce_secret_rotation_hygiene,
+    inject_runtime_secrets,
     log_secret_validation,
     validate_secret_controls,
 )
@@ -83,10 +82,16 @@ from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.stage7_reporting import (
     build_cycle_rows,
-    render_csv as render_stage7_csv,
-    render_json as render_stage7_json,
-    rollup as build_stage7_rollup,
     validate_cycle_rows,
+)
+from btcbot.services.stage7_reporting import (
+    render_csv as render_stage7_csv,
+)
+from btcbot.services.stage7_reporting import (
+    render_json as render_stage7_json,
+)
+from btcbot.services.stage7_reporting import (
+    rollup as build_stage7_rollup,
 )
 from btcbot.services.startup_recovery import StartupRecoveryService
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
@@ -2360,10 +2365,15 @@ def run_health(settings: Settings) -> int:
 
 
 def _flush_logging_handlers() -> None:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+
     root = logging.getLogger()
     for handler in root.handlers:
         try:
             handler.flush()
+        except (OSError, ValueError):
+            continue
         except Exception:  # noqa: BLE001
             logger.warning("Failed to flush logging handler", exc_info=True)
 

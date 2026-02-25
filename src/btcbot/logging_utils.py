@@ -75,6 +75,14 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(redact_data(payload), default=str)
 
 
+class SafeStreamHandler(logging.StreamHandler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            super().emit(record)
+        except (OSError, ValueError):
+            return
+
+
 def _resolve_log_level(level: str | int | None) -> int:
     if isinstance(level, int):
         return level
@@ -93,7 +101,7 @@ def _resolve_named_level_from_env(env_name: str, default_level: int) -> int:
 
 
 def setup_logging(level: str | int | None = None) -> None:
-    handler = logging.StreamHandler(stream=sys.__stderr__)
+    handler = SafeStreamHandler(stream=sys.__stderr__)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers.clear()

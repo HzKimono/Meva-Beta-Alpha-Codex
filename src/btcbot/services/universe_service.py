@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
-import logging
 
 from btcbot.domain.models import normalize_symbol
-
 from btcbot.domain.strategy_core import OrderBookSummary
 from btcbot.domain.symbols import canonical_symbol, quote_currency
 from btcbot.domain.universe_models import SymbolInfo, UniverseKnobs
-
 
 logger = logging.getLogger(__name__)
 

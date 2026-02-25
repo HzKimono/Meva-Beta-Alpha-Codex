@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 from datetime import datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 
 from btcbot.config import Settings
 from btcbot.domain.models import normalize_symbol

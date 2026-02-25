@@ -4,9 +4,9 @@ import json
 import logging
 import sys
 import threading
-from types import SimpleNamespace
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 

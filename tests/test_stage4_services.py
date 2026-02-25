@@ -22,15 +22,15 @@ from btcbot.domain.stage4 import (
 )
 from btcbot.services.accounting_service_stage4 import AccountingIntegrityError, AccountingService
 from btcbot.services.exchange_rules_service import ExchangeRulesService
-from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.execution_service_stage4 import (
     REASON_TOKEN_EXCHANGE_1123,
     REASON_TOKEN_GATE_1123,
+    ExecutionService,
 )
+from btcbot.services.ledger_service import LedgerService
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskDecision, RiskPolicy
-from btcbot.services.ledger_service import LedgerService
 from btcbot.services.state_store import StateStore
 
 

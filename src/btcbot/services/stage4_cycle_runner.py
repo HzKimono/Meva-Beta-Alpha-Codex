@@ -48,8 +48,8 @@ from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.ledger_service import LedgerService
-from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.market_data_service import MarketDataService
+from btcbot.services.metrics_service import CycleMetrics
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
 from btcbot.services.price_conversion_service import MarkPriceConverter
@@ -256,8 +256,8 @@ class Stage4CycleRunner:
                 )
             except TypeError:
                 risk_budget_service = RiskBudgetService(state_store=state_store)
-            setattr(settings, "kill_switch_effective", effective_kill_switch)
-            setattr(settings, "kill_switch_source", kill_switch_source)
+            settings.kill_switch_effective = effective_kill_switch
+            settings.kill_switch_source = kill_switch_source
             execution_service = ExecutionService(
                 exchange=exchange,
                 state_store=state_store,
@@ -523,7 +523,6 @@ class Stage4CycleRunner:
             for symbol, diag in cursor_diag.items():
                 diag["cursor_after"] = cursor_after.get(symbol)
                 fills_seen = int(diag.get("fills_seen", 0) or 0)
-                ingested_count = int(diag.get("ingested_count", 0) or 0)
                 prefilter_deduped = int(diag.get("prefilter_deduped", 0) or 0)
                 apply_stats = accounting_service.last_apply_stats_by_symbol.get(symbol, {})
                 state_deduped = int(apply_stats.get("deduped", 0) or 0)
@@ -1026,7 +1025,7 @@ class Stage4CycleRunner:
             )
             prefiltered_actions, freeze_suppressed_counts = self._suppress_actions_for_unknown_freeze(
                 actions=prefiltered_actions,
-                freeze_active=False,
+                freeze_active=bool(freeze_state.active),
                 freeze_all=bool(settings.kill_switch_freeze_all),
                 process_role=process_role,
                 instrumentation=instrumentation,
