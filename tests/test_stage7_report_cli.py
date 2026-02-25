@@ -31,7 +31,7 @@ def _seed_metrics(store: StateStore) -> None:
             "oms_throttled_count": 0,
             "equity_try": "100",
             "gross_pnl_try": "2",
-            "net_pnl_try": "1",
+            "net_pnl_try": "1.7",
             "fees_try": "0.2",
             "slippage_try": "0.1",
             "max_drawdown_pct": "0.1",
@@ -59,7 +59,7 @@ def test_stage7_report_and_alerts(capsys, tmp_path: Path) -> None:
     assert "cycle_id" in report
     assert "net_pnl_try" in report
     assert "c1" in report
-    assert "1" in report
+    assert "1.7" in report
 
     assert cli.run_stage7_alerts(settings, db_path=settings.state_db_path, last=5) == 0
     alerts = capsys.readouterr().out
@@ -406,5 +406,6 @@ def test_report_includes_slo_status(capsys, tmp_path: Path) -> None:
         == 0
     )
     payload = capsys.readouterr().out
-    assert '"summary"' in payload
-    assert '"slo_status"' in payload
+    assert '"cycles"' in payload
+    assert '"rollups"' in payload
+    assert '"validations"' in payload

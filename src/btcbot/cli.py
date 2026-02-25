@@ -81,6 +81,13 @@ from btcbot.services.stage4_cycle_runner import (
 )
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
+from btcbot.services.stage7_reporting import (
+    build_cycle_rows,
+    render_csv as render_stage7_csv,
+    render_json as render_stage7_json,
+    rollup as build_stage7_rollup,
+    validate_cycle_rows,
+)
 from btcbot.services.startup_recovery import StartupRecoveryService
 from btcbot.services.state_store import PENDING_GRACE_SECONDS, StateStore
 from btcbot.services.strategy_service import StrategyService
@@ -331,24 +338,39 @@ def main() -> int:
 
     subparsers.add_parser("health", help="Check exchange connectivity")
 
-    report_parser = subparsers.add_parser("stage7-report", help="Print recent Stage 7 metrics")
+    report_parser = subparsers.add_parser(
+        "stage7-report",
+        help="Print recent Stage 7 metrics with canonical cycles/rollups/validations schema",
+    )
     report_parser.add_argument(
         "--db",
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
     )
     report_parser.add_argument("--last", type=int, default=10)
-    report_parser.add_argument("--json", action="store_true", help="Export report rows as JSON")
+    report_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Deprecated alias for --json-only (print JSON report payload only)",
+    )
+    report_parser.add_argument(
+        "--json-only",
+        action="store_true",
+        help="Print only canonical JSON report payload (cycles, rollups, validations)",
+    )
 
-    export_parser = subparsers.add_parser("stage7-export", help="Export recent Stage 7 metrics")
+    export_parser = subparsers.add_parser(
+        "stage7-export",
+        help="Export Stage 7 canonical report schema as CSV/JSON/both (stdout if --out omitted)",
+    )
     export_parser.add_argument(
         "--db",
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
     )
     export_parser.add_argument("--last", type=int, default=50)
-    export_parser.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
-    export_parser.add_argument("--out", required=True)
+    export_parser.add_argument("--format", choices=["csv", "json", "both", "jsonl"], default="csv")
+    export_parser.add_argument("--out", required=False, default=None)
 
     alerts_parser = subparsers.add_parser("stage7-alerts", help="Print recent Stage 7 alert cycles")
     alerts_parser.add_argument(
@@ -493,9 +515,9 @@ def main() -> int:
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
     )
-    backtest_export.add_argument("--out", required=True)
+    backtest_export.add_argument("--out", required=False, default=None)
     backtest_export.add_argument("--last", type=int, default=50)
-    backtest_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+    backtest_export.add_argument("--format", choices=["csv", "json", "both", "jsonl"], default="csv")
 
     backtest_count = subparsers.add_parser(
         "stage7-db-count",
@@ -620,7 +642,13 @@ def main() -> int:
         return run_health(settings)
 
     if args.command == "stage7-report":
-        return run_stage7_report(settings, db_path=args.db, last=args.last, json_output=args.json)
+        return run_stage7_report(
+            settings,
+            db_path=args.db,
+            last=args.last,
+            json_output=args.json,
+            json_only=getattr(args, "json_only", False),
+        )
 
     if args.command == "stage7-export":
         return run_stage7_export(
@@ -2448,6 +2476,7 @@ def run_stage7_report(
     last: int,
     *,
     json_output: bool = False,
+    json_only: bool = False,
 ) -> int:
     resolved_db_path = _resolve_stage7_db_path(
         "stage7-report", db_path=db_path, settings_db_path=settings.state_db_path
@@ -2457,6 +2486,33 @@ def run_stage7_report(
 
     with single_instance_lock(db_path=resolved_db_path, account_key="stage7-report"):
         store = StateStore(db_path=resolved_db_path)
+        cycle_rows = build_cycle_rows(store=store, limit=last)
+        validations = validate_cycle_rows(cycle_rows)
+        daily = build_stage7_rollup(cycle_rows, "daily")
+        weekly = build_stage7_rollup(cycle_rows, "weekly")
+        report_obj = {
+            "cycles": cycle_rows,
+            "rollups": {"daily": daily, "weekly": weekly},
+            "validations": validations,
+        }
+        errors = [finding for finding in validations if finding.severity == "error"]
+
+        only_json = bool(json_only or json_output)
+        if not only_json:
+            print(
+                f"stage7-report: cycles={len(cycle_rows)} daily_buckets={len(daily.buckets)} "
+                f"weekly_buckets={len(weekly.buckets)} validation_errors={len(errors)}"
+            )
+
+        print(render_stage7_json(redact_data(report_obj)))
+
+        if errors:
+            print("stage7-report: FAIL_CLOSED financial validation errors detected", file=sys.stderr)
+            return 1
+
+        if only_json:
+            return 0
+
         rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
         ledger_metrics = store.get_latest_stage7_ledger_metrics()
         drawdown_ratio = (
@@ -2484,33 +2540,6 @@ def run_stage7_report(
             rows,
             drawdown_ratio=drawdown_ratio,
         )
-
-        if json_output:
-            export_rows = store.fetch_stage7_cycles_for_export(limit=last)
-            by_cycle = {str(item.get("cycle_id")): item for item in export_rows}
-            payload_rows = []
-            for row in enriched_rows:
-                cycle_id = str(row.get("cycle_id"))
-                payload_rows.append(
-                    {**by_cycle.get(cycle_id, row), "slo_status": row["slo_status"]}
-                )
-            print(
-                json.dumps(
-                    redact_data(
-                        {
-                            "summary": {
-                                "status": window_status,
-                                "notes": window_notes,
-                                "window_size": len(enriched_rows),
-                            },
-                            "rows": payload_rows,
-                        }
-                    ),
-                    sort_keys=True,
-                    default=str,
-                )
-            )
-            return 0
 
         print(
             "cycle_id ts mode net_pnl_try max_dd turnover intents rejects throttled no_trades_reason slo_status"
@@ -2611,7 +2640,11 @@ def run_stage7_report(
 
 
 def run_stage7_export(
-    settings: Settings, db_path: str | None, last: int, export_format: str, out_path: str
+    settings: Settings,
+    db_path: str | None,
+    last: int,
+    export_format: str,
+    out_path: str | None,
 ) -> int:
     resolved_db_path = _resolve_stage7_db_path(
         "stage7-export", db_path=db_path, settings_db_path=settings.state_db_path
@@ -2620,20 +2653,40 @@ def run_stage7_export(
         return 2
     with single_instance_lock(db_path=resolved_db_path, account_key="stage7-export"):
         store = StateStore(db_path=resolved_db_path)
-        rows = store.fetch_stage7_cycles_for_export(limit=last)
-    if export_format == "jsonl":
-        with open(out_path, "w", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+        cycle_rows = build_cycle_rows(store=store, limit=last)
+    validations = validate_cycle_rows(cycle_rows)
+    if any(finding.severity == "error" for finding in validations):
+        print("stage7-export: FAIL_CLOSED financial validation errors detected", file=sys.stderr)
+        return 1
+
+    daily = build_stage7_rollup(cycle_rows, "daily")
+    weekly = build_stage7_rollup(cycle_rows, "weekly")
+    report_obj = {
+        "cycles": cycle_rows,
+        "rollups": {"daily": daily, "weekly": weekly},
+        "validations": validations,
+    }
+
+    normalized_format = "json" if export_format == "jsonl" else export_format
+    csv_text = render_stage7_csv(cycle_rows)
+    json_text = render_stage7_json(redact_data(report_obj))
+
+    if out_path is None:
+        if normalized_format in {"csv", "both"}:
+            print(csv_text.rstrip("\n"))
+        if normalized_format in {"json", "both"}:
+            print(json_text)
         return 0
 
-    fieldnames = sorted({key for row in rows for key in row.keys()})
-    with open(out_path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            normalized = {key: _csv_safe_value(value) for key, value in row.items()}
-            writer.writerow(normalized)
+    out = Path(out_path)
+    if normalized_format == "csv":
+        out.write_text(csv_text, encoding="utf-8")
+    elif normalized_format == "json":
+        out.write_text(json_text + "\n", encoding="utf-8")
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.with_suffix(".csv").write_text(csv_text, encoding="utf-8")
+        out.with_suffix(".json").write_text(json_text + "\n", encoding="utf-8")
     return 0
 
 
@@ -2804,7 +2857,7 @@ def run_stage7_backtest_export(
     db_path: str | None,
     last: int,
     export_format: str,
-    out_path: str,
+    out_path: str | None,
     explicit_last: bool = True,
 ) -> int:
     if not explicit_last:
@@ -2816,23 +2869,13 @@ def run_stage7_backtest_export(
     if resolved_db_path is None:
         return 2
 
-    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-backtest-export"):
-        store = StateStore(db_path=resolved_db_path)
-        rows = store.fetch_stage7_cycles_for_export(limit=last)
-    if export_format == "jsonl":
-        with open(out_path, "w", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
-        return 0
-
-    fieldnames = sorted({key for row in rows for key in row.keys()})
-    with open(out_path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            normalized = {key: _csv_safe_value(value) for key, value in row.items()}
-            writer.writerow(normalized)
-    return 0
+    return run_stage7_export(
+        settings=settings,
+        db_path=resolved_db_path,
+        last=last,
+        export_format=export_format,
+        out_path=out_path,
+    )
 
 
 def _argument_was_provided(flag: str) -> bool:
