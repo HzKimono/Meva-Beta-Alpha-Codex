@@ -61,6 +61,17 @@ def run_preflight_checks(
     except Exception as exc:  # noqa: BLE001
         db_ok = False
         db_detail = f"db_lock_or_write_error:{type(exc).__name__}:{exc}"
+    finally:
+        if store is not None:
+            try:
+                with store.transaction() as conn:
+                    conn.execute("DELETE FROM op_state WHERE key = 'preflight_probe'")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                store.release_instance_lock(status="ended")
+            except Exception:  # noqa: BLE001
+                pass
     checks.append({"name": "db_lock_and_writable", "ok": db_ok, "detail": db_detail})
 
     live_armed_by_env = bool(settings.is_live_trading_enabled() and not settings.dry_run)

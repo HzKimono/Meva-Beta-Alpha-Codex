@@ -17,6 +17,7 @@ def _live_settings(db_path: Path) -> Settings:
         STATE_DB_PATH=str(db_path),
         BTCTURK_API_KEY="x",
         BTCTURK_API_SECRET="y",
+        MAX_NOTIONAL_PER_ORDER_TRY="100",
     )
 
 
@@ -40,12 +41,7 @@ def test_preflight_fails_for_live_when_stage4_freeze_active(tmp_path) -> None:
     settings = _live_settings(db_path)
     store = StateStore(str(db_path))
     store.stage4_set_freeze("LIVE", reason="unknown_open_orders", details={"count": 1})
-    with store._connect() as conn:
-        conn.execute(
-            "UPDATE process_instances SET status='stale', ended_at_epoch=? WHERE instance_id=?",
-            (0, store.instance_id),
-        )
-
+    store.release_instance_lock()
     report = run_preflight_checks(
         settings=settings,
         profile="live",
@@ -63,6 +59,7 @@ def test_preflight_fails_for_live_when_ack_missing(tmp_path) -> None:
         STATE_DB_PATH=str(tmp_path / "state.db"),
         BTCTURK_API_KEY="x",
         BTCTURK_API_SECRET="y",
+        MAX_NOTIONAL_PER_ORDER_TRY="100",
     )
     settings.live_trading = True
     settings.live_trading_ack = None
@@ -80,6 +77,28 @@ def test_preflight_fails_for_live_when_ack_missing(tmp_path) -> None:
     checks = {row["name"]: row for row in report["checks"]}
     assert checks["live_env_armed"]["ok"] is False
 
+
+
+
+def test_preflight_releases_strict_instance_lock_and_cleans_probe(tmp_path) -> None:
+    db_path = tmp_path / "lock_release.db"
+    settings = _live_settings(db_path)
+
+    report = run_preflight_checks(
+        settings=settings,
+        profile="live",
+        auth_check=lambda _settings: (True, "ok"),
+    )
+
+    assert report["passed"] is True
+
+    second = StateStore(str(db_path), strict_instance_lock=True)
+    with second._connect() as conn:
+        probe_row = conn.execute(
+            "SELECT key FROM op_state WHERE key = ?",
+            ("preflight_probe",),
+        ).fetchone()
+    assert probe_row is None
 
 def test_preflight_passes_for_dry_run_profile(tmp_path) -> None:
     settings = Settings(

@@ -2246,6 +2246,18 @@ class StateStore:
             extra={"extra": {"instance_id": self.instance_id, "heartbeat_at_epoch": now_epoch}},
         )
 
+    def release_instance_lock(self, *, status: str = "ended") -> None:
+        now_epoch = int(datetime.now(UTC).timestamp())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE process_instances
+                SET status = ?, ended_at_epoch = ?, heartbeat_at_epoch = ?
+                WHERE instance_id = ?
+                """,
+                (status, now_epoch, now_epoch, self.instance_id),
+            )
+
     def _ensure_op_state_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """
