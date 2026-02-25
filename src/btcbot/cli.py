@@ -10,7 +10,7 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +21,7 @@ from btcbot.adapters.btcturk_http import (
     ConfigurationError,
 )
 from btcbot.config import Settings
+from btcbot.domain.anomalies import AnomalyCode, AnomalyEvent
 from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.logging_context import with_logging_context
 from btcbot.logging_utils import setup_logging
@@ -269,6 +270,49 @@ def main() -> int:
         "--yes",
         action="store_true",
         help="Required confirmation flag to clear freeze state",
+    )
+
+    degrade_parser = subparsers.add_parser("degrade", help="Manage degraded mode state")
+    degrade_subparsers = degrade_parser.add_subparsers(dest="degrade_command", required=True)
+
+    degrade_status_parser = degrade_subparsers.add_parser("status", help="Show degraded mode status")
+    degrade_status_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+
+    degrade_clear_parser = degrade_subparsers.add_parser("clear", help="Reset degraded mode state")
+    degrade_clear_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+
+    degrade_override_parser = degrade_subparsers.add_parser(
+        "override", help="Manually set degraded mode override"
+    )
+    degrade_override_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+    degrade_override_parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["OBSERVE_ONLY", "REDUCE_RISK_ONLY", "NORMAL"],
+        help="Manual override mode",
+    )
+    degrade_override_parser.add_argument(
+        "--cooldown-seconds",
+        type=int,
+        default=900,
+        help="Cooldown duration in seconds",
+    )
+    degrade_override_parser.add_argument(
+        "--reason",
+        required=True,
+        help="Operator reason for override",
     )
 
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
@@ -549,6 +593,20 @@ def main() -> int:
 
     if args.command == "stage4-freeze-clear":
         return run_stage4_freeze_clear(settings=settings, db_path=args.db, confirmed=args.yes)
+
+    if args.command == "degrade":
+        if args.degrade_command == "status":
+            return run_degrade_status(settings=settings, db_path=args.db)
+        if args.degrade_command == "clear":
+            return run_degrade_clear(settings=settings, db_path=args.db)
+        if args.degrade_command == "override":
+            return run_degrade_override(
+                settings=settings,
+                db_path=args.db,
+                mode=args.mode,
+                cooldown_seconds=args.cooldown_seconds,
+                reason=args.reason,
+            )
 
     if args.command == "stage7-run":
         return run_cycle_stage7(
@@ -2029,6 +2087,96 @@ def run_stage4_freeze_clear(
     )
     print(json.dumps({"process_role": process_role, "cleared": True, "previous_reason": previous.reason}, sort_keys=True))
     return 0
+
+def _degrade_status_payload(store: StateStore) -> dict[str, object]:
+    state = store.get_degrade_state_current()
+    recent_codes: list[str] = []
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT code FROM anomaly_events ORDER BY ts DESC LIMIT 10"
+        ).fetchall()
+    recent_codes = [str(row["code"]) for row in rows]
+    return {
+        "degrade_state_current": state,
+        "last_anomaly_codes": recent_codes,
+    }
+
+
+def run_degrade_status(*, settings: Settings, db_path: str | None = None) -> int:
+    resolved_db = normalize_db_path(db_path or settings.state_db_path)
+    store = StateStore(str(resolved_db))
+    print(json.dumps(_degrade_status_payload(store), sort_keys=True))
+    return 0
+
+
+def run_degrade_clear(*, settings: Settings, db_path: str | None = None) -> int:
+    resolved_db = normalize_db_path(db_path or settings.state_db_path)
+    store = StateStore(str(resolved_db))
+    store.upsert_degrade_state_current(
+        cooldown_until=None,
+        current_override_mode=None,
+        last_reasons_json=json.dumps({"level": 0, "reasons": []}, sort_keys=True),
+        warn_window_count=0,
+        last_warn_codes_json="[]",
+        cursor_stall_cycles_json="{}",
+        last_reject_count=0,
+    )
+    print(json.dumps({"cleared": True}, sort_keys=True))
+    return 0
+
+
+def run_degrade_override(
+    *,
+    settings: Settings,
+    db_path: str | None = None,
+    mode: str,
+    cooldown_seconds: int,
+    reason: str,
+) -> int:
+    resolved_db = normalize_db_path(db_path or settings.state_db_path)
+    store = StateStore(str(resolved_db))
+    now = datetime.now(UTC)
+    normalized_mode = None if mode == "NORMAL" else mode
+    cooldown_until = None
+    if normalized_mode is not None:
+        cooldown_until = (now + timedelta(seconds=max(0, int(cooldown_seconds)))).isoformat()
+    payload = {
+        "level": 0 if normalized_mode is None else (3 if normalized_mode == "OBSERVE_ONLY" else 2),
+        "override_mode": normalized_mode,
+        "reasons": ["MANUAL_OVERRIDE", reason],
+        "recovery_streak": 0,
+    }
+    store.persist_degrade(
+        cycle_id=f"manual_override:{now.isoformat()}",
+        events=[
+            AnomalyEvent(
+                code=AnomalyCode.MANUAL_OVERRIDE,
+                severity="WARN",
+                ts=now,
+                details={"reason": reason, "mode": mode},
+            )
+        ],
+        cooldown_until=cooldown_until,
+        current_override_mode=normalized_mode,
+        last_reasons_json=json.dumps(payload, sort_keys=True),
+        warn_window_count=0,
+        last_warn_codes_json=json.dumps([AnomalyCode.MANUAL_OVERRIDE.value]),
+        cursor_stall_cycles_json="{}",
+        last_reject_count=0,
+    )
+    print(
+        json.dumps(
+            {
+                "override_mode": normalized_mode,
+                "cooldown_until": cooldown_until,
+                "reason": reason,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 
 def run_cycle_stage4(
     settings: Settings, force_dry_run: bool = False, db_path: str | None = None
