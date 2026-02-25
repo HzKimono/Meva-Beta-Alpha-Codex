@@ -159,6 +159,66 @@ def test_runner_writes_stage4_run_metrics_no_action_reasons(monkeypatch, tmp_pat
 
 
 
+
+
+def test_runner_risk_audit_status_format_and_rejected_count(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    class RejectWithNonRejectSubstringReason:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def filter_actions(self, actions, **kwargs):
+            del kwargs
+            decisions = [
+                type(
+                    "Decision",
+                    (),
+                    {
+                        "action": action,
+                        "accepted": False,
+                        "reason": "max_open_orders",
+                    },
+                )()
+                for action in actions
+            ]
+            return [], decisions
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.RiskPolicy",
+        RejectWithNonRejectSubstringReason,
+    )
+
+    db_path = tmp_path / "runner_stage4_risk_audit.sqlite"
+    settings = Settings(
+        DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path), SYMBOLS="BTC_TRY"
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(str(db_path))
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT counts_json, decisions_json FROM cycle_audit ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+
+    assert row is not None
+    counts = json.loads(str(row["counts_json"]))
+    decisions = json.loads(str(row["decisions_json"]))
+
+    assert counts["accepted_by_risk"] == 0
+    assert counts["rejected_by_risk"] == 1
+    assert any(
+        isinstance(entry, str)
+        and entry.startswith("risk:")
+        and entry.endswith(":rejected:max_open_orders")
+        for entry in decisions
+    )
 def test_extract_rejects_by_code_normalizes_numeric_codes() -> None:
     runner = Stage4CycleRunner()
     rejects = runner._extract_rejects_by_code(
@@ -793,3 +853,80 @@ def test_stage4_dry_run_never_submits_or_cancels(monkeypatch, tmp_path) -> None:
     assert runner.run_one_cycle(settings) == 0
     assert "submit" not in exchange.calls
     assert "cancel" not in exchange.calls
+
+
+def test_stage4_cycle_applies_risk_policy_filters_actions_before_execution(
+    monkeypatch, tmp_path
+) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    from btcbot.services import stage4_cycle_runner as module
+
+    class FilterOneRisk:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def filter_actions(self, actions, **kwargs):
+            del kwargs
+            accepted = [a for a in actions if (a.client_order_id or "") != "cid-filtered"]
+            decisions = []
+            for action in actions:
+                accepted_flag = action in accepted
+                reason = "accepted" if accepted_flag else "max_order_notional_try"
+                decisions.append(type("D", (), {"action": action, "accepted": accepted_flag, "reason": reason})())
+            return accepted, decisions
+
+    captured: dict[str, list[str]] = {"executed": []}
+
+    class CaptureExecution(module.ExecutionService):
+        def execute_with_report(self, actions):
+            captured["executed"] = [a.client_order_id or "" for a in actions]
+            return super().execute_with_report(actions)
+
+    class TwoActionLifecycle:
+        def __init__(self, stale_after_sec: int) -> None:
+            del stale_after_sec
+
+        def plan(self, intents, current_open_orders, mid_price):
+            del intents, current_open_orders, mid_price
+            return type(
+                "P",
+                (),
+                {
+                    "actions": [
+                        module.LifecycleAction(
+                            action_type=module.LifecycleActionType.SUBMIT,
+                            symbol="BTC_TRY",
+                            side="buy",
+                            price=Decimal("100"),
+                            qty=Decimal("1"),
+                            reason="test",
+                            client_order_id="cid-accepted",
+                        ),
+                        module.LifecycleAction(
+                            action_type=module.LifecycleActionType.SUBMIT,
+                            symbol="BTC_TRY",
+                            side="buy",
+                            price=Decimal("100"),
+                            qty=Decimal("1"),
+                            reason="test",
+                            client_order_id="cid-filtered",
+                        ),
+                    ],
+                    "audit_reasons": [],
+                },
+            )()
+
+    monkeypatch.setattr(module, "RiskPolicy", FilterOneRisk)
+    monkeypatch.setattr(module, "ExecutionService", CaptureExecution)
+    monkeypatch.setattr(module, "OrderLifecycleService", TwoActionLifecycle)
+
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(tmp_path / "filter.sqlite"), SYMBOLS="BTC_TRY")
+
+    assert runner.run_one_cycle(settings) == 0
+    assert captured["executed"] == ["cid-accepted"]

@@ -223,6 +223,7 @@ class Stage4CycleRunner:
             reconcile_service = ReconcileService()
             risk_policy = RiskPolicy(
                 max_open_orders=settings.max_open_orders,
+                max_order_notional_try=Decimal(str(settings.risk_max_order_notional_try)),
                 max_position_notional_try=settings.max_position_notional_try,
                 max_daily_loss_try=settings.max_daily_loss_try,
                 max_drawdown_pct=settings.max_drawdown_pct,
@@ -706,6 +707,18 @@ class Stage4CycleRunner:
                 positions_by_symbol=positions_by_symbol,
                 open_orders_by_client_id=open_orders_by_client_id,
             )
+            for decision in risk_decisions:
+                if decision.accepted:
+                    continue
+                instrumentation.counter(
+                    "stage4_action_filtered_total",
+                    1,
+                    attrs={
+                        "reason": decision.reason,
+                        "process_role": process_role,
+                        "status": "rejected",
+                    },
+                )
 
             risk_decision = getattr(budget_decision, "risk_decision", budget_decision)
             try:
@@ -982,7 +995,7 @@ class Stage4CycleRunner:
                 )
 
             decisions = lifecycle_plan.audit_reasons + [
-                f"risk:{item.action.client_order_id or 'missing'}:{item.reason}"
+                f"risk:{item.action.client_order_id or 'missing'}:{'accepted' if item.accepted else 'rejected'}:{item.reason}"
                 for item in risk_decisions
             ]
             decisions.extend(
@@ -997,14 +1010,17 @@ class Stage4CycleRunner:
             risk_decisions_from_audit = [
                 entry for entry in decisions if isinstance(entry, str) and entry.startswith("risk:")
             ]
-            accepted_by_risk = sum(
-                1 for entry in risk_decisions_from_audit if entry.endswith(":accepted")
-            )
-            rejected_by_risk = sum(
-                1
-                for entry in risk_decisions_from_audit
-                if entry.endswith(":rejected") or ":reject" in entry
-            )
+            accepted_by_risk = 0
+            rejected_by_risk = 0
+            for entry in risk_decisions_from_audit:
+                parts = entry.split(":", 3)
+                if len(parts) != 4:
+                    continue
+                status = parts[2]
+                if status == "accepted":
+                    accepted_by_risk += 1
+                elif status == "rejected":
+                    rejected_by_risk += 1
 
             # Counter semantics:
             # - pipeline_intents: intents emitted by DecisionPipelineService
