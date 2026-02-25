@@ -223,6 +223,7 @@ class Stage4CycleRunner:
             reconcile_service = ReconcileService()
             risk_policy = RiskPolicy(
                 max_open_orders=settings.max_open_orders,
+                max_order_notional_try=Decimal(str(settings.risk_max_order_notional_try)),
                 max_position_notional_try=settings.max_position_notional_try,
                 max_daily_loss_try=settings.max_daily_loss_try,
                 max_drawdown_pct=settings.max_drawdown_pct,
@@ -706,6 +707,14 @@ class Stage4CycleRunner:
                 positions_by_symbol=positions_by_symbol,
                 open_orders_by_client_id=open_orders_by_client_id,
             )
+            for decision in risk_decisions:
+                if decision.accepted:
+                    continue
+                instrumentation.counter(
+                    "stage4_action_filtered_total",
+                    1,
+                    attrs={"reason": decision.reason, "process_role": process_role},
+                )
 
             risk_decision = getattr(budget_decision, "risk_decision", budget_decision)
             try:

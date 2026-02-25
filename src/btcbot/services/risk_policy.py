@@ -18,6 +18,7 @@ class RiskPolicy:
         self,
         *,
         max_open_orders: int,
+        max_order_notional_try: Decimal | None = None,
         max_position_notional_try: Decimal,
         max_daily_loss_try: Decimal,
         max_drawdown_pct: Decimal,
@@ -28,6 +29,11 @@ class RiskPolicy:
         max_gross_exposure_try: Decimal | None = None,
     ) -> None:
         self.max_open_orders = max_open_orders
+        self.max_order_notional_try = (
+            max_order_notional_try
+            if max_order_notional_try is not None
+            else max_position_notional_try
+        )
         self.max_position_notional_try = max_position_notional_try
         self.max_daily_loss_try = max_daily_loss_try
         self.max_drawdown_pct = max_drawdown_pct
@@ -93,6 +99,17 @@ class RiskPolicy:
                 continue
 
             action_notional = action.price * action.qty
+            if action_notional > self.max_order_notional_try:
+                projected_open_orders -= 1
+                decisions.append(
+                    RiskDecision(
+                        action=action,
+                        accepted=False,
+                        reason="max_order_notional_try",
+                    )
+                )
+                continue
+
             if action.side.lower() == "buy":
                 is_replace_submit = (
                     action.reason == "replace_submit"
