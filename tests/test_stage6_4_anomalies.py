@@ -417,3 +417,99 @@ def test_detector_clock_skew_uses_dedicated_threshold() -> None:
         pnl_report=pnl_report,
     )
     assert any(event.code == AnomalyCode.CLOCK_SKEW for event in events)
+
+
+def test_state_store_degrade_state_round_trip(tmp_path) -> None:
+    db_path = tmp_path / "degrade_roundtrip.sqlite"
+    store = StateStore(str(db_path))
+    store.upsert_degrade_state_current(
+        cooldown_until="2026-01-01T12:00:00+00:00",
+        current_override_mode="REDUCE_RISK_ONLY",
+        last_reasons_json=json.dumps({"level": 2, "reasons": ["ORDER_REJECT_SPIKE"]}),
+        warn_window_count=4,
+        last_warn_codes_json=json.dumps(["ORDER_REJECT_SPIKE"]),
+        cursor_stall_cycles_json=json.dumps({"BTCTRY": 2}),
+        last_reject_count=5,
+    )
+    current = store.get_degrade_state_current()
+    assert current["current_override_mode"] == "REDUCE_RISK_ONLY"
+    assert json.loads(current["last_reasons_json"])["level"] == 2
+    assert int(current["warn_window_count"]) == 4
+
+
+def test_decide_degrade_breaker_open_forces_level3_observe_only() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    decision = decide_degrade(
+        anomalies=[],
+        now=now,
+        current_override=None,
+        cooldown_until=None,
+        last_reasons=[],
+        recent_warn_count=0,
+        warn_threshold=3,
+        warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes=set(),
+        previous_level=0,
+        breaker_open=True,
+        freeze_active=False,
+        stability_streak=0,
+    )
+    assert decision.level == 3
+    assert decision.mode_override == Mode.OBSERVE_ONLY
+
+
+def test_decide_degrade_reject_spike_warn_window_maps_to_level2() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    decision = decide_degrade(
+        anomalies=[AnomalyEvent(code=AnomalyCode.ORDER_REJECT_SPIKE, severity="WARN", ts=now, details={})],
+        now=now,
+        current_override=None,
+        cooldown_until=None,
+        last_reasons=[],
+        recent_warn_count=6,
+        warn_threshold=3,
+        warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        previous_level=0,
+        breaker_open=False,
+        freeze_active=False,
+        stability_streak=0,
+    )
+    assert decision.level == 2
+    assert decision.mode_override == Mode.REDUCE_RISK_ONLY
+
+
+def test_decide_degrade_hysteresis_steps_down_gradually() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    hold = decide_degrade(
+        anomalies=[],
+        now=now,
+        current_override=Mode.REDUCE_RISK_ONLY,
+        cooldown_until=None,
+        last_reasons=["ORDER_REJECT_SPIKE"],
+        recent_warn_count=0,
+        warn_threshold=3,
+        warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes=set(),
+        previous_level=2,
+        breaker_open=False,
+        freeze_active=False,
+        stability_streak=2,
+    )
+    assert hold.level == 2
+    step_down = decide_degrade(
+        anomalies=[],
+        now=now,
+        current_override=Mode.REDUCE_RISK_ONLY,
+        cooldown_until=None,
+        last_reasons=["ORDER_REJECT_SPIKE"],
+        recent_warn_count=0,
+        warn_threshold=3,
+        warn_codes={AnomalyCode.ORDER_REJECT_SPIKE},
+        recent_warn_codes=set(),
+        previous_level=2,
+        breaker_open=False,
+        freeze_active=False,
+        stability_streak=3,
+    )
+    assert step_down.level == 1
