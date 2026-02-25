@@ -159,6 +159,66 @@ def test_runner_writes_stage4_run_metrics_no_action_reasons(monkeypatch, tmp_pat
 
 
 
+
+
+def test_runner_risk_audit_status_format_and_rejected_count(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    class RejectWithNonRejectSubstringReason:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def filter_actions(self, actions, **kwargs):
+            del kwargs
+            decisions = [
+                type(
+                    "Decision",
+                    (),
+                    {
+                        "action": action,
+                        "accepted": False,
+                        "reason": "max_open_orders",
+                    },
+                )()
+                for action in actions
+            ]
+            return [], decisions
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.RiskPolicy",
+        RejectWithNonRejectSubstringReason,
+    )
+
+    db_path = tmp_path / "runner_stage4_risk_audit.sqlite"
+    settings = Settings(
+        DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path), SYMBOLS="BTC_TRY"
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(str(db_path))
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT counts_json, decisions_json FROM cycle_audit ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+
+    assert row is not None
+    counts = json.loads(str(row["counts_json"]))
+    decisions = json.loads(str(row["decisions_json"]))
+
+    assert counts["accepted_by_risk"] == 0
+    assert counts["rejected_by_risk"] == 1
+    assert any(
+        isinstance(entry, str)
+        and entry.startswith("risk:")
+        and entry.endswith(":rejected:max_open_orders")
+        for entry in decisions
+    )
 def test_extract_rejects_by_code_normalizes_numeric_codes() -> None:
     runner = Stage4CycleRunner()
     rejects = runner._extract_rejects_by_code(

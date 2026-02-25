@@ -1965,3 +1965,55 @@ def test_execution_service_final_guard_max_order_notional_blocks_submit(
         ).fetchone()["last_error"]
     assert last_error == "max_order_notional_try"
     assert any(name == "stage4_cap_reject_total" for name, _, _ in capture.counters)
+
+
+def test_execution_service_max_order_notional_guard_disabled_when_non_positive(
+    store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _CaptureInstrumentation:
+        def __init__(self) -> None:
+            self.counters: list[tuple[str, int, dict[str, str] | None]] = []
+
+        def counter(self, name: str, value: int = 1, *, attrs=None) -> None:
+            self.counters.append((name, value, attrs))
+
+    capture = _CaptureInstrumentation()
+    monkeypatch.setattr(
+        "btcbot.services.execution_service_stage4.get_instrumentation",
+        lambda: capture,
+    )
+
+    exchange = FakeExchangeStage4()
+    settings = Settings(
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        LIVE_TRADING=True,
+        SAFE_MODE=False,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
+    )
+    object.__setattr__(settings, "risk_max_order_notional_try", Decimal("0"))
+
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=settings,
+        rules_service=ExchangeRulesService(exchange),
+    )
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1"),
+        reason="contract",
+        client_order_id="cid-cap-disabled",
+    )
+
+    report = svc.execute_with_report([action])
+
+    assert report.submitted == 1
+    assert report.rejected == 0
+    assert len(exchange.submits) == 1
+    assert not any(name == "stage4_cap_reject_total" for name, _, _ in capture.counters)
