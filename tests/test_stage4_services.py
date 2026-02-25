@@ -190,6 +190,112 @@ def test_execution_contract_live_submits_and_dry_run_simulates(store: StateStore
     assert len(live_exchange.submits) == 1
 
 
+def test_execution_dry_run_never_calls_submit_or_cancel_and_emits_suppression_counter(
+    store: StateStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CaptureInstrumentation:
+        def __init__(self) -> None:
+            self.counters: list[tuple[str, int]] = []
+
+        def counter(self, name: str, value: int = 1, *, attrs=None) -> None:
+            del attrs
+            self.counters.append((name, value))
+
+    capture = _CaptureInstrumentation()
+    monkeypatch.setattr(
+        "btcbot.services.execution_service_stage4.get_instrumentation",
+        lambda: capture,
+    )
+
+    exchange = FakeExchangeStage4()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False, SAFE_MODE=False),
+        rules_service=ExchangeRulesService(exchange),
+    )
+
+    submit_action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="contract",
+        client_order_id="cid-dryrun-submit",
+    )
+    cancel_action = LifecycleAction(
+        action_type=LifecycleActionType.CANCEL,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="contract",
+        client_order_id="cid-dryrun-submit",
+        exchange_order_id="ex-cid-dryrun-submit",
+    )
+
+    report = service.execute_with_report([submit_action, cancel_action])
+
+    assert report.submitted == 0
+    assert report.simulated >= 1
+    assert exchange.submits == []
+    assert exchange.cancels == []
+    assert any(
+        name == "dryrun_submission_suppressed_total" and value >= 1
+        for name, value in capture.counters
+    )
+
+
+def test_execution_dry_run_never_calls_execution_wrapper_write_methods(
+    store: StateStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exchange = FakeExchangeStage4()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False, SAFE_MODE=False),
+        rules_service=ExchangeRulesService(exchange),
+    )
+
+    monkeypatch.setattr(
+        service.execution_wrapper,
+        "submit_limit_order",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("submit wrapper must not be called")),
+    )
+    monkeypatch.setattr(
+        service.execution_wrapper,
+        "cancel_order",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cancel wrapper must not be called")),
+    )
+
+    submit_action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="contract",
+        client_order_id="cid-dryrun-no-wrapper-submit",
+    )
+    cancel_action = LifecycleAction(
+        action_type=LifecycleActionType.CANCEL,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1.2"),
+        reason="contract",
+        client_order_id="cid-dryrun-no-wrapper-submit",
+        exchange_order_id="ex-cid-dryrun-no-wrapper-submit",
+    )
+
+    report = service.execute_with_report([submit_action, cancel_action])
+    assert report.submitted == 0
+    assert report.simulated >= 1
+
+
 def test_decimal_end_to_end_and_idempotent_submit(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
     svc = ExecutionService(

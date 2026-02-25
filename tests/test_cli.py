@@ -2577,6 +2577,47 @@ def test_main_doctor_runs_without_state_db_path(monkeypatch) -> None:
     assert captured["db_path"] is None
 
 
+def test_main_doctor_fails_fast_on_role_db_mismatch_without_override(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+        process_role = "MONITOR"
+        live_trading = False
+        kill_switch = True
+        safe_mode = False
+        state_db_path = ""
+
+    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **_kwargs: None)
+    monkeypatch.setattr(cli, "_apply_effective_universe", lambda settings: settings)
+    monkeypatch.setattr(cli, "_resolve_stage7_db_path", lambda *args, **kwargs: "/tmp/live.db")
+    monkeypatch.setattr(cli, "enforce_role_db_convention", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("mismatch")))
+    monkeypatch.setattr(sys, "argv", ["btcbot", "doctor"])
+
+    assert cli.main() == 2
+
+
+def test_main_doctor_allows_role_db_mismatch_with_override(monkeypatch) -> None:
+    class FakeSettings:
+        log_level = "INFO"
+        process_role = "MONITOR"
+        live_trading = False
+        kill_switch = True
+        safe_mode = False
+        state_db_path = ""
+
+    monkeypatch.setattr(cli, "_load_settings", lambda _env_file: FakeSettings())
+    monkeypatch.setattr(cli, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(cli, "configure_instrumentation", lambda **_kwargs: None)
+    monkeypatch.setattr(cli, "_apply_effective_universe", lambda settings: settings)
+    monkeypatch.setattr(cli, "_resolve_stage7_db_path", lambda *args, **kwargs: "/tmp/live.db")
+    monkeypatch.setattr(cli, "enforce_role_db_convention", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("mismatch")))
+    monkeypatch.setattr(cli, "run_doctor", lambda **kwargs: 0)
+    monkeypatch.setattr(sys, "argv", ["btcbot", "doctor", "--allow-mismatched-db"])
+
+    assert cli.main() == 0
+
+
 def test_help_text_env_file_warns_dotenv_forbidden(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["btcbot", "--help"])
 

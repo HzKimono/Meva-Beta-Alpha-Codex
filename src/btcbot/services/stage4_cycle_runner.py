@@ -30,10 +30,11 @@ from btcbot.domain.stage4 import (
 )
 from btcbot.domain.strategy_core import OrderBookSummary, PositionSummary
 from btcbot.obs.alert_engine import AlertDedupe, AlertRuleEvaluator, LogNotifier, MetricWindowStore
-from btcbot.obs.alerts import BASELINE_ALERT_RULES
+from btcbot.obs.alerts import BASELINE_ALERT_RULES, DRY_RUN_ALERT_RULES
 from btcbot.obs.metrics import observe_histogram, set_gauge
 from btcbot.obs.process_role import coerce_process_role
 from btcbot.obs.stage4_alarm_hook import build_cycle_metrics
+from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.planning_kernel import ExecutionPort, Plan
@@ -48,6 +49,7 @@ from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_service_stage4 import ExecutionService
 from btcbot.services.ledger_service import LedgerService
 from btcbot.services.metrics_service import CycleMetrics
+from btcbot.services.market_data_service import MarketDataService
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.planning_kernel_adapters import Stage4PlanConsumer
 from btcbot.services.price_conversion_service import MarkPriceConverter
@@ -90,6 +92,10 @@ class MarketSnapshot:
     age_seconds_by_symbol: dict[str, Decimal]
     fetched_at_by_symbol: dict[str, datetime | None]
     max_data_age_seconds: Decimal
+    dryrun_freshness_stale: bool = False
+    dryrun_freshness_age_ms: int | None = None
+    dryrun_freshness_missing_symbols_count: int = 0
+    dryrun_ws_rest_fallback_used: bool = False
 
 
 class Stage4ConfigurationError(RuntimeError):
@@ -111,18 +117,36 @@ class Stage4CycleRunner:
     _alert_evaluator: AlertRuleEvaluator = dataclass_field(init=False, repr=False)
     _alert_dedupe: AlertDedupe = dataclass_field(init=False, repr=False)
     _alert_notifier: LogNotifier = dataclass_field(init=False, repr=False)
+    _dryrun_consecutive_exchange_degraded: int = dataclass_field(init=False, repr=False, default=0)
+    _last_cycle_completed_epoch: int | None = dataclass_field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_alert_store", MetricWindowStore())
         object.__setattr__(self, "_alert_evaluator", AlertRuleEvaluator())
         object.__setattr__(self, "_alert_dedupe", AlertDedupe())
         object.__setattr__(self, "_alert_notifier", LogNotifier(logger))
+        object.__setattr__(self, "_dryrun_consecutive_exchange_degraded", 0)
+        object.__setattr__(self, "_last_cycle_completed_epoch", None)
 
     @staticmethod
     def norm(symbol: str) -> str:
         return normalize_symbol(symbol)
 
     def run_one_cycle(self, settings: Settings) -> int:
+        instrumentation = get_instrumentation()
+        cycle_started_monotonic = datetime.now(UTC)
+        if settings is not None and settings.dry_run:
+            instrumentation.counter("dryrun_cycle_started_total", 1)
+            last_completed_epoch = self._last_cycle_completed_epoch
+            if last_completed_epoch is not None:
+                stall_seconds = max(
+                    0, int(datetime.now(UTC).timestamp()) - int(last_completed_epoch)
+                )
+                self._alert_store.record(
+                    "dryrun_cycle_stall_seconds",
+                    stall_seconds,
+                    int(datetime.now(UTC).timestamp()),
+                )
         exchange = build_exchange_stage4(settings, dry_run=settings.dry_run)
         live_mode = settings.is_live_trading_enabled() and not settings.dry_run
         state_store = StateStore(db_path=settings.state_db_path)
@@ -239,6 +263,7 @@ class Stage4CycleRunner:
                 exchange,
                 active_symbols,
                 cycle_now=cycle_now,
+                settings=settings,
             )
             mark_prices = market_snapshot.mark_prices
             stale_symbols = {
@@ -1093,6 +1118,12 @@ class Stage4CycleRunner:
                         "rejects_by_code": rejects_by_code,
                         "breaker_open": bool((api_snapshot or {}).get("breaker_open", False)),
                         "unknown_order_present": int(counts.get("unknown_closed", 0) > 0),
+                        "dryrun_submission_suppressed_total": execution_report.simulated,
+                        "dryrun_exchange_degraded_total": int(degraded_mode),
+                        "dryrun_market_data_stale_total": int(market_snapshot.dryrun_freshness_stale),
+                        "dryrun_market_data_missing_symbols_total": market_snapshot.dryrun_freshness_missing_symbols_count,
+                        "dryrun_market_data_age_ms": int(market_snapshot.dryrun_freshness_age_ms or 0),
+                        "dryrun_ws_rest_fallback_total": int(market_snapshot.dryrun_ws_rest_fallback_used),
                     },
                     reconcile_result={
                         "api_429_backoff_total": int((api_snapshot or {}).get("api_429_backoff_total", 0)),
@@ -1107,10 +1138,40 @@ class Stage4CycleRunner:
                     cursor_diag=cursor_diag,
                 )
                 now_epoch = int(datetime.now(UTC).timestamp())
+                if settings.dry_run:
+                    dryrun_metric_keys = {
+                        "dryrun_market_data_stale_total",
+                        "dryrun_market_data_missing_symbols_total",
+                        "dryrun_market_data_age_ms",
+                        "dryrun_ws_rest_fallback_total",
+                        "dryrun_exchange_degraded_total",
+                        "dryrun_cycle_duration_ms",
+                        "dryrun_submission_suppressed_total",
+                    }
+                    for metric_name in dryrun_metric_keys:
+                        metric_value = stage4_alert_metrics.get(metric_name)
+                        if metric_value is not None:
+                            self._alert_store.record(metric_name, metric_value, now_epoch)
+
+                    stale_stats = self._alert_store.compute("5m", "dryrun_market_data_stale_total")
+                    completed_stats = self._alert_store.compute("5m", "dryrun_cycle_completed_total")
+                    stale_ratio = 0.0
+                    if completed_stats.get("delta", 0.0) > 0:
+                        stale_ratio = (
+                            stale_stats.get("delta", 0.0)
+                            / completed_stats.get("delta", 0.0)
+                        )
+                    self._alert_store.record(
+                        "dryrun_market_data_stale_ratio", stale_ratio, now_epoch
+                    )
+
                 for metric_name, metric_value in stage4_alert_metrics.items():
                     self._alert_store.record(metric_name, metric_value, now_epoch)
+                alert_rules = list(BASELINE_ALERT_RULES)
+                if settings.dry_run:
+                    alert_rules.extend(DRY_RUN_ALERT_RULES)
                 alert_events = self._alert_evaluator.evaluate_rules(
-                    BASELINE_ALERT_RULES,
+                    alert_rules,
                     self._alert_store,
                     now_epoch,
                 )
@@ -1134,6 +1195,16 @@ class Stage4CycleRunner:
                     envelope=envelope,
                 )
             state_store.set_last_cycle_id(cycle_id)
+            if settings.dry_run:
+                now_epoch = int(datetime.now(UTC).timestamp())
+                cycle_duration_ms = int(
+                    (datetime.now(UTC) - cycle_started_monotonic).total_seconds() * 1000
+                )
+                instrumentation.counter("dryrun_cycle_completed_total", 1)
+                instrumentation.histogram("dryrun_cycle_duration_ms", float(cycle_duration_ms))
+                self._alert_store.record("dryrun_cycle_completed_total", 1, now_epoch)
+                self._alert_store.record("dryrun_cycle_duration_ms", cycle_duration_ms, now_epoch)
+                object.__setattr__(self, "_last_cycle_completed_epoch", now_epoch)
 
             logger.info(
                 "risk_decision",
@@ -1287,10 +1358,55 @@ class Stage4CycleRunner:
         return snapshot.mark_prices, snapshot.anomalies
 
     def _resolve_market_snapshot(
-        self, exchange: object, symbols: list[str], *, cycle_now: datetime
+        self,
+        exchange: object,
+        symbols: list[str],
+        *,
+        cycle_now: datetime,
+        settings: Settings | None = None,
     ) -> MarketSnapshot:
         base = getattr(exchange, "client", exchange)
         get_orderbook = getattr(base, "get_orderbook", None)
+        instrumentation = get_instrumentation()
+        missing_symbols_count = 0
+        freshness_stale = False
+        freshness_age_ms: int | None = None
+        ws_rest_fallback_used = False
+        if settings is not None and settings.dry_run:
+            try:
+                market_data_service = MarketDataService(
+                    exchange=base,
+                    mode=settings.market_data_mode,
+                    ws_rest_fallback=settings.ws_market_data_rest_fallback,
+                    orderbook_ttl_ms=settings.orderbook_ttl_ms,
+                    orderbook_max_staleness_ms=settings.orderbook_max_staleness_ms,
+                )
+                _bids, freshness = market_data_service.get_best_bids_with_freshness(
+                    symbols,
+                    max_age_ms=max(1, int(settings.stale_market_data_seconds * 1000)),
+                )
+                freshness_stale = bool(freshness.is_stale)
+                freshness_age_ms = freshness.observed_age_ms
+                ws_rest_fallback_used = freshness.source_mode == "rest_fallback"
+                if freshness.is_stale:
+                    instrumentation.counter("dryrun_market_data_stale_total", 1)
+                if freshness.observed_age_ms is not None:
+                    instrumentation.histogram(
+                        "dryrun_market_data_age_ms", float(freshness.observed_age_ms)
+                    )
+                missing_symbols_count = len(freshness.missing_symbols)
+                if missing_symbols_count > 0:
+                    instrumentation.counter(
+                        "dryrun_market_data_missing_symbols_total",
+                        missing_symbols_count,
+                    )
+                if ws_rest_fallback_used:
+                    instrumentation.counter("dryrun_ws_rest_fallback_total", 1)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "dryrun_market_data_freshness_probe_failed",
+                    extra={"extra": {"error_type": type(exc).__name__}},
+                )
         mark_prices: dict[str, Decimal] = {}
         orderbooks: dict[str, tuple[Decimal, Decimal]] = {}
         spreads_bps: dict[str, Decimal] = {}
@@ -1370,6 +1486,33 @@ class Stage4CycleRunner:
             max_age = Decimal("999999")
         else:
             max_age = max(fetch_ages)
+        if settings is not None and settings.dry_run:
+            health_snapshot_fn = getattr(exchange, "health_snapshot", None)
+            snapshot = health_snapshot_fn() if callable(health_snapshot_fn) else {}
+            degraded = bool(
+                (snapshot or {}).get("degraded", False)
+                or (snapshot or {}).get("breaker_open", False)
+            )
+            if degraded:
+                instrumentation.counter("dryrun_exchange_degraded_total", 1)
+                object.__setattr__(
+                    self,
+                    "_dryrun_consecutive_exchange_degraded",
+                    self._dryrun_consecutive_exchange_degraded + 1,
+                )
+            else:
+                object.__setattr__(self, "_dryrun_consecutive_exchange_degraded", 0)
+            now_epoch = int(datetime.now(UTC).timestamp())
+            self._alert_store.record(
+                "dryrun_exchange_degraded_consecutive",
+                float(self._dryrun_consecutive_exchange_degraded),
+                now_epoch,
+            )
+            self._alert_store.record(
+                "dryrun_market_data_missing_symbols_total",
+                float(missing_symbols_count),
+                now_epoch,
+            )
         return MarketSnapshot(
             mark_prices=mark_prices,
             orderbooks=orderbooks,
@@ -1378,6 +1521,10 @@ class Stage4CycleRunner:
             age_seconds_by_symbol=age_by_symbol,
             fetched_at_by_symbol=fetched_at_by_symbol,
             max_data_age_seconds=max_age,
+            dryrun_freshness_stale=freshness_stale,
+            dryrun_freshness_age_ms=freshness_age_ms,
+            dryrun_freshness_missing_symbols_count=missing_symbols_count,
+            dryrun_ws_rest_fallback_used=ws_rest_fallback_used,
         )
 
     def _apply_agent_policy(

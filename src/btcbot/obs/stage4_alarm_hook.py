@@ -48,6 +48,17 @@ def build_cycle_metrics(
         ),
         "bot_cursor_stall_total": sum(_to_int(value) for value in cursor_stall_by_symbol.values()),
         "bot_killswitch_enabled": 1 if bool(mode.get("kill_switch", False)) else 0,
+        "dryrun_market_data_stale_total": _to_int(summary.get("dryrun_market_data_stale_total", 0)),
+        "dryrun_market_data_missing_symbols_total": _to_int(
+            summary.get("dryrun_market_data_missing_symbols_total", 0)
+        ),
+        "dryrun_market_data_age_ms": _to_int(summary.get("dryrun_market_data_age_ms", 0)),
+        "dryrun_ws_rest_fallback_total": _to_int(summary.get("dryrun_ws_rest_fallback_total", 0)),
+        "dryrun_exchange_degraded_total": _to_int(summary.get("dryrun_exchange_degraded_total", 0)),
+        "dryrun_submission_suppressed_total": _to_int(
+            summary.get("dryrun_submission_suppressed_total", 0)
+        ),
+        "dryrun_cycle_duration_ms": _to_int(summary.get("cycle_duration_ms", 0)),
     }
 
 
