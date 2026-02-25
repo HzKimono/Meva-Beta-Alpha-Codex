@@ -25,6 +25,7 @@ from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.logging_context import with_logging_context
 from btcbot.logging_utils import setup_logging
 from btcbot.obs.logging import set_base_context
+from btcbot.obs.process_role import ProcessRole
 from btcbot.observability import (
     configure_instrumentation,
     flush_instrumentation,
@@ -230,6 +231,31 @@ def main() -> int:
         "--db",
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+
+    stage4_freeze_status_parser = subparsers.add_parser(
+        "stage4-freeze-status",
+        help="Show Stage 4 unknown-order freeze state",
+    )
+    stage4_freeze_status_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+
+    stage4_freeze_clear_parser = subparsers.add_parser(
+        "stage4-freeze-clear",
+        help="Clear Stage 4 unknown-order freeze state",
+    )
+    stage4_freeze_clear_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+    stage4_freeze_clear_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Required confirmation flag to clear freeze state",
     )
 
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
@@ -492,6 +518,12 @@ def main() -> int:
             jitter_seconds=args.jitter_seconds,
         )
 
+    if args.command == "stage4-freeze-status":
+        return run_stage4_freeze_status(settings=settings, db_path=args.db)
+
+    if args.command == "stage4-freeze-clear":
+        return run_stage4_freeze_clear(settings=settings, db_path=args.db, confirmed=args.yes)
+
     if args.command == "stage7-run":
         return run_cycle_stage7(
             settings,
@@ -614,6 +646,8 @@ def _command_touches_state_db(command_name: str) -> bool:
         "run",
         "canary",
         "stage4-run",
+        "stage4-freeze-status",
+        "stage4-freeze-clear",
         "stage7-run",
         "health",
         "stage7-report",
@@ -630,6 +664,8 @@ def _enforce_role_db_convention_for_command(command_name: str) -> bool:
         "run",
         "canary",
         "stage4-run",
+        "stage4-freeze-status",
+        "stage4-freeze-clear",
         "health",
         "stage7-report",
         "stage7-export",
@@ -1914,6 +1950,60 @@ def run_cycle(
         _flush_logging_handlers()
         _close_best_effort(exchange, "exchange")
 
+
+
+def run_stage4_freeze_status(*, settings: Settings, db_path: str | None = None) -> int:
+    resolved_db = normalize_db_path(db_path or settings.state_db_path)
+    store = StateStore(str(resolved_db))
+    process_role = str(getattr(settings, "process_role", ProcessRole.MONITOR.value)).upper()
+    freeze = store.stage4_get_freeze(process_role)
+    payload = {
+        "process_role": process_role,
+        "active": freeze.active,
+        "reason": freeze.reason,
+        "since": freeze.since_ts,
+        "last_seen": freeze.last_seen_ts,
+        "details": freeze.details,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def run_stage4_freeze_clear(
+    *,
+    settings: Settings,
+    db_path: str | None = None,
+    confirmed: bool = False,
+) -> int:
+    if not confirmed:
+        print("Refusing to clear freeze state without --yes")
+        return 2
+    resolved_db = normalize_db_path(db_path or settings.state_db_path)
+    store = StateStore(str(resolved_db))
+    process_role = str(getattr(settings, "process_role", ProcessRole.MONITOR.value)).upper()
+    previous = store.stage4_get_freeze(process_role)
+    store.stage4_clear_freeze(process_role)
+    duration_seconds = None
+    if previous.since_ts:
+        try:
+            since = datetime.fromisoformat(previous.since_ts)
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=UTC)
+            duration_seconds = int((datetime.now(UTC) - since.astimezone(UTC)).total_seconds())
+        except ValueError:
+            duration_seconds = None
+    logger.info(
+        "stage4_unknown_freeze_clear",
+        extra={
+            "extra": {
+                "process_role": process_role,
+                "previous_reason": previous.reason,
+                "duration_seconds": duration_seconds,
+            }
+        },
+    )
+    print(json.dumps({"process_role": process_role, "cleared": True, "previous_reason": previous.reason}, sort_keys=True))
+    return 0
 
 def run_cycle_stage4(
     settings: Settings, force_dry_run: bool = False, db_path: str | None = None
