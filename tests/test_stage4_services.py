@@ -135,6 +135,119 @@ def test_execution_enforces_live_ack_and_kill_switch(store: StateStore) -> None:
     assert svc.execute([action]) == 0
 
 
+
+
+
+
+def test_execution_honors_effective_killswitch_attribute_for_submit(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    settings = Settings(
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        kill_switch_effective=True,
+        LIVE_TRADING=False,
+        SAFE_MODE=False,
+    )
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=settings,
+        rules_service=ExchangeRulesService(exchange),
+    )
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="db_kill",
+        client_order_id="cid-db-kill",
+    )
+
+    report = svc.execute_with_report([action])
+
+    assert report.submitted == 0
+    assert exchange.submits == []
+
+def test_execution_killswitch_allows_cancel_by_default(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=False, KILL_SWITCH=True, LIVE_TRADING=False, SAFE_MODE=False),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    store.record_stage4_order_submitted(
+        symbol="BTC_TRY",
+        client_order_id="cid-cancel",
+        exchange_client_id="ex-cid-cancel",
+        exchange_order_id="ex-order-1",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="open",
+    )
+    action = LifecycleAction(
+        action_type=LifecycleActionType.CANCEL,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="test_cancel",
+        client_order_id="cid-cancel",
+        exchange_order_id="ex-order-1",
+    )
+
+    report = svc.execute_with_report([action])
+
+    assert report.canceled == 1
+    assert exchange.cancels == []
+    order = store.get_stage4_order_by_client_id("cid-cancel")
+    assert order is not None and order.status == "canceled"
+
+
+def test_execution_killswitch_freeze_all_blocks_cancel(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=True,
+            KILL_SWITCH_FREEZE_ALL=True,
+            LIVE_TRADING=False,
+            SAFE_MODE=False,
+        ),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    store.record_stage4_order_submitted(
+        symbol="BTC_TRY",
+        client_order_id="cid-cancel-freeze",
+        exchange_client_id="ex-cid-cancel-freeze",
+        exchange_order_id="ex-order-2",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        mode="live",
+        status="open",
+    )
+    action = LifecycleAction(
+        action_type=LifecycleActionType.CANCEL,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="test_cancel",
+        client_order_id="cid-cancel-freeze",
+        exchange_order_id="ex-order-2",
+    )
+
+    report = svc.execute_with_report([action])
+
+    assert report.canceled == 0
+    assert exchange.cancels == []
+
 def test_execution_contract_live_submits_and_dry_run_simulates(store: StateStore) -> None:
     action = LifecycleAction(
         action_type=LifecycleActionType.SUBMIT,

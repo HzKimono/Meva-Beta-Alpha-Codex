@@ -66,26 +66,113 @@ class ExecutionService:
     def execute(self, actions: list[LifecycleAction]) -> int:
         return self.execute_with_report(actions).executed_total
 
+    @staticmethod
+    def _killswitch_action_label(action_type: LifecycleActionType) -> str:
+        if action_type == LifecycleActionType.SUBMIT:
+            return "submit"
+        if action_type == LifecycleActionType.REPLACE:
+            return "replace_submit"
+        return "cancel"
+
+    def _record_killswitch_suppression(
+        self,
+        *,
+        action: LifecycleAction,
+        process_role: str,
+        source: str,
+        freeze_all: bool,
+    ) -> None:
+        action_type = self._killswitch_action_label(action.action_type)
+        self.instrumentation.counter(
+            "stage4_killswitch_suppressed_total",
+            1,
+            attrs={"action_type": action_type, "process_role": process_role},
+        )
+        logger.warning(
+            "stage4_killswitch_suppress",
+            extra={
+                "extra": {
+                    "process_role": process_role,
+                    "action_type": action_type,
+                    "client_order_id": action.client_order_id,
+                    "symbol": action.symbol,
+                    "source": source,
+                    "freeze_all": freeze_all,
+                }
+            },
+        )
+
     def execute_with_report(self, actions: list[LifecycleAction]) -> ExecutionReport:
-        if self.settings.kill_switch:
-            logger.warning("kill_switch_active_blocking_writes")
-            suppressed_submissions = sum(
-                1 for action in actions if action.action_type == LifecycleActionType.SUBMIT
-            )
-            if suppressed_submissions > 0:
-                self.instrumentation.counter(
-                    "dryrun_submission_suppressed_total",
-                    suppressed_submissions,
-                )
-            return ExecutionReport(0, 0, 0, 0, 0, 0, {})
         if self.settings.live_trading and not self.settings.is_live_trading_enabled():
             raise RuntimeError("LIVE_TRADING requires LIVE_TRADING_ACK=I_UNDERSTAND")
 
         live_mode = self.settings.is_live_trading_enabled() and not self.settings.dry_run
+        process_role = str(getattr(self.settings, "process_role", "trader"))
+        kill_switch_effective = getattr(self.settings, "kill_switch_effective", None)
+        kill_switch_active = bool(self.settings.kill_switch if kill_switch_effective is None else kill_switch_effective)
+        kill_switch_source = str(getattr(self.settings, "kill_switch_source", "settings"))
+        freeze_all = bool(getattr(self.settings, "kill_switch_freeze_all", False))
         submitted = canceled = simulated = rejected = rejected_min_notional = 0
         self._rejects_by_code: dict[str, int] = {}
 
         regular_actions, replace_groups = self._extract_replace_groups(actions)
+        if kill_switch_active:
+            logger.warning(
+                "kill_switch_active_stage4",
+                extra={
+                    "extra": {
+                        "process_role": process_role,
+                        "source": kill_switch_source,
+                        "freeze_all": freeze_all,
+                    }
+                },
+            )
+            ks_regular: list[LifecycleAction] = []
+            for action in regular_actions:
+                if action.action_type == LifecycleActionType.CANCEL and not freeze_all:
+                    ks_regular.append(action)
+                    continue
+                self._record_killswitch_suppression(
+                    action=action,
+                    process_role=process_role,
+                    source=kill_switch_source,
+                    freeze_all=freeze_all,
+                )
+            regular_actions = ks_regular
+            ks_replace: list[ReplaceGroup] = []
+            for group in replace_groups:
+                if freeze_all:
+                    for cancel_action in group.cancel_actions:
+                        self._record_killswitch_suppression(
+                            action=cancel_action,
+                            process_role=process_role,
+                            source=kill_switch_source,
+                            freeze_all=freeze_all,
+                        )
+                ks_cancels = tuple(
+                    cancel_action for cancel_action in group.cancel_actions if not freeze_all
+                )
+                # replace implies new risk via submit; always suppressed under kill-switch
+                self._record_killswitch_suppression(
+                    action=group.submit_action,
+                    process_role=process_role,
+                    source=kill_switch_source,
+                    freeze_all=freeze_all,
+                )
+                if ks_cancels:
+                    ks_replace.append(
+                        ReplaceGroup(
+                            symbol=group.symbol,
+                            side=group.side,
+                            cancel_actions=ks_cancels,
+                            submit_action=group.submit_action,
+                            submit_count=group.submit_count,
+                            had_multiple_submits=group.had_multiple_submits,
+                            selected_submit_client_order_id=group.selected_submit_client_order_id,
+                        )
+                    )
+            replace_groups = ks_replace
+
 
         for action in regular_actions:
             if action.action_type == LifecycleActionType.CANCEL:
@@ -119,7 +206,13 @@ class ExecutionService:
                         },
                     },
                 )
-            s, c, sim, rej, rej_min = self._execute_replace_group(group=group, live_mode=live_mode)
+            if kill_switch_active:
+                c = 0
+                for cancel_action in group.cancel_actions:
+                    c += self._execute_cancel_action(action=cancel_action, live_mode=live_mode)
+                s = sim = rej = rej_min = 0
+            else:
+                s, c, sim, rej, rej_min = self._execute_replace_group(group=group, live_mode=live_mode)
             submitted += s
             canceled += c
             simulated += sim
