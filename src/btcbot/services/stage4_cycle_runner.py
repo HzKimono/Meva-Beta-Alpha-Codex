@@ -32,7 +32,7 @@ from btcbot.domain.strategy_core import OrderBookSummary, PositionSummary
 from btcbot.obs.alert_engine import AlertDedupe, AlertRuleEvaluator, LogNotifier, MetricWindowStore
 from btcbot.obs.alerts import BASELINE_ALERT_RULES, DRY_RUN_ALERT_RULES
 from btcbot.obs.metrics import observe_histogram, set_gauge
-from btcbot.obs.process_role import coerce_process_role
+from btcbot.obs.process_role import ProcessRole, coerce_process_role
 from btcbot.obs.stage4_alarm_hook import build_cycle_metrics
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
@@ -183,8 +183,11 @@ class Stage4CycleRunner:
                 }
 
         process_role = coerce_process_role(getattr(settings, "process_role", None)).value
+        effective_kill_switch, db_kill_switch, kill_switch_source = self._resolve_effective_kill_switch(
+            settings=settings, state_store=state_store, process_role=process_role
+        )
         metadata_optional_mode = (
-            settings.dry_run or settings.safe_mode or process_role == Mode.MONITOR.value
+            settings.dry_run or settings.safe_mode or process_role == ProcessRole.MONITOR.value
         )
         if not pair_info:
             if live_mode and not metadata_optional_mode:
@@ -241,11 +244,27 @@ class Stage4CycleRunner:
                 )
             except TypeError:
                 risk_budget_service = RiskBudgetService(state_store=state_store)
+            setattr(settings, "kill_switch_effective", effective_kill_switch)
+            setattr(settings, "kill_switch_source", kill_switch_source)
             execution_service = ExecutionService(
                 exchange=exchange,
                 state_store=state_store,
                 settings=settings,
                 rules_service=rules_service,
+            )
+            logger.info(
+                "stage4_killswitch_state",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "process_role": process_role,
+                        "settings_kill_switch": bool(settings.kill_switch),
+                        "db_kill_switch": bool(db_kill_switch),
+                        "effective_kill_switch": bool(effective_kill_switch),
+                        "source": kill_switch_source,
+                        "freeze_all": bool(settings.kill_switch_freeze_all),
+                    }
+                },
             )
             decision_pipeline = DecisionPipelineService(settings=settings)
             anomaly_detector = AnomalyDetectorService(
@@ -496,7 +515,7 @@ class Stage4CycleRunner:
                     positions=positions,
                     mark_prices=mark_prices,
                     realized_today_try=snapshot.realized_today_try,
-                    kill_switch_active=settings.kill_switch,
+                    kill_switch_active=effective_kill_switch,
                     live_mode=live_mode,
                     tradable_symbols=active_symbols,
                 )
@@ -504,7 +523,7 @@ class Stage4CycleRunner:
             budget_notional_multiplier = getattr(
                 budget_decision, "position_sizing_multiplier", Decimal("1")
             )
-            if settings.kill_switch:
+            if effective_kill_switch:
                 budget_notional_multiplier = Decimal("0")
 
             if settings.stage4_use_planning_kernel:
@@ -835,6 +854,14 @@ class Stage4CycleRunner:
                     extra={"extra": {"cycle_id": cycle_id, "reasons": degrade_decision.reasons}},
                 )
 
+            prefiltered_actions, killswitch_suppressed_counts = self._suppress_actions_for_killswitch(
+                actions=prefiltered_actions,
+                effective_kill_switch=effective_kill_switch,
+                freeze_all=bool(settings.kill_switch_freeze_all),
+                process_role=process_role,
+                kill_switch_source=kill_switch_source,
+                instrumentation=instrumentation,
+            )
             execution_report = execution_service.execute_with_report(prefiltered_actions)
             self._assert_execution_invariant(execution_report)
 
@@ -849,7 +876,7 @@ class Stage4CycleRunner:
             )
             set_gauge(
                 "bot_killswitch_enabled",
-                1 if bool(settings.kill_switch) else 0,
+                1 if bool(effective_kill_switch) else 0,
                 labels={"process_role": process_role},
             )
             updated_anomalies = anomaly_detector.detect(
@@ -1140,6 +1167,11 @@ class Stage4CycleRunner:
                         "dryrun_market_data_missing_symbols_total": market_snapshot.dryrun_freshness_missing_symbols_count,
                         "dryrun_market_data_age_ms": int(market_snapshot.dryrun_freshness_age_ms or 0),
                         "dryrun_ws_rest_fallback_total": int(market_snapshot.dryrun_ws_rest_fallback_used),
+                        "suppressed_by_killswitch_submit": (
+                            killswitch_suppressed_counts["submit"]
+                            + killswitch_suppressed_counts["replace_submit"]
+                        ),
+                        "suppressed_by_killswitch_cancel": killswitch_suppressed_counts["cancel"],
                     },
                     reconcile_result={
                         "api_429_backoff_total": int((api_snapshot or {}).get("api_429_backoff_total", 0)),
@@ -1149,7 +1181,7 @@ class Stage4CycleRunner:
                     final_mode={
                         "mode": final_mode.value,
                         "observe_only": final_mode == Mode.OBSERVE_ONLY,
-                        "kill_switch": bool(settings.kill_switch),
+                        "kill_switch": bool(effective_kill_switch),
                     },
                     cursor_diag=cursor_diag,
                 )
@@ -1587,7 +1619,7 @@ class Stage4CycleRunner:
                 for order in current_open_orders
             ],
             risk_state={
-                "kill_switch": settings.kill_switch,
+                "kill_switch": effective_kill_switch,
                 "safe_mode": settings.safe_mode,
                 "drawdown_pct": getattr(snapshot, "drawdown_pct", Decimal("0")),
                 "gross_exposure_try": sum(
@@ -1654,7 +1686,7 @@ class Stage4CycleRunner:
             },
             cooldown_seconds=settings.cooldown_seconds,
             stale_data_seconds=settings.stale_market_data_seconds,
-            kill_switch=settings.kill_switch,
+            kill_switch=effective_kill_switch,
             safe_mode=settings.safe_mode,
             observe_only_override=settings.agent_observe_only,
         )
@@ -1716,6 +1748,72 @@ class Stage4CycleRunner:
                 )
             )
         return mapped
+
+    @staticmethod
+    def _resolve_effective_kill_switch(
+        *, settings: Settings, state_store: StateStore, process_role: str
+    ) -> tuple[bool, bool, str]:
+        settings_kill = bool(settings.kill_switch)
+        db_kill, _reason, _until = state_store.get_kill_switch(process_role)
+        effective = settings_kill or bool(db_kill)
+        if settings_kill and db_kill:
+            source = "both"
+        elif settings_kill:
+            source = "settings"
+        elif db_kill:
+            source = "db"
+        else:
+            source = "none"
+        return effective, bool(db_kill), source
+
+    @staticmethod
+    def _killswitch_action_label(action_type: LifecycleActionType) -> str:
+        if action_type == LifecycleActionType.SUBMIT:
+            return "submit"
+        if action_type == LifecycleActionType.REPLACE:
+            return "replace_submit"
+        return "cancel"
+
+    def _suppress_actions_for_killswitch(
+        self,
+        *,
+        actions: list[LifecycleAction],
+        effective_kill_switch: bool,
+        freeze_all: bool,
+        process_role: str,
+        kill_switch_source: str,
+        instrumentation: object,
+    ) -> tuple[list[LifecycleAction], dict[str, int]]:
+        counters = {"submit": 0, "replace_submit": 0, "cancel": 0}
+        if not effective_kill_switch:
+            return actions, counters
+
+        allowed: list[LifecycleAction] = []
+        for action in actions:
+            if action.action_type == LifecycleActionType.CANCEL and not freeze_all:
+                allowed.append(action)
+                continue
+            action_type = self._killswitch_action_label(action.action_type)
+            counters[action_type] += 1
+            instrumentation.counter(
+                "stage4_killswitch_suppressed_total",
+                1,
+                attrs={"action_type": action_type, "process_role": process_role},
+            )
+            logger.warning(
+                "stage4_killswitch_suppress",
+                extra={
+                    "extra": {
+                        "process_role": process_role,
+                        "action_type": action_type,
+                        "client_order_id": action.client_order_id,
+                        "symbol": action.symbol,
+                        "source": kill_switch_source,
+                        "freeze_all": freeze_all,
+                    }
+                },
+            )
+        return allowed, counters
 
     def _assert_execution_invariant(self, report: object) -> None:
         for field in (

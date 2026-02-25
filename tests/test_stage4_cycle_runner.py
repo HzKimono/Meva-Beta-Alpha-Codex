@@ -783,6 +783,7 @@ def test_stage4_stale_data_blocks_with_btcturk_adapter_timestamp_cache(
         DRY_RUN=True,
         KILL_SWITCH=False,
         STATE_DB_PATH=str(db_path),
+        PROCESS_ROLE="MONITOR",
         SYMBOLS="BTC_TRY",
         STALE_MARKET_DATA_SECONDS=10,
         DYNAMIC_UNIVERSE_ENABLED=False,
@@ -834,6 +835,47 @@ def test_stage4_cycle_duration_ms_uses_real_end_timestamps(monkeypatch, tmp_path
     assert captured[0] is not None and captured[1] is not None
     assert int(captured[1]) >= int(captured[0])
 
+
+
+
+def test_stage4_db_killswitch_toggle_blocks_and_restores_submits(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    from btcbot.services import stage4_cycle_runner as module
+
+    captured: list[list[str]] = []
+
+    class CaptureExecution(module.ExecutionService):
+        def execute_with_report(self, actions):
+            captured.append([str(action.action_type) for action in actions])
+            return super().execute_with_report(actions)
+
+    monkeypatch.setattr(module, "ExecutionService", CaptureExecution)
+
+    db_path = tmp_path / "stage4_db_killswitch.sqlite"
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(db_path),
+        PROCESS_ROLE="MONITOR",
+        SYMBOLS="BTC_TRY",
+    )
+
+    store = StateStore(str(db_path))
+    store.set_kill_switch("MONITOR", True, reason="ops_test", until_ts=None)
+
+    assert runner.run_one_cycle(settings) == 0
+    assert captured[-1] == []
+
+    store.set_kill_switch("MONITOR", False, reason="ops_test_off", until_ts=None)
+
+    assert runner.run_one_cycle(settings) == 0
+    assert "submit" in captured[-1]
 
 def test_stage4_dry_run_never_submits_or_cancels(monkeypatch, tmp_path) -> None:
     runner = Stage4CycleRunner()

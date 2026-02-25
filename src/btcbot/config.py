@@ -90,6 +90,9 @@ class Settings(BaseSettings):
         alias="LIVE_RULES_REQUIRE_EXCHANGEINFO",
     )
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
+    kill_switch_freeze_all: bool = Field(default=False, alias="KILL_SWITCH_FREEZE_ALL")
+    kill_switch_effective: bool | None = Field(default=None)
+    kill_switch_source: str = Field(default="settings")
     dry_run: bool = Field(default=True, alias="DRY_RUN")
     kill_chain_max_consecutive_errors: int = Field(
         default=3,
