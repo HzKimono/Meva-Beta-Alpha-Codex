@@ -207,6 +207,15 @@ class CooldownState:
     updated_at_ts: int
 
 
+@dataclass(frozen=True)
+class Stage4FreezeState:
+    active: bool
+    reason: str | None
+    since_ts: str | None
+    details: dict[str, object]
+    last_seen_ts: str | None
+
+
 def _serialize_decimal_for_db(value: Decimal, *, field_name: str) -> str:
     if not isinstance(value, Decimal):
         raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
@@ -2780,6 +2789,120 @@ class StateStore:
             reason = payload.get("reason")
             until_ts = payload.get("until_ts")
         return enabled, reason, until_ts
+
+
+    def stage4_set_freeze(
+        self,
+        process_role: str,
+        *,
+        reason: str,
+        details: Mapping[str, object] | None = None,
+    ) -> Stage4FreezeState:
+        now = datetime.now(UTC).isoformat()
+        key = f"stage4_freeze:{process_role}"
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT text_value FROM op_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+            since_ts = now
+            if row is not None and row["text_value"]:
+                try:
+                    payload = json.loads(str(row["text_value"]))
+                except json.JSONDecodeError:
+                    payload = {}
+                since_ts = str(payload.get("since_ts") or now)
+            payload = {
+                "active": True,
+                "reason": reason,
+                "since_ts": since_ts,
+                "last_seen_ts": now,
+                "details": dict(details or {}),
+            }
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, 1, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    int_value=1,
+                    text_value=excluded.text_value,
+                    updated_at=excluded.updated_at
+                """,
+                (key, json.dumps(payload, sort_keys=True), now),
+            )
+        return Stage4FreezeState(
+            active=True,
+            reason=reason,
+            since_ts=since_ts,
+            details=dict(details or {}),
+            last_seen_ts=now,
+        )
+
+    def stage4_clear_freeze(self, process_role: str) -> Stage4FreezeState:
+        now = datetime.now(UTC).isoformat()
+        key = f"stage4_freeze:{process_role}"
+        previous = self.stage4_get_freeze(process_role)
+        payload = {
+            "active": False,
+            "reason": None,
+            "since_ts": None,
+            "last_seen_ts": now,
+            "details": {},
+        }
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO op_state(key, int_value, text_value, updated_at)
+                VALUES (?, 0, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    int_value=0,
+                    text_value=excluded.text_value,
+                    updated_at=excluded.updated_at
+                """,
+                (key, json.dumps(payload, sort_keys=True), now),
+            )
+        return Stage4FreezeState(
+            active=False,
+            reason=previous.reason,
+            since_ts=previous.since_ts,
+            details=previous.details,
+            last_seen_ts=now,
+        )
+
+    def stage4_get_freeze(self, process_role: str) -> Stage4FreezeState:
+        key = f"stage4_freeze:{process_role}"
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT int_value, text_value FROM op_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return Stage4FreezeState(
+                active=False,
+                reason=None,
+                since_ts=None,
+                details={},
+                last_seen_ts=None,
+            )
+        payload: dict[str, object] = {}
+        text_value = row["text_value"]
+        if text_value:
+            try:
+                payload = json.loads(str(text_value))
+            except json.JSONDecodeError:
+                payload = {}
+        details_raw = payload.get("details")
+        details = details_raw if isinstance(details_raw, dict) else {}
+        reason_raw = payload.get("reason")
+        since_raw = payload.get("since_ts")
+        last_seen_raw = payload.get("last_seen_ts")
+        return Stage4FreezeState(
+            active=bool(row["int_value"]),
+            reason=str(reason_raw) if reason_raw else None,
+            since_ts=str(since_raw) if since_raw else None,
+            details=dict(details),
+            last_seen_ts=str(last_seen_raw) if last_seen_raw else None,
+        )
 
     def reserve_idempotency(self, key: str) -> bool:
         now = datetime.now(UTC).isoformat()

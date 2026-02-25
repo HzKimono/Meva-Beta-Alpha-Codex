@@ -102,6 +102,35 @@ class ExecutionService:
             },
         )
 
+
+    def _record_freeze_suppression(
+        self,
+        *,
+        action: LifecycleAction,
+        process_role: str,
+        freeze_reason: str,
+        freeze_all: bool,
+    ) -> None:
+        action_type = self._killswitch_action_label(action.action_type)
+        self.instrumentation.counter(
+            "stage4_freeze_suppressed_total",
+            1,
+            attrs={"action_type": action_type, "process_role": process_role},
+        )
+        logger.warning(
+            "stage4_unknown_freeze_suppress",
+            extra={
+                "extra": {
+                    "process_role": process_role,
+                    "action_type": action_type,
+                    "client_order_id": action.client_order_id,
+                    "symbol": action.symbol,
+                    "reason": freeze_reason,
+                    "freeze_all": freeze_all,
+                }
+            },
+        )
+
     def execute_with_report(self, actions: list[LifecycleAction]) -> ExecutionReport:
         if self.settings.live_trading and not self.settings.is_live_trading_enabled():
             raise RuntimeError("LIVE_TRADING requires LIVE_TRADING_ACK=I_UNDERSTAND")
@@ -109,13 +138,19 @@ class ExecutionService:
         live_mode = self.settings.is_live_trading_enabled() and not self.settings.dry_run
         process_role = str(getattr(self.settings, "process_role", "trader"))
         kill_switch_effective = getattr(self.settings, "kill_switch_effective", None)
-        kill_switch_active = bool(self.settings.kill_switch if kill_switch_effective is None else kill_switch_effective)
+        kill_switch_active = bool(
+            self.settings.kill_switch if kill_switch_effective is None else kill_switch_effective
+        )
         kill_switch_source = str(getattr(self.settings, "kill_switch_source", "settings"))
         freeze_all = bool(getattr(self.settings, "kill_switch_freeze_all", False))
         submitted = canceled = simulated = rejected = rejected_min_notional = 0
         self._rejects_by_code: dict[str, int] = {}
 
+        freeze_state = self.state_store.stage4_get_freeze(process_role)
+        freeze_active = bool(freeze_state.active)
+        freeze_reason = str(freeze_state.reason or "freeze_unknown_orders")
         regular_actions, replace_groups = self._extract_replace_groups(actions)
+
         if kill_switch_active:
             logger.warning(
                 "kill_switch_active_stage4",
@@ -152,7 +187,6 @@ class ExecutionService:
                 ks_cancels = tuple(
                     cancel_action for cancel_action in group.cancel_actions if not freeze_all
                 )
-                # replace implies new risk via submit; always suppressed under kill-switch
                 self._record_killswitch_suppression(
                     action=group.submit_action,
                     process_role=process_role,
@@ -173,6 +207,51 @@ class ExecutionService:
                     )
             replace_groups = ks_replace
 
+        if freeze_active:
+            fr_regular: list[LifecycleAction] = []
+            for action in regular_actions:
+                if action.action_type == LifecycleActionType.CANCEL and not freeze_all:
+                    fr_regular.append(action)
+                    continue
+                self._record_freeze_suppression(
+                    action=action,
+                    process_role=process_role,
+                    freeze_reason=freeze_reason,
+                    freeze_all=freeze_all,
+                )
+            regular_actions = fr_regular
+            fr_replace: list[ReplaceGroup] = []
+            for group in replace_groups:
+                if freeze_all:
+                    for cancel_action in group.cancel_actions:
+                        self._record_freeze_suppression(
+                            action=cancel_action,
+                            process_role=process_role,
+                            freeze_reason=freeze_reason,
+                            freeze_all=freeze_all,
+                        )
+                fr_cancels = tuple(
+                    cancel_action for cancel_action in group.cancel_actions if not freeze_all
+                )
+                self._record_freeze_suppression(
+                    action=group.submit_action,
+                    process_role=process_role,
+                    freeze_reason=freeze_reason,
+                    freeze_all=freeze_all,
+                )
+                if fr_cancels:
+                    fr_replace.append(
+                        ReplaceGroup(
+                            symbol=group.symbol,
+                            side=group.side,
+                            cancel_actions=fr_cancels,
+                            submit_action=group.submit_action,
+                            submit_count=group.submit_count,
+                            had_multiple_submits=group.had_multiple_submits,
+                            selected_submit_client_order_id=group.selected_submit_client_order_id,
+                        )
+                    )
+            replace_groups = fr_replace
 
         for action in regular_actions:
             if action.action_type == LifecycleActionType.CANCEL:
@@ -206,13 +285,15 @@ class ExecutionService:
                         },
                     },
                 )
-            if kill_switch_active:
+            if kill_switch_active or freeze_active:
                 c = 0
                 for cancel_action in group.cancel_actions:
                     c += self._execute_cancel_action(action=cancel_action, live_mode=live_mode)
                 s = sim = rej = rej_min = 0
             else:
-                s, c, sim, rej, rej_min = self._execute_replace_group(group=group, live_mode=live_mode)
+                s, c, sim, rej, rej_min = self._execute_replace_group(
+                    group=group, live_mode=live_mode
+                )
             submitted += s
             canceled += c
             simulated += sim
@@ -344,11 +425,14 @@ class ExecutionService:
         if current_state in {"SUBMIT_CONFIRMED", "FAILED"}:
             return 0, 0, 0, 0, 0
 
-        if self.state_store.stage4_has_unknown_orders():
+        freeze_state = self.state_store.stage4_get_freeze(
+            str(getattr(self.settings, "process_role", "trader"))
+        )
+        if freeze_state.active:
             self.state_store.update_replace_tx_state(
                 replace_tx_id=replace_tx_id,
                 state="BLOCKED_UNKNOWN",
-                last_error="unknown_order_freeze",
+                last_error="freeze_unknown_orders",
             )
             self.instrumentation.counter("replace_tx_blocked_unknown_total")
             emit_decision(
@@ -496,11 +580,18 @@ class ExecutionService:
     def _execute_submit_action(
         self, *, action: LifecycleAction, live_mode: bool
     ) -> tuple[int, int, int, int]:
-        if self.state_store.stage4_has_unknown_orders():
+        freeze_state = self.state_store.stage4_get_freeze(
+            str(getattr(self.settings, "process_role", "trader"))
+        )
+        if freeze_state.active:
             logger.warning(
                 "stage4_submit_blocked_due_to_unknown",
                 extra={
-                    "extra": {"unknown_orders": self.state_store.stage4_unknown_client_order_ids()}
+                    "extra": {
+                        "reason": "freeze_unknown_orders",
+                        "freeze_reason": freeze_state.reason,
+                        "freeze_since": freeze_state.since_ts,
+                    }
                 },
             )
             return 0, 0, 0, 0

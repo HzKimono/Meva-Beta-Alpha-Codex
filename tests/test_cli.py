@@ -2626,3 +2626,30 @@ def test_help_text_env_file_warns_dotenv_forbidden(monkeypatch, capsys) -> None:
 
     output = capsys.readouterr().out
     assert "Dotenv bootstrap is forbidden" in output
+
+def test_stage4_freeze_clear_requires_yes(tmp_path, capsys) -> None:
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(tmp_path / "freeze.db"))
+    rc = cli.run_stage4_freeze_clear(settings=settings, db_path=None, confirmed=False)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "--yes" in out
+
+
+def test_stage4_freeze_status_and_clear(tmp_path, capsys) -> None:
+    db_path = tmp_path / "freeze_status.db"
+    settings = Settings(DRY_RUN=True, KILL_SWITCH=False, STATE_DB_PATH=str(db_path))
+    store = cli.StateStore(str(db_path))
+    store.stage4_set_freeze("MONITOR", reason="unknown_open_orders", details={"count": 2})
+
+    assert cli.run_stage4_freeze_status(settings=settings, db_path=str(db_path)) == 0
+    status_payload = json.loads(capsys.readouterr().out.strip())
+    assert status_payload["active"] is True
+    assert status_payload["reason"] == "unknown_open_orders"
+
+    assert cli.run_stage4_freeze_clear(settings=settings, db_path=str(db_path), confirmed=True) == 0
+    clear_payload = json.loads(capsys.readouterr().out.strip())
+    assert clear_payload["cleared"] is True
+
+    assert cli.run_stage4_freeze_status(settings=settings, db_path=str(db_path)) == 0
+    post_payload = json.loads(capsys.readouterr().out.strip())
+    assert post_payload["active"] is False

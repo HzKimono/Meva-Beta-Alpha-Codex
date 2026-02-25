@@ -422,6 +422,22 @@ class Stage4CycleRunner:
                     },
                 )
 
+            freeze_state, freeze_triggered = self._evaluate_unknown_order_freeze(
+                settings=settings,
+                state_store=state_store,
+                process_role=process_role,
+                cycle_now=cycle_now,
+                exchange_open_orders=exchange_open_orders,
+                reconcile_result=reconcile_result,
+                db_open_orders=db_open_orders,
+                instrumentation=instrumentation,
+            )
+            instrumentation.gauge(
+                "stage4_freeze_active",
+                1 if freeze_state.active else 0,
+                attrs={"process_role": process_role},
+            )
+
             fills = []
             fills_fetched = 0
             fills_failures = 0
@@ -955,6 +971,13 @@ class Stage4CycleRunner:
                 kill_switch_source=kill_switch_source,
                 instrumentation=instrumentation,
             )
+            prefiltered_actions, freeze_suppressed_counts = self._suppress_actions_for_unknown_freeze(
+                actions=prefiltered_actions,
+                freeze_active=freeze_state.active,
+                freeze_all=bool(settings.kill_switch_freeze_all),
+                process_role=process_role,
+                instrumentation=instrumentation,
+            )
             execution_report = execution_service.execute_with_report(prefiltered_actions)
             self._assert_execution_invariant(execution_report)
 
@@ -1181,6 +1204,12 @@ class Stage4CycleRunner:
                 "open_order_failures": open_order_failures,
                 "fills_failures": fills_failures,
                 "mark_price_failures": len(mark_price_errors),
+                "freeze_active": int(freeze_state.active),
+                "freeze_triggered": int(freeze_triggered),
+                "freeze_suppressed_submit": (
+                    freeze_suppressed_counts["submit"] + freeze_suppressed_counts["replace_submit"]
+                ),
+                "freeze_suppressed_cancel": freeze_suppressed_counts["cancel"],
             }
             counts.update(
                 {f"alloc_{key}": value for key, value in dict(decision_report.counters).items()}
@@ -1265,6 +1294,11 @@ class Stage4CycleRunner:
                             + killswitch_suppressed_counts["replace_submit"]
                         ),
                         "suppressed_by_killswitch_cancel": killswitch_suppressed_counts["cancel"],
+                        "suppressed_by_unknown_freeze_submit": (
+                            freeze_suppressed_counts["submit"]
+                            + freeze_suppressed_counts["replace_submit"]
+                        ),
+                        "suppressed_by_unknown_freeze_cancel": freeze_suppressed_counts["cancel"],
                     },
                     reconcile_result={
                         "api_429_backoff_total": int((api_snapshot or {}).get("api_429_backoff_total", 0)),
@@ -1907,6 +1941,158 @@ class Stage4CycleRunner:
                 },
             )
         return allowed, counters
+
+    def _suppress_actions_for_unknown_freeze(
+        self,
+        *,
+        actions: list[LifecycleAction],
+        freeze_active: bool,
+        freeze_all: bool,
+        process_role: str,
+        instrumentation: object,
+    ) -> tuple[list[LifecycleAction], dict[str, int]]:
+        counters = {"submit": 0, "replace_submit": 0, "cancel": 0}
+        if not freeze_active:
+            return actions, counters
+
+        allowed: list[LifecycleAction] = []
+        for action in actions:
+            if action.action_type == LifecycleActionType.CANCEL and not freeze_all:
+                allowed.append(action)
+                continue
+            action_type = self._killswitch_action_label(action.action_type)
+            counters[action_type] += 1
+            instrumentation.counter(
+                "stage4_freeze_suppressed_total",
+                1,
+                attrs={"action_type": action_type, "process_role": process_role},
+            )
+            logger.warning(
+                "stage4_unknown_freeze_suppress",
+                extra={
+                    "extra": {
+                        "process_role": process_role,
+                        "action_type": action_type,
+                        "client_order_id": action.client_order_id,
+                        "symbol": action.symbol,
+                        "freeze_all": freeze_all,
+                    }
+                },
+            )
+        return allowed, counters
+
+    def _evaluate_unknown_order_freeze(
+        self,
+        *,
+        settings: Settings,
+        state_store: StateStore,
+        process_role: str,
+        cycle_now: datetime,
+        exchange_open_orders: list[Order],
+        reconcile_result: object,
+        db_open_orders: list[Order],
+        instrumentation: object,
+    ) -> tuple[object, bool]:
+        existing = state_store.stage4_get_freeze(process_role)
+        if not bool(getattr(settings, "stage4_unknown_freeze_enabled", True)):
+            return existing, False
+
+        missing_client_id = len(getattr(reconcile_result, "external_missing_client_id", []))
+        unknown_open_orders = len(getattr(reconcile_result, "import_external", []))
+        db_exchange_mismatch = len(getattr(reconcile_result, "mark_unknown_closed", []))
+        threshold = max(1, int(getattr(settings, "stage4_unknown_freeze_threshold", 1)))
+        persist_cycles = max(1, int(getattr(settings, "stage4_unknown_freeze_persist_cycles", 3)))
+        persist_seconds = max(0, int(getattr(settings, "stage4_unknown_freeze_persist_seconds", 30)))
+
+        details = {
+            "exchange_open_orders": len(exchange_open_orders),
+            "db_open_orders": len(db_open_orders),
+            "missing_client_id_count": missing_client_id,
+            "unknown_open_orders_count": unknown_open_orders,
+            "db_exchange_mismatch_count": db_exchange_mismatch,
+            "sample_missing_client_order_ids": [
+                (order.exchange_order_id or "missing") for order in getattr(reconcile_result, "external_missing_client_id", [])[:5]
+            ],
+            "sample_external_client_order_ids": [
+                order.client_order_id for order in getattr(reconcile_result, "import_external", [])[:5]
+            ],
+            "sample_mismatch_client_order_ids": list(getattr(reconcile_result, "mark_unknown_closed", [])[:5]),
+            "persist_cycles": 1,
+            "last_cycle_ts": cycle_now.isoformat(),
+        }
+        reason = None
+        trigger = False
+        prev_details = existing.details if existing.active else {}
+        prev_cycles = int(prev_details.get("persist_cycles", 0)) if isinstance(prev_details, dict) else 0
+
+        if missing_client_id > 0:
+            reason = "external_missing_client_id"
+            trigger = True
+        elif unknown_open_orders >= threshold:
+            reason = "unknown_open_orders"
+            trigger = True
+        else:
+            mismatch_cycles = prev_cycles + 1 if db_exchange_mismatch > 0 else 0
+            details["persist_cycles"] = mismatch_cycles
+            if db_exchange_mismatch > 0 and mismatch_cycles >= persist_cycles:
+                reason = "db_exchange_mismatch"
+                trigger = True
+            elif db_exchange_mismatch > 0 and existing.active and existing.since_ts:
+                since = datetime.fromisoformat(existing.since_ts)
+                if since.tzinfo is None:
+                    since = since.replace(tzinfo=UTC)
+                if int((cycle_now - since.astimezone(UTC)).total_seconds()) >= persist_seconds:
+                    reason = "db_exchange_mismatch"
+                    trigger = True
+
+        if not trigger:
+            if existing.active:
+                heartbeat_details = dict(existing.details) if isinstance(existing.details, dict) else {}
+                heartbeat_details["last_cycle_ts"] = cycle_now.isoformat()
+                heartbeat_details["exchange_open_orders"] = len(exchange_open_orders)
+                heartbeat_details["db_open_orders"] = len(db_open_orders)
+                refreshed = state_store.stage4_set_freeze(
+                    process_role,
+                    reason=str(existing.reason or "unknown_open_orders"),
+                    details=heartbeat_details,
+                )
+                logger.warning(
+                    "stage4_unknown_freeze",
+                    extra={
+                        "extra": {
+                            "process_role": process_role,
+                            "reason": refreshed.reason,
+                            "since": refreshed.since_ts,
+                            "details": refreshed.details,
+                        }
+                    },
+                )
+                return refreshed, False
+            return existing, False
+
+        details["persist_cycles"] = details.get("persist_cycles", prev_cycles + 1)
+        freeze_state = state_store.stage4_set_freeze(
+            process_role,
+            reason=reason or "unknown_open_orders",
+            details=details,
+        )
+        instrumentation.counter(
+            "stage4_freeze_trigger_total",
+            1,
+            attrs={"reason": freeze_state.reason or "unknown", "process_role": process_role},
+        )
+        logger.warning(
+            "stage4_unknown_freeze",
+            extra={
+                "extra": {
+                    "process_role": process_role,
+                    "reason": freeze_state.reason,
+                    "since": freeze_state.since_ts,
+                    "details": freeze_state.details,
+                }
+            },
+        )
+        return freeze_state, True
 
     def _assert_execution_invariant(self, report: object) -> None:
         for field in (

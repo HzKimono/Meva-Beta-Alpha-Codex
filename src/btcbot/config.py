@@ -91,6 +91,22 @@ class Settings(BaseSettings):
     )
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     kill_switch_freeze_all: bool = Field(default=False, alias="KILL_SWITCH_FREEZE_ALL")
+    stage4_unknown_freeze_enabled: bool = Field(
+        default=True,
+        alias="STAGE4_UNKNOWN_FREEZE_ENABLED",
+    )
+    stage4_unknown_freeze_threshold: int = Field(
+        default=1,
+        alias="STAGE4_UNKNOWN_FREEZE_THRESHOLD",
+    )
+    stage4_unknown_freeze_persist_cycles: int = Field(
+        default=3,
+        alias="STAGE4_UNKNOWN_FREEZE_PERSIST_CYCLES",
+    )
+    stage4_unknown_freeze_persist_seconds: int = Field(
+        default=30,
+        alias="STAGE4_UNKNOWN_FREEZE_PERSIST_SECONDS",
+    )
     kill_switch_effective: bool | None = Field(default=None)
     kill_switch_source: str = Field(default="settings")
     dry_run: bool = Field(default=True, alias="DRY_RUN")

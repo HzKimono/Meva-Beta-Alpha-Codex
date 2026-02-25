@@ -83,6 +83,26 @@ class FakeExchange:
         self.calls.append("close")
 
 
+class FreezeTriggerExchange(FakeExchange):
+    def list_open_orders(self, symbol: str):
+        self.calls.append(f"open_orders:{symbol}")
+        return [
+            Order(
+                symbol=symbol,
+                side="buy",
+                type="limit",
+                price=Decimal("100"),
+                qty=Decimal("0.1"),
+                status="open",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+                exchange_order_id="ex-missing-client",
+                client_order_id=None,
+                mode="live",
+            )
+        ]
+
+
 
 
 def test_runner_writes_stage4_run_metrics(monkeypatch, tmp_path) -> None:
@@ -972,3 +992,62 @@ def test_stage4_cycle_applies_risk_policy_filters_actions_before_execution(
 
     assert runner.run_one_cycle(settings) == 0
     assert captured["executed"] == ["cid-accepted"]
+
+
+def test_runner_unknown_freeze_triggers_and_persists(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FreezeTriggerExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    db_path = tmp_path / "runner_stage4_freeze.db"
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE4_UNKNOWN_FREEZE_ENABLED=True,
+        PROCESS_ROLE="MONITOR",
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+
+    store = StateStore(str(db_path))
+    freeze = store.stage4_get_freeze("MONITOR")
+    assert freeze.active is True
+    assert freeze.reason == "external_missing_client_id"
+
+
+def test_runner_unknown_freeze_suppresses_submits(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    db_path = tmp_path / "runner_stage4_freeze_suppress.db"
+    store = StateStore(str(db_path))
+    store.stage4_set_freeze("MONITOR", reason="unknown_open_orders", details={"count": 1})
+
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS="BTC_TRY",
+        STAGE4_UNKNOWN_FREEZE_ENABLED=True,
+        PROCESS_ROLE="MONITOR",
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT counts_json FROM cycle_audit ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    counts = json.loads(str(row["counts_json"]))
+    assert counts["freeze_active"] == 1
+    assert counts["freeze_suppressed_submit"] >= 1
