@@ -7,9 +7,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from btcbot.security.redaction import REDACTED
-
 from btcbot.observability import get_instrumentation
+from btcbot.security.redaction import REDACTED
 
 logger = logging.getLogger(__name__)
 

@@ -7,8 +7,8 @@ from pathlib import Path
 from time import perf_counter
 
 from btcbot.config import Settings
-from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.observability import get_instrumentation
+from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.replay.validate import DatasetValidationReport, validate_replay_dataset
 from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage4

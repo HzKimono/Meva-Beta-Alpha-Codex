@@ -58,6 +58,15 @@ class Txn:
     last_error: str | None = None
 
 
+@dataclass(frozen=True)
+class FreezeState:
+    active: bool
+    reason: str | None
+    since_ts: datetime | None
+    last_seen_ts: datetime | None
+    details: dict[str, object] | None
+
+
 class FakeStateStore:
     def __init__(self) -> None:
         now = datetime.now(UTC)
@@ -83,6 +92,16 @@ class FakeStateStore:
 
     def stage4_unknown_client_order_ids(self) -> list[str]:
         return []
+
+    def stage4_get_freeze(self, process_role: str) -> FreezeState:
+        del process_role
+        return FreezeState(
+            active=False,
+            reason=None,
+            since_ts=None,
+            last_seen_ts=None,
+            details=None,
+        )
 
     def stage4_submit_dedupe_status(self, **kwargs):
         del kwargs

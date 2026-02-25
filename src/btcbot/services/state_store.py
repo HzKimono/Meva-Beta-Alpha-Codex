@@ -27,8 +27,8 @@ from btcbot.domain.risk_mode_codec import dump_risk_mode, parse_risk_mode
 from btcbot.domain.stage4 import Fill as Stage4Fill
 from btcbot.domain.stage4 import PnLSnapshot
 from btcbot.domain.stage4 import Position as Stage4Position
-from btcbot.persistence.uow import UnitOfWorkFactory
 from btcbot.persistence.sqlite.sqlite_connection import create_sqlite_connection
+from btcbot.persistence.uow import UnitOfWorkFactory
 
 if TYPE_CHECKING:
     from btcbot.domain.anomalies import AnomalyEvent

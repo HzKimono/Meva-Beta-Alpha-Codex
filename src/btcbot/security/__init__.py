@@ -14,10 +14,10 @@ from btcbot.security.secrets import (
     EnvSecretProvider,
     SecretValidationResult,
     build_default_provider,
+    enforce_secret_rotation_hygiene,
     inject_runtime_secrets,
     is_trading_blocked_by_policy,
     log_secret_validation,
-    enforce_secret_rotation_hygiene,
     set_trading_blocked_by_policy,
     validate_secret_controls,
 )

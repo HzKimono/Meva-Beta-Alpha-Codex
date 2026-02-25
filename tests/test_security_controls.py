@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
-import logging
 import pytest
 
 from btcbot.config import Settings

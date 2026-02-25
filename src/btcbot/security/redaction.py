@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import parse_qsl, urlencode
 
 REDACTED = "***REDACTED***"
 _TEXT_REDACTED = "[REDACTED]"
