@@ -25,7 +25,7 @@ from btcbot.domain.models import PairInfo, normalize_symbol
 from btcbot.logging_context import with_logging_context
 from btcbot.logging_utils import setup_logging
 from btcbot.obs.logging import set_base_context
-from btcbot.obs.process_role import ProcessRole
+from btcbot.obs.process_role import ProcessRole, coerce_process_role
 from btcbot.observability import (
     configure_instrumentation,
     flush_instrumentation,
@@ -91,6 +91,18 @@ logger = logging.getLogger(__name__)
 LIVE_TRADING_NOT_ARMED_MESSAGE = (
     "Live trading is not armed; set LIVE_TRADING=true and LIVE_TRADING_ACK=I_UNDERSTAND"
 )
+
+
+def _canonical_process_role(settings: Settings) -> str:
+    return coerce_process_role(getattr(settings, "process_role", None)).value
+
+
+def _should_stop_loop_if_killed(*, state_store: StateStore, settings: Settings) -> bool:
+    process_role = _canonical_process_role(settings)
+    if process_role != ProcessRole.LIVE.value:
+        return False
+    enabled, _reason, _until = state_store.get_kill_switch(process_role)
+    return bool(enabled)
 
 
 def main() -> int:
@@ -1022,14 +1034,8 @@ def run_stage3_runtime(
                             },
                         )
                 next_heartbeat_at = time.monotonic() + heartbeat_interval_seconds
-            process_role = str(getattr(settings, "process_role", "monitor"))
-            is_live_role = process_role.lower() == "live"
-
             def _stop_loop_if_killed() -> bool:
-                if not is_live_role:
-                    return False
-                enabled, _reason, _until = runtime_state_store.get_kill_switch(process_role)
-                return bool(enabled)
+                return _should_stop_loop_if_killed(state_store=runtime_state_store, settings=settings)
 
             return run_with_optional_loop(
                 command="run",
@@ -1955,7 +1961,7 @@ def run_cycle(
 def run_stage4_freeze_status(*, settings: Settings, db_path: str | None = None) -> int:
     resolved_db = normalize_db_path(db_path or settings.state_db_path)
     store = StateStore(str(resolved_db))
-    process_role = str(getattr(settings, "process_role", ProcessRole.MONITOR.value)).upper()
+    process_role = _canonical_process_role(settings)
     freeze = store.stage4_get_freeze(process_role)
     payload = {
         "process_role": process_role,
@@ -1980,7 +1986,7 @@ def run_stage4_freeze_clear(
         return 2
     resolved_db = normalize_db_path(db_path or settings.state_db_path)
     store = StateStore(str(resolved_db))
-    process_role = str(getattr(settings, "process_role", ProcessRole.MONITOR.value)).upper()
+    process_role = _canonical_process_role(settings)
     previous = store.stage4_get_freeze(process_role)
     store.stage4_clear_freeze(process_role)
     duration_seconds = None
