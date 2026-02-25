@@ -365,6 +365,63 @@ class Stage4CycleRunner:
             for client_order_id in reconcile_result.mark_unknown_closed:
                 state_store.mark_stage4_unknown_closed(client_order_id)
 
+            for symbol in active_symbols:
+                normalized = self.norm(symbol)
+                blocked = normalized in failed_symbols
+                instrumentation.counter(
+                    "stage4_reconcile_unknown_closed_total",
+                    sum(
+                        1
+                        for client_order_id in reconcile_result.mark_unknown_closed
+                        for order in db_open_orders
+                        if order.client_order_id == client_order_id
+                        and self.norm(order.symbol) == normalized
+                    ),
+                    attrs={"symbol": normalized},
+                )
+                instrumentation.counter(
+                    "stage4_reconcile_external_import_total",
+                    sum(
+                        1
+                        for order in reconcile_result.import_external
+                        if self.norm(order.symbol) == normalized
+                    ),
+                    attrs={"symbol": normalized},
+                )
+                logger.info(
+                    "stage4_reconcile_summary",
+                    extra={
+                        "extra": {
+                            "symbol": normalized,
+                            "mark_unknown_closed": sum(
+                                1
+                                for client_order_id in reconcile_result.mark_unknown_closed
+                                for order in db_open_orders
+                                if order.client_order_id == client_order_id
+                                and self.norm(order.symbol) == normalized
+                            ),
+                            "import_external": sum(
+                                1
+                                for order in reconcile_result.import_external
+                                if self.norm(order.symbol) == normalized
+                            ),
+                            "enrich_exchange_ids": sum(
+                                1
+                                for client_order_id, _ in reconcile_result.enrich_exchange_ids
+                                for order in db_open_orders
+                                if order.client_order_id == client_order_id
+                                and self.norm(order.symbol) == normalized
+                            ),
+                            "external_missing_client_id": sum(
+                                1
+                                for order in reconcile_result.external_missing_client_id
+                                if self.norm(order.symbol) == normalized
+                            ),
+                            "blocked": blocked,
+                        }
+                    },
+                )
+
             fills = []
             fills_fetched = 0
             fills_failures = 0
@@ -390,6 +447,8 @@ class Stage4CycleRunner:
                     fills.extend(fetched.fills)
                     fills_fetched += len(fetched.fills)
                     cursor_diag[normalized]["ingested_count"] = len(fetched.fills)
+                    cursor_diag[normalized]["fills_seen"] = fetched.fills_seen
+                    cursor_diag[normalized]["prefilter_deduped"] = fetched.fills_deduped
                     cursor_diag[normalized]["last_seen_trade_id"] = getattr(
                         fetched, "last_seen_fill_id", None
                     )
@@ -435,16 +494,44 @@ class Stage4CycleRunner:
             }
             for symbol, diag in cursor_diag.items():
                 diag["cursor_after"] = cursor_after.get(symbol)
+                fills_seen = int(diag.get("fills_seen", 0) or 0)
                 ingested_count = int(diag.get("ingested_count", 0) or 0)
-                deduped_count = 0
-                if (
-                    ingested_count > 0
-                    and ledger_ingest.events_inserted == 0
-                    and ledger_ingest.events_ignored >= ingested_count
-                ):
-                    deduped_count = ingested_count
+                prefilter_deduped = int(diag.get("prefilter_deduped", 0) or 0)
+                apply_stats = accounting_service.last_apply_stats_by_symbol.get(symbol, {})
+                state_deduped = int(apply_stats.get("deduped", 0) or 0)
+                new_count = int(apply_stats.get("new", 0) or 0)
+                deduped_count = prefilter_deduped + state_deduped
                 diag["deduped_count"] = deduped_count
-                diag["persisted_count"] = max(0, ingested_count - deduped_count)
+                diag["persisted_count"] = new_count
+
+                instrumentation.counter(
+                    "stage4_fills_seen_total",
+                    fills_seen,
+                    attrs={"symbol": symbol},
+                )
+                instrumentation.counter(
+                    "stage4_fills_new_total",
+                    new_count,
+                    attrs={"symbol": symbol},
+                )
+                instrumentation.counter(
+                    "stage4_fills_deduped_total",
+                    deduped_count,
+                    attrs={"symbol": symbol},
+                )
+                logger.info(
+                    "stage4_fill_ingest",
+                    extra={
+                        "extra": {
+                            "symbol": symbol,
+                            "fills_seen": fills_seen,
+                            "new": new_count,
+                            "deduped": deduped_count,
+                            "cursor_before": diag.get("cursor_before"),
+                            "cursor_after": diag.get("cursor_after"),
+                        }
+                    },
+                )
             logger.info(
                 "fills_cursor_diagnostics",
                 extra={"extra": {"cycle_id": cycle_id, "cursor": cursor_diag}},
@@ -468,6 +555,12 @@ class Stage4CycleRunner:
                 cash_try=try_cash,
                 price_for_fee_conversion=fee_converter,
             )
+            for missing_currency in pnl_report.fee_conversion_missing_currencies:
+                instrumentation.counter(
+                    "stage4_fee_conversion_missing_total",
+                    1,
+                    attrs={"currency": missing_currency},
+                )
             ledger_checkpoint = ledger_service.checkpoint()
             try:
                 risk_budget_service.apply_self_financing_checkpoint(

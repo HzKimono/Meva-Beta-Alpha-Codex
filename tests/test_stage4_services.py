@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -11,6 +12,7 @@ from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import OrderSide, PairInfo
 from btcbot.domain.stage4 import (
     ExchangeRules,
+    Fill,
     LifecycleAction,
     LifecycleActionType,
     Order,
@@ -28,6 +30,7 @@ from btcbot.services.execution_service_stage4 import (
 from btcbot.services.order_lifecycle_service import OrderLifecycleService
 from btcbot.services.reconcile_service import ReconcileService
 from btcbot.services.risk_policy import RiskDecision, RiskPolicy
+from btcbot.services.ledger_service import LedgerService
 from btcbot.services.state_store import StateStore
 
 
@@ -722,6 +725,211 @@ def test_accounting_fetch_new_fills_applies_lookback_even_with_cursor(store: Sta
     svc.fetch_new_fills("BTC_TRY")
 
     assert exchange.last_since_ms == 1800000
+
+
+def test_stage4_fill_import_idempotency_with_lookback(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    ts = now_utc()
+    exchange.fills = [
+        TradeFill(
+            fill_id="fill-A",
+            order_id="ord-A",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            fee=Decimal("1"),
+            fee_currency="TRY",
+            ts=ts,
+        ),
+        TradeFill(
+            fill_id="fill-B",
+            order_id="ord-B",
+            symbol="BTC_TRY",
+            side=OrderSide.BUY,
+            price=Decimal("110"),
+            qty=Decimal("1"),
+            fee=Decimal("1"),
+            fee_currency="TRY",
+            ts=ts + timedelta(milliseconds=1),
+        ),
+    ]
+    accounting = AccountingService(exchange=exchange, state_store=store, lookback_minutes=30)
+    ledger = LedgerService(state_store=store, logger=logging.getLogger(__name__))
+
+    first = accounting.fetch_new_fills("BTC_TRY")
+    assert first.fills_seen == 2
+    with store.transaction():
+        ledger.ingest_exchange_updates(first.fills)
+        accounting.apply_fills(
+            first.fills,
+            mark_prices={"BTCTRY": Decimal("110")},
+            try_cash=Decimal("1000"),
+        )
+        assert first.cursor_after is not None
+        store.set_cursor("fills_cursor:BTCTRY", first.cursor_after)
+
+    second = accounting.fetch_new_fills("BTC_TRY")
+    # lookback intentionally re-sees already imported fills
+    assert second.fills_seen == 2
+    with store.transaction():
+        second_ingest = ledger.ingest_exchange_updates(second.fills)
+        accounting.apply_fills(
+            second.fills,
+            mark_prices={"BTCTRY": Decimal("110")},
+            try_cash=Decimal("1000"),
+        )
+        assert second.cursor_after is not None
+        store.set_cursor("fills_cursor:BTCTRY", second.cursor_after)
+
+    with store._connect() as conn:
+        fill_events = conn.execute(
+            "SELECT COUNT(*) AS c FROM ledger_events WHERE type='FILL'"
+        ).fetchone()["c"]
+        fee_events = conn.execute(
+            "SELECT COUNT(*) AS c FROM ledger_events WHERE type='FEE'"
+        ).fetchone()["c"]
+        applied_rows = conn.execute("SELECT COUNT(*) AS c FROM applied_fills").fetchone()["c"]
+    assert fill_events == 2
+    assert fee_events == 2
+    assert applied_rows == 2
+    assert second_ingest.events_ignored >= 2
+
+
+def test_reconcile_service_resolve_covers_unknown_external_and_enrichment() -> None:
+    now = now_utc()
+    db_missing_on_exchange = Order(
+        symbol="BTC_TRY",
+        side="buy",
+        type="limit",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        status="unknown",
+        created_at=now,
+        updated_at=now,
+        exchange_order_id="ex-missing",
+        client_order_id="cid-missing",
+        mode="live",
+    )
+    db_missing_exchange_id = Order(
+        symbol="BTC_TRY",
+        side="buy",
+        type="limit",
+        price=Decimal("101"),
+        qty=Decimal("1"),
+        status="open",
+        created_at=now,
+        updated_at=now,
+        exchange_order_id=None,
+        client_order_id="cid-enrich",
+        mode="live",
+    )
+    exchange_known = Order(
+        symbol="BTC_TRY",
+        side="buy",
+        type="limit",
+        price=Decimal("101"),
+        qty=Decimal("1"),
+        status="open",
+        created_at=now,
+        updated_at=now,
+        exchange_order_id="ex-enrich",
+        client_order_id="cid-enrich",
+        mode="live",
+    )
+    exchange_external = Order(
+        symbol="BTC_TRY",
+        side="sell",
+        type="limit",
+        price=Decimal("120"),
+        qty=Decimal("0.5"),
+        status="open",
+        created_at=now,
+        updated_at=now,
+        exchange_order_id="ex-external",
+        client_order_id="cid-external",
+        mode="live",
+    )
+
+    result = ReconcileService().resolve(
+        exchange_open_orders=[exchange_known, exchange_external],
+        db_open_orders=[db_missing_on_exchange, db_missing_exchange_id],
+    )
+
+    assert result.mark_unknown_closed == ["cid-missing"]
+    assert result.enrich_exchange_ids == [("cid-enrich", "ex-enrich")]
+    assert len(result.import_external) == 1
+    assert result.import_external[0].client_order_id == "cid-external"
+    assert result.import_external[0].mode == "external"
+
+
+def test_ledger_report_fee_conversion_missing_is_fail_closed_signal(store: StateStore) -> None:
+    ts = now_utc()
+    fill = Fill(
+        fill_id="fill-usdt",
+        order_id="order-usdt",
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        fee=Decimal("2"),
+        fee_asset="USDT",
+        ts=ts,
+    )
+    ledger = LedgerService(state_store=store, logger=logging.getLogger(__name__))
+    with store.transaction():
+        ledger.ingest_exchange_updates([fill])
+
+    report = ledger.report(mark_prices={"BTCTRY": Decimal("100")}, cash_try=Decimal("1000"))
+    assert report.fees_total_try == Decimal("0")
+    assert report.fee_conversion_missing_currencies == ("USDT",)
+
+
+def test_accounting_snapshot_and_fee_total_try_after_buy_sell(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    accounting = AccountingService(exchange=exchange, state_store=store)
+    ledger = LedgerService(state_store=store, logger=logging.getLogger(__name__))
+    ts = now_utc()
+
+    fills = [
+        Fill(
+            fill_id="buy-1",
+            order_id="ord-buy",
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("100"),
+            qty=Decimal("1"),
+            fee=Decimal("1"),
+            fee_asset="TRY",
+            ts=ts,
+        ),
+        Fill(
+            fill_id="sell-1",
+            order_id="ord-sell",
+            symbol="BTC_TRY",
+            side="sell",
+            price=Decimal("120"),
+            qty=Decimal("1"),
+            fee=Decimal("1"),
+            fee_asset="TRY",
+            ts=ts + timedelta(seconds=1),
+        ),
+    ]
+
+    with store.transaction():
+        ledger.ingest_exchange_updates(fills)
+        snapshot = accounting.apply_fills(
+            fills,
+            mark_prices={"BTCTRY": Decimal("120")},
+            try_cash=Decimal("1000"),
+        )
+
+    # buy avg_cost=101 due to fee, sell realized=(120-101)-1=18
+    assert snapshot.realized_total_try == Decimal("18")
+    assert snapshot.realized_today_try == Decimal("18")
+
+    report = ledger.report(mark_prices={"BTCTRY": Decimal("120")}, cash_try=Decimal("1000"))
+    assert report.fees_total_try == Decimal("2")
 
 
 def test_cancel_does_not_hit_exchange_when_live_not_armed(store: StateStore) -> None:

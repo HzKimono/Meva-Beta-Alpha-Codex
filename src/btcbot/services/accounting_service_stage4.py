@@ -17,6 +17,8 @@ class AccountingIntegrityError(RuntimeError):
 @dataclass(frozen=True)
 class FetchFillsResult:
     fills: list[Fill]
+    fills_seen: int
+    fills_deduped: int
     cursor_after: str | None
     last_seen_fill_id: str | None
     last_seen_ts_ms: int | None
@@ -34,8 +36,16 @@ class AccountingService:
         self.state_store = state_store
         self.lookback_minutes = lookback_minutes
         self.last_applied_fills_count = 0
+        self.last_apply_stats_by_symbol: dict[str, dict[str, int]] = {}
 
     def fetch_new_fills(self, symbol: str) -> FetchFillsResult:
+        """Fetch fills with a lookback while preserving idempotency invariants.
+
+        Invariants:
+        - fill_id is the stable dedupe key and can be applied at most once.
+        - cursor_after is monotonic (never below prior cursor) and only advances to max seen ts.
+        - fee events are keyed by the same fill_id downstream (ledger_service event_id = fee:{fill_id}).
+        """
         cursor_key = f"fills_cursor:{normalize_symbol(symbol)}"
         since_ms: int | None = None
         lookback_ms = self.lookback_minutes * 60 * 1000
@@ -51,10 +61,14 @@ class AccountingService:
         incoming = [fill for fill in incoming if fill.ts >= since_dt]
 
         fills: list[Fill] = []
+        seen_fill_ids: set[str] = set()
+        fills_seen = 0
+        fills_deduped = 0
         max_ts_ms = cursor_floor_ms
         last_seen_fill_id: str | None = None
         last_seen_ts_ms: int | None = None
-        for trade_fill in incoming:
+        for trade_fill in sorted(incoming, key=lambda item: (item.ts, str(item.fill_id or ""))):
+            fills_seen += 1
             fill_id = (trade_fill.fill_id or "").strip()
             if not fill_id:
                 ts_ms = int(trade_fill.ts.timestamp() * 1000)
@@ -62,6 +76,10 @@ class AccountingService:
                     f"{trade_fill.order_id}:{ts_ms}:{trade_fill.price}:"
                     f"{trade_fill.qty}:{trade_fill.side.value}"
                 )
+            if fill_id in seen_fill_ids:
+                fills_deduped += 1
+                continue
+            seen_fill_ids.add(fill_id)
             fill = Fill(
                 fill_id=fill_id,
                 order_id=trade_fill.order_id,
@@ -82,6 +100,8 @@ class AccountingService:
 
         return FetchFillsResult(
             fills=fills,
+            fills_seen=fills_seen,
+            fills_deduped=fills_deduped,
             cursor_after=(str(max_ts_ms) if max_ts_ms > 0 else None),
             last_seen_fill_id=last_seen_fill_id,
             last_seen_ts_ms=last_seen_ts_ms,
@@ -96,9 +116,14 @@ class AccountingService:
     ) -> PnLSnapshot:
         fee_notes: list[str] = []
         applied_fills_count = 0
+        stats_by_symbol: dict[str, dict[str, int]] = {}
         for fill in fills:
+            normalized_symbol = normalize_symbol(fill.symbol)
+            stats = stats_by_symbol.setdefault(normalized_symbol, {"new": 0, "deduped": 0})
             if not self.state_store.mark_fill_applied(fill.fill_id):
+                stats["deduped"] += 1
                 continue
+            stats["new"] += 1
             applied_fills_count += 1
             self.state_store.save_stage4_fill(fill)
             position = self.state_store.get_stage4_position(fill.symbol) or Position(
@@ -174,4 +199,5 @@ class AccountingService:
                 decisions=fee_notes,
             )
         self.last_applied_fills_count = applied_fills_count
+        self.last_apply_stats_by_symbol = stats_by_symbol
         return snapshot
