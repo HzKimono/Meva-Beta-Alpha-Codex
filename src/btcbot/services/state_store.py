@@ -222,6 +222,22 @@ def _serialize_decimal_for_db(value: Decimal, *, field_name: str) -> str:
     return format(value, "f")
 
 
+def _canonicalize_role(role: str) -> str:
+    return str(role).strip().upper()
+
+
+def _role_key_candidates(prefix: str, role: str) -> list[str]:
+    raw_role = str(role)
+    stripped_role = raw_role.strip()
+    canonical_role = _canonicalize_role(role)
+    candidates: list[str] = []
+    for candidate_role in (canonical_role, stripped_role.lower(), stripped_role):
+        key = f"{prefix}:{candidate_role}"
+        if key not in candidates:
+            candidates.append(key)
+    return candidates
+
+
 class StateStore:
     """SQLite-backed state with per-process instance registration and optional strict conflict fail-fast."""
 
@@ -2754,7 +2770,7 @@ class StateStore:
             {"enabled": bool(enabled), "reason": reason, "until_ts": until_ts},
             sort_keys=True,
         )
-        key = f"kill_switch:{role}"
+        key = f"kill_switch:{_canonicalize_role(role)}"
         with self.transaction() as conn:
             conn.execute(
                 """
@@ -2769,14 +2785,34 @@ class StateStore:
             )
 
     def get_kill_switch(self, role: str) -> tuple[bool, str | None, str | None]:
-        key = f"kill_switch:{role}"
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT int_value, text_value FROM op_state WHERE key = ?",
-                (key,),
-            ).fetchone()
-        if row is None:
-            return False, None, None
+        keys = _role_key_candidates("kill_switch", role)
+        canonical_key = keys[0]
+        with self.transaction() as conn:
+            row: sqlite3.Row | None = None
+            source_key: str | None = None
+            for key in keys:
+                row = conn.execute(
+                    "SELECT int_value, text_value FROM op_state WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                if row is not None:
+                    source_key = key
+                    break
+            if row is None:
+                return False, None, None
+            if source_key != canonical_key:
+                now = datetime.now(UTC).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO op_state(key, int_value, text_value, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        int_value=excluded.int_value,
+                        text_value=excluded.text_value,
+                        updated_at=excluded.updated_at
+                    """,
+                    (canonical_key, row["int_value"], row["text_value"], now),
+                )
         enabled = bool(row["int_value"])
         reason = None
         until_ts = None
@@ -2799,26 +2835,18 @@ class StateStore:
         details: Mapping[str, object] | None = None,
     ) -> Stage4FreezeState:
         now = datetime.now(UTC).isoformat()
-        key = f"stage4_freeze:{process_role}"
+        canonical_role = _canonicalize_role(process_role)
+        key = f"stage4_freeze:{canonical_role}"
+        existing = self.stage4_get_freeze(canonical_role)
+        since_ts = str(existing.since_ts or now)
+        payload = {
+            "active": True,
+            "reason": reason,
+            "since_ts": since_ts,
+            "last_seen_ts": now,
+            "details": dict(details or {}),
+        }
         with self.transaction() as conn:
-            row = conn.execute(
-                "SELECT text_value FROM op_state WHERE key = ?",
-                (key,),
-            ).fetchone()
-            since_ts = now
-            if row is not None and row["text_value"]:
-                try:
-                    payload = json.loads(str(row["text_value"]))
-                except json.JSONDecodeError:
-                    payload = {}
-                since_ts = str(payload.get("since_ts") or now)
-            payload = {
-                "active": True,
-                "reason": reason,
-                "since_ts": since_ts,
-                "last_seen_ts": now,
-                "details": dict(details or {}),
-            }
             conn.execute(
                 """
                 INSERT INTO op_state(key, int_value, text_value, updated_at)
@@ -2840,7 +2868,8 @@ class StateStore:
 
     def stage4_clear_freeze(self, process_role: str) -> Stage4FreezeState:
         now = datetime.now(UTC).isoformat()
-        key = f"stage4_freeze:{process_role}"
+        keys = _role_key_candidates("stage4_freeze", process_role)
+        canonical_key = keys[0]
         previous = self.stage4_get_freeze(process_role)
         payload = {
             "active": False,
@@ -2849,6 +2878,7 @@ class StateStore:
             "last_seen_ts": now,
             "details": {},
         }
+        payload_json = json.dumps(payload, sort_keys=True)
         with self.transaction() as conn:
             conn.execute(
                 """
@@ -2859,8 +2889,17 @@ class StateStore:
                     text_value=excluded.text_value,
                     updated_at=excluded.updated_at
                 """,
-                (key, json.dumps(payload, sort_keys=True), now),
+                (canonical_key, payload_json, now),
             )
+            for legacy_key in keys[1:]:
+                conn.execute(
+                    """
+                    UPDATE op_state
+                    SET int_value=0, text_value=?, updated_at=?
+                    WHERE key=?
+                    """,
+                    (payload_json, now, legacy_key),
+                )
         return Stage4FreezeState(
             active=False,
             reason=previous.reason,
@@ -2870,20 +2909,40 @@ class StateStore:
         )
 
     def stage4_get_freeze(self, process_role: str) -> Stage4FreezeState:
-        key = f"stage4_freeze:{process_role}"
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT int_value, text_value FROM op_state WHERE key = ?",
-                (key,),
-            ).fetchone()
-        if row is None:
-            return Stage4FreezeState(
-                active=False,
-                reason=None,
-                since_ts=None,
-                details={},
-                last_seen_ts=None,
-            )
+        keys = _role_key_candidates("stage4_freeze", process_role)
+        canonical_key = keys[0]
+        with self.transaction() as conn:
+            row: sqlite3.Row | None = None
+            source_key: str | None = None
+            for key in keys:
+                row = conn.execute(
+                    "SELECT int_value, text_value FROM op_state WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                if row is not None:
+                    source_key = key
+                    break
+            if row is None:
+                return Stage4FreezeState(
+                    active=False,
+                    reason=None,
+                    since_ts=None,
+                    details={},
+                    last_seen_ts=None,
+                )
+            if source_key != canonical_key:
+                now = datetime.now(UTC).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO op_state(key, int_value, text_value, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        int_value=excluded.int_value,
+                        text_value=excluded.text_value,
+                        updated_at=excluded.updated_at
+                    """,
+                    (canonical_key, row["int_value"], row["text_value"], now),
+                )
         payload: dict[str, object] = {}
         text_value = row["text_value"]
         if text_value:
