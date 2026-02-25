@@ -502,6 +502,42 @@ class ExecutionService:
             )
             return 0, 0, 1, 1
 
+        q_notional = q_price * q_qty
+        if q_notional > self.settings.risk_max_order_notional_try:
+            self.state_store.record_stage4_order_rejected(
+                action.client_order_id,
+                "max_order_notional_try",
+                symbol=action.symbol,
+                side=action.side,
+                price=q_price,
+                qty=q_qty,
+                mode=("live" if live_mode else "dry_run"),
+            )
+            logger.warning(
+                "stage4_cap_reject",
+                extra={
+                    "extra": {
+                        "symbol": action.symbol,
+                        "side": action.side,
+                        "q_price": str(q_price),
+                        "q_qty": str(q_qty),
+                        "notional_try": str(q_notional),
+                        "cap_value": str(self.settings.risk_max_order_notional_try),
+                        "cap_name": "max_order_notional_try",
+                        "process_role": self.settings.process_role,
+                    }
+                },
+            )
+            self.instrumentation.counter(
+                "stage4_cap_reject_total",
+                1,
+                attrs={
+                    "cap_name": "max_order_notional_try",
+                    "process_role": self.settings.process_role,
+                },
+            )
+            return 0, 0, 1, 0
+
         if not live_mode:
             self.state_store.record_stage4_order_simulated_submit(
                 symbol=action.symbol,

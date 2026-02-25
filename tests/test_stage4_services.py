@@ -1812,3 +1812,156 @@ def test_exchange_reject_1123_records_symbol_cooldown(store: StateStore) -> None
     assert row is not None
     assert str(row["last_error"] or "") == REASON_TOKEN_EXCHANGE_1123
     assert int(row["last_error_code"]) == 1123
+
+
+def test_risk_policy_caps_max_open_orders() -> None:
+    policy = RiskPolicy(
+        max_open_orders=1,
+        max_order_notional_try=Decimal("10000"),
+        max_position_notional_try=Decimal("10000"),
+        max_daily_loss_try=Decimal("200"),
+        max_drawdown_pct=Decimal("20"),
+        fee_bps_taker=Decimal("10"),
+        slippage_bps_buffer=Decimal("10"),
+        min_profit_bps=Decimal("20"),
+    )
+    submit = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="entry",
+        client_order_id="cid-cap-open-orders",
+    )
+    pnl = PnLSnapshot(
+        total_equity_try=Decimal("1000"),
+        realized_today_try=Decimal("0"),
+        drawdown_pct=Decimal("0"),
+        ts=now_utc(),
+        realized_total_try=Decimal("0"),
+    )
+
+    accepted, decisions = policy.filter_actions(
+        [submit],
+        open_orders_count=1,
+        current_position_notional_try=Decimal("0"),
+        pnl=pnl,
+        positions_by_symbol={},
+    )
+
+    assert accepted == []
+    assert decisions == [
+        RiskDecision(action=submit, accepted=False, reason="max_open_orders")
+    ]
+
+
+def test_risk_policy_caps_max_position_notional_buy_rejected_sell_allowed() -> None:
+    policy = RiskPolicy(
+        max_open_orders=10,
+        max_order_notional_try=Decimal("10000"),
+        max_position_notional_try=Decimal("100"),
+        max_daily_loss_try=Decimal("200"),
+        max_drawdown_pct=Decimal("20"),
+        fee_bps_taker=Decimal("10"),
+        slippage_bps_buffer=Decimal("10"),
+        min_profit_bps=Decimal("20"),
+    )
+    buy_submit = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("50"),
+        qty=Decimal("1"),
+        reason="entry",
+        client_order_id="cid-cap-pos-buy",
+    )
+    sell_submit = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="sell",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        reason="de-risk",
+        client_order_id="cid-cap-pos-sell",
+    )
+    pnl = PnLSnapshot(
+        total_equity_try=Decimal("1000"),
+        realized_today_try=Decimal("0"),
+        drawdown_pct=Decimal("0"),
+        ts=now_utc(),
+        realized_total_try=Decimal("0"),
+    )
+    positions = {
+        "BTC_TRY": Position(
+            symbol="BTC_TRY",
+            qty=Decimal("1"),
+            avg_cost_try=Decimal("90"),
+            realized_pnl_try=Decimal("0"),
+            last_update_ts=now_utc(),
+        )
+    }
+
+    accepted, decisions = policy.filter_actions(
+        [buy_submit, sell_submit],
+        open_orders_count=0,
+        current_position_notional_try=Decimal("60"),
+        pnl=pnl,
+        positions_by_symbol=positions,
+    )
+
+    assert accepted == [sell_submit]
+    assert decisions == [
+        RiskDecision(action=buy_submit, accepted=False, reason="max_position_notional_try"),
+        RiskDecision(action=sell_submit, accepted=True, reason="accepted"),
+    ]
+
+
+def test_execution_service_final_guard_max_order_notional_blocks_submit(
+    store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _CaptureInstrumentation:
+        def __init__(self) -> None:
+            self.counters: list[tuple[str, int, dict[str, str] | None]] = []
+
+        def counter(self, name: str, value: int = 1, *, attrs=None) -> None:
+            self.counters.append((name, value, attrs))
+
+    capture = _CaptureInstrumentation()
+    monkeypatch.setattr(
+        "btcbot.services.execution_service_stage4.get_instrumentation",
+        lambda: capture,
+    )
+
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=True, SAFE_MODE=False, LIVE_TRADING_ACK="I_UNDERSTAND", BTCTURK_API_KEY="key", BTCTURK_API_SECRET="secret", RISK_MAX_ORDER_NOTIONAL_TRY="50"),
+        rules_service=ExchangeRulesService(exchange),
+    )
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("123.4"),
+        qty=Decimal("1"),
+        reason="contract",
+        client_order_id="cid-cap-notional",
+    )
+
+    report = svc.execute_with_report([action])
+
+    assert report.submitted == 0
+    assert report.rejected == 1
+    assert exchange.submits == []
+    rejected = store.get_stage4_order_by_client_id("cid-cap-notional")
+    assert rejected is not None
+    assert rejected.status == "rejected"
+    with store._connect() as conn:
+        last_error = conn.execute(
+            "SELECT last_error FROM stage4_orders WHERE client_order_id = ?",
+            ("cid-cap-notional",),
+        ).fetchone()["last_error"]
+    assert last_error == "max_order_notional_try"
+    assert any(name == "stage4_cap_reject_total" for name, _, _ in capture.counters)
