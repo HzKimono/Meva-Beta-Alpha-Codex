@@ -92,6 +92,12 @@ class LedgerCheckpoint:
 
 
 class LedgerService:
+    """Canonical Stage7 accounting pipeline.
+
+    Phase 6 source-of-truth metrics (realized/unrealized/fees/slippage/gross/net/equity/turnover)
+    are computed from domain ledger events via this service. AccountingLedger remains auxiliary and
+    must not be used to recompute competing Stage7 P&L aggregates.
+    """
     def __init__(self, state_store: StateStore, logger: logging.Logger) -> None:
         self.state_store = state_store
         self.logger = logger
@@ -252,6 +258,7 @@ class LedgerService:
         price_for_fee_conversion: PriceConverter | None = None,
         slippage_try: Decimal = Decimal("0"),
         ledger_state: LedgerState | None = None,
+        strict_fee_conversion: bool = False,
     ) -> FinancialBreakdown:
         state = ledger_state or self.load_state_incremental()[0]
         realized = compute_realized_pnl(state)
@@ -263,6 +270,7 @@ class LedgerService:
         fees_try, _ = self._compute_fees_try(
             fees_by_currency=state.fees_by_currency,
             price_for_fee_conversion=price_for_fee_conversion,
+            strict=strict_fee_conversion,
         )
 
         turnover = self._compute_turnover_try()
@@ -294,6 +302,7 @@ class LedgerService:
         slippage_try: Decimal = Decimal("0"),
         ts: datetime | None = None,
         ledger_state: LedgerState | None = None,
+        strict_fee_conversion: bool = False,
     ) -> LedgerSnapshot:
         breakdown = self.financial_breakdown(
             mark_prices=mark_prices,
@@ -301,6 +310,7 @@ class LedgerService:
             price_for_fee_conversion=price_for_fee_conversion,
             slippage_try=slippage_try,
             ledger_state=ledger_state,
+            strict_fee_conversion=strict_fee_conversion,
         )
 
         # Drawdown source of truth: persisted pnl_snapshots equity history.
@@ -396,6 +406,10 @@ class LedgerService:
                 fees_try += amount
                 continue
             if price_for_fee_conversion is None:
+                if strict:
+                    raise FeeConversionRateError(
+                        f"missing fee conversion rate for {normalized}/TRY"
+                    )
                 missing_rates.add(normalized)
                 continue
             try:

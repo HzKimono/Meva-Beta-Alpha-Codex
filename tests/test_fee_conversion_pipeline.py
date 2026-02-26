@@ -111,3 +111,37 @@ def test_ledger_report_marks_missing_fee_conversion_for_non_try_currency(tmp_pat
     )
     assert report_with_rate.fees_total_try == Decimal("70")
     assert report_with_rate.fee_conversion_missing_currencies == ()
+
+
+def test_financial_breakdown_fails_closed_without_non_try_fee_conversion_rate(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "fees_strict.db"))
+    store.append_ledger_events(
+        [
+            LedgerEvent(
+                event_id="fee-1",
+                ts=datetime(2026, 1, 2, tzinfo=UTC),
+                symbol="BTCTRY",
+                type=LedgerEventType.FEE,
+                side=None,
+                qty=Decimal("0"),
+                price=None,
+                fee=Decimal("2"),
+                fee_currency="USDT",
+                exchange_trade_id="fee-1",
+                exchange_order_id=None,
+                client_order_id=None,
+                meta={},
+            )
+        ]
+    )
+    ledger = LedgerService(state_store=store, logger=__import__("logging").getLogger(__name__))
+
+    import pytest
+    from btcbot.ports_price_conversion import FeeConversionRateError
+
+    with pytest.raises(FeeConversionRateError, match="USDT/TRY"):
+        ledger.financial_breakdown(
+            mark_prices={},
+            cash_try=Decimal("0"),
+            strict_fee_conversion=True,
+        )

@@ -147,3 +147,67 @@ def test_ledger_incremental_rowid_and_checkpoint_io(tmp_path) -> None:
     assert checkpoint is not None
     assert checkpoint.last_rowid == 2
     assert checkpoint.snapshot_version == 1
+
+
+def test_checkpoint_equivalence_full_replay_vs_resume(tmp_path) -> None:
+    from btcbot.domain.ledger import LedgerState, apply_events
+    from btcbot.services.ledger_service import LedgerService
+    import logging
+
+    store = StateStore(db_path=str(tmp_path / "checkpoint_equivalence.db"))
+    base_ts = datetime(2026, 1, 2, tzinfo=UTC)
+    events = [
+        LedgerEvent(
+            event_id="fill-b1",
+            ts=base_ts,
+            symbol="BTCTRY",
+            type=LedgerEventType.FILL,
+            side="BUY",
+            qty=Decimal("1"),
+            price=Decimal("100"),
+            fee=None,
+            fee_currency=None,
+            exchange_trade_id="fill-b1",
+            exchange_order_id=None,
+            client_order_id=None,
+            meta={},
+        ),
+        LedgerEvent(
+            event_id="fill-s1",
+            ts=base_ts,
+            symbol="BTCTRY",
+            type=LedgerEventType.FILL,
+            side="SELL",
+            qty=Decimal("0.4"),
+            price=Decimal("120"),
+            fee=None,
+            fee_currency=None,
+            exchange_trade_id="fill-s1",
+            exchange_order_id=None,
+            client_order_id=None,
+            meta={},
+        ),
+        LedgerEvent(
+            event_id="fee-1",
+            ts=base_ts,
+            symbol="BTCTRY",
+            type=LedgerEventType.FEE,
+            side=None,
+            qty=Decimal("0"),
+            price=None,
+            fee=Decimal("1.2"),
+            fee_currency="TRY",
+            exchange_trade_id="fee-1",
+            exchange_order_id=None,
+            client_order_id=None,
+            meta={},
+        ),
+    ]
+    store.append_ledger_events(events)
+
+    service = LedgerService(state_store=store, logger=logging.getLogger(__name__))
+    checkpoint_state, *_ = service.load_state_incremental()
+
+    full_replay_state = apply_events(LedgerState(), store.load_ledger_events())
+
+    assert checkpoint_state == full_replay_state

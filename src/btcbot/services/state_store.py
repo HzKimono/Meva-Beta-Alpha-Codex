@@ -1056,9 +1056,12 @@ class StateStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT m.*, c.intents_summary_json, c.mode_json
+                SELECT m.*, c.intents_summary_json, c.mode_json,
+                       l.realized_pnl_try AS ledger_realized_pnl_try,
+                       l.unrealized_pnl_try AS ledger_unrealized_pnl_try
                 FROM stage7_run_metrics m
                 LEFT JOIN stage7_cycle_trace c ON c.cycle_id = m.cycle_id
+                LEFT JOIN stage7_ledger_metrics l ON l.cycle_id = m.cycle_id
                 ORDER BY m.ts DESC
                 LIMIT ?
                 """,
