@@ -38,7 +38,7 @@ class UniverseSelectionService:
     ) -> UniverseSelectionResult:
         now_utc = self._ensure_utc(now_utc)
         store = StateStore(db_path=settings.state_db_path)
-        role = "stage7"
+        role = "STAGE7"
 
         previous = store.get_latest_stage7_universe_snapshot(role=role) or {}
         prev_symbols = [canonical_symbol(str(x)) for x in previous.get("selected_symbols", [])]
@@ -53,7 +53,6 @@ class UniverseSelectionService:
         ticker_stats = self._fetch_ticker_stats(exchange)
         raw_metrics: dict[str, _RawMetrics] = {}
         stale_detected = False
-        require_age = callable(getattr(exchange, "get_orderbook_with_timestamp", None))
         for symbol in symbols:
             volume_try = self._extract_quote_volume_try(symbol=symbol, ticker_stats=ticker_stats)
             spread_bps, age_sec = self._fetch_spread_bps_and_age(
@@ -67,10 +66,7 @@ class UniverseSelectionService:
                 settings=settings,
                 ticker_stats=ticker_stats,
             )
-            if age_sec is None:
-                if require_age:
-                    stale_detected = True
-            elif age_sec > settings.stage7_max_data_age_sec:
+            if age_sec is None or age_sec > settings.stage7_max_data_age_sec:
                 stale_detected = True
             raw_metrics[symbol] = _RawMetrics(
                 volume_try=volume_try,
@@ -178,6 +174,43 @@ class UniverseSelectionService:
         excluded_counts["churn_removals"] = len(removals)
         excluded_counts["churn_total"] = churn_total
 
+        if stale_detected:
+            freeze_reasons.append("STALE_DATA")
+
+        scored = self._score_candidates(raw_metrics=raw_metrics, settings=settings)
+        eligible: list[UniverseCandidate] = []
+        excluded_counts = dict(discovery_exclusions)
+        for candidate in scored:
+            candidate_reasons = self._candidate_exclusions(candidate=candidate, settings=settings)
+            for reason in candidate_reasons:
+                excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
+            if candidate_reasons:
+                continue
+            eligible.append(candidate)
+
+        selected = self._apply_governance(
+            store=store,
+            eligible=eligible,
+            previous=prev_symbols,
+            settings=settings,
+            now_utc=now_utc,
+            role=role,
+        )
+
+        freeze = bool(freeze_reasons) and bool(prev_symbols)
+        if freeze:
+            selected = prev_symbols[: max(0, settings.stage7_universe_size)]
+
+        selected_set = set(selected)
+        selected_scored = [item for item in scored if item.symbol in selected_set]
+
+        additions = sorted(set(selected) - set(prev_symbols))
+        removals = sorted(set(prev_symbols) - set(selected))
+        churn_total = len(additions) + len(removals)
+        excluded_counts["churn_additions"] = len(additions)
+        excluded_counts["churn_removals"] = len(removals)
+        excluded_counts["churn_total"] = churn_total
+
         reasons = [
             "deterministic_ranking: total desc -> liquidity desc -> symbol asc",
             "missing_metrics_penalty: -1 applied per missing score component",
@@ -210,7 +243,15 @@ class UniverseSelectionService:
             churn_total=churn_total,
         )
 
-        return UniverseSelectionResult(selected, selected_scored, reasons, now_utc)
+        return UniverseSelectionResult(
+            selected_symbols=selected,
+            scored=selected_scored,
+            reasons=reasons,
+            freeze_reason=(freeze_reasons[0] if freeze_reasons else None),
+            freeze_reasons=freeze_reasons,
+            excluded_counts=excluded_counts,
+            churn_count=churn_total,
+        )
 
     def _discover_symbols(
         self,
@@ -604,18 +645,18 @@ class UniverseSelectionService:
         volume_raw = candidate.breakdown.get("volume_try", "missing")
 
         if spread_raw == "missing":
-            reasons.append("missing_spread")
+            reasons.append("excluded_by_missing_spread")
         else:
             spread = Decimal(str(spread_raw))
             if settings.stage7_max_spread_bps > 0 and spread > settings.stage7_max_spread_bps:
-                reasons.append("spread_too_wide")
+                reasons.append("excluded_by_max_spread_bps")
 
         if volume_raw == "missing":
-            reasons.append("missing_volume")
+            reasons.append("excluded_by_missing_volume")
         else:
             volume = Decimal(str(volume_raw))
             if volume < settings.stage7_min_quote_volume_try:
-                reasons.append("volume_too_low")
+                reasons.append("excluded_by_min_quote_volume_try")
 
         return reasons
 
