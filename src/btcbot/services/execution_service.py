@@ -12,6 +12,7 @@ import httpx
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.decision_codes import ReasonCode
 from btcbot.domain.intent import Intent, to_order_intent
+from btcbot.domain.money_policy import OrderSizingStatus, size_order_from_notional
 from btcbot.domain.models import (
     ExchangeError,
     ExchangeOrderStatus,
@@ -30,7 +31,6 @@ from btcbot.domain.models import (
     normalize_symbol,
     quantize_price,
     quantize_quantity,
-    validate_order,
 )
 from btcbot.domain.symbols import split_symbol
 from btcbot.obs.metrics import inc_counter
@@ -140,6 +140,12 @@ class ExecutionService:
             os.getenv("EXECUTION_BALANCE_SAFETY_BUFFER_RATIO", "0")
         )
         self.sell_fee_in_base_bps = Decimal(os.getenv("EXECUTION_SELL_FEE_IN_BASE_BPS", "0"))
+        self.allow_min_notional_upgrade = os.getenv(
+            "EXECUTION_ALLOW_MIN_NOTIONAL_UPGRADE", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.fallback_min_notional_try = Decimal(
+            os.getenv("EXECUTION_FALLBACK_MIN_NOTIONAL_TRY", "10")
+        )
         self.sleep_fn = sleep_fn or time.sleep
         self.execution_wrapper = ExecutionWrapper(
             exchange,
@@ -567,6 +573,17 @@ class ExecutionService:
         if available < required:
             return False, asset, required, available
         return True, None, None, None
+
+    def _is_known_min_notional_reject(self, exc: Exception) -> bool:
+        if not isinstance(exc, ExchangeError):
+            return False
+
+        if str(exc.error_code) == "1123" and (exc.error_message or "").upper() == "FAILED_MIN_TOTAL_AMOUNT":
+            return True
+
+        haystacks = [str(exc.error_code), exc.error_message or "", exc.response_body or "", str(exc)]
+        joined = " ".join(haystacks).upper()
+        return "1123" in joined and "FAILED_MIN_TOTAL_AMOUNT" in joined
 
     def _is_exchange_429_error(self, exc: Exception) -> bool:
         if isinstance(exc, httpx.HTTPStatusError):
@@ -1026,6 +1043,9 @@ class ExecutionService:
             "attempted_exchange_calls": 0,
             "would_submit_orders": 0,
             "would_submit_notional_try": "0",
+            "orders_simulated": 0,
+            "rejected_min_notional": 0,
+            "would_reject_min_notional": 0,
         }
         self._sync_unknown_registry_from_store(allow_clear=False)
         self._emit_unknown_freeze_metrics()
@@ -1108,12 +1128,15 @@ class ExecutionService:
             cycle_balances = self._get_cycle_balances(cycle_id=execution_cycle_id)
 
         placed = 0
+        orders_simulated = 0
         rejected_intents = 0
         intents_rejected_precheck = 0
         orders_failed_exchange = 0
         attempted_exchange_calls = 0
         would_submit_orders = 0
         would_submit_notional_try = Decimal("0")
+        rejected_min_notional = 0
+        would_reject_min_notional = 0
         for intent, raw_intent in normalized_intents:
             if not self.dry_run:
                 self._ensure_live_side_effects_allowed(
@@ -1124,20 +1147,64 @@ class ExecutionService:
                 )
 
             symbol_normalized = normalize_symbol(intent.symbol)
+            if self.market_data_service is None:
+                raise LiveTradingNotArmedError(
+                    "MarketDataService is required for order validation"
+                )
+
+            rules = self.market_data_service.get_symbol_rules(symbol_normalized)
+            sizing = size_order_from_notional(
+                desired_notional_try=Decimal(str(intent.notional)),
+                desired_price=Decimal(str(intent.price)),
+                rules=rules,
+                fallback_min_notional_try=self.fallback_min_notional_try,
+                allow_min_notional_upgrade=self.allow_min_notional_upgrade,
+            )
+
+            if sizing.status != OrderSizingStatus.OK:
+                if sizing.status == OrderSizingStatus.BELOW_MIN_NOTIONAL:
+                    if self.dry_run:
+                        would_reject_min_notional += 1
+                    else:
+                        rejected_min_notional += 1
+                logger.info(
+                    "intent_rejected_pre_submit_validation",
+                    extra={
+                        "extra": {
+                            "cycle_id": intent.cycle_id,
+                            "intent_id": (raw_intent.intent_id if raw_intent else None),
+                            "symbol": symbol_normalized,
+                            "side": intent.side.value,
+                            "status": sizing.status.value,
+                            "reason": sizing.reason,
+                            "desired_notional_try": str(intent.notional),
+                            "min_notional_try": str(rules.min_total or self.fallback_min_notional_try),
+                            "computed_notional_try": str(sizing.notional_try),
+                        }
+                    },
+                )
+                rejected_intents += 1
+                continue
+
+            price = sizing.quantized_price
+            quantity = sizing.quantized_quantity
+            computed_notional_try = sizing.notional_try
+
+            logger.debug(
+                "intent_quantized_pre_submit",
+                extra={
+                    "extra": {
+                        "symbol": symbol_normalized,
+                        "side": intent.side.value,
+                        "desired_notional_try": str(intent.notional),
+                        "computed_notional_try": str(computed_notional_try),
+                        "price": str(price),
+                        "quantity": str(quantity),
+                    }
+                },
+            )
+
             if not self.dry_run:
-                if self.market_data_service is None:
-                    raise LiveTradingNotArmedError(
-                        "MarketDataService is required for live order validation"
-                    )
-                rules = self.market_data_service.get_symbol_rules(symbol_normalized)
-                try:
-                    price = quantize_price(Decimal(str(intent.price)), rules)
-                    quantity = quantize_quantity(Decimal(str(intent.quantity)), rules)
-                    validate_order(price=price, qty=quantity, rules=rules)
-                except ValueError:
-                    logger.exception("Intent failed symbol rule validation")
-                    rejected_intents += 1
-                    continue
 
                 is_sufficient, asset, required, available = self._check_balance_precondition(
                     balances=cycle_balances,
@@ -1270,9 +1337,7 @@ class ExecutionService:
             )
             if self.dry_run:
                 would_submit_orders += 1
-                would_submit_notional_try += Decimal(str(intent.price)) * Decimal(
-                    str(intent.quantity)
-                )
+                would_submit_notional_try += computed_notional_try
                 emit_decision(
                     logger,
                     {
@@ -1305,7 +1370,7 @@ class ExecutionService:
                     order_id=None,
                     status="SIMULATED",
                 )
-                placed += 1
+                orders_simulated += 1
                 continue
 
             attempted_exchange_calls += 1
@@ -1323,6 +1388,9 @@ class ExecutionService:
                 if isinstance(exc, SubmitBlockedDueToUnknownError):
                     raise
                 orders_failed_exchange += 1
+                known_min_notional_reject = self._is_known_min_notional_reject(exc)
+                if known_min_notional_reject:
+                    rejected_min_notional += 1
                 if not self._is_uncertain_error(exc):
                     response_body = None
                     status_code = None
@@ -1373,6 +1441,8 @@ class ExecutionService:
                                 "status_code": status_code,
                                 "error_code": error_code,
                                 "error_message": error_message,
+                                "known_min_notional_reject": known_min_notional_reject,
+                                "computed_notional_try": str(computed_notional_try),
                             }
                         },
                     )
@@ -1646,12 +1716,15 @@ class ExecutionService:
 
         self.last_execute_summary = {
             "orders_submitted": placed,
+            "orders_simulated": orders_simulated,
             "orders_failed_exchange": orders_failed_exchange,
             "rejected_intents": rejected_intents,
             "intents_rejected_precheck": intents_rejected_precheck,
             "attempted_exchange_calls": attempted_exchange_calls,
             "would_submit_orders": would_submit_orders,
             "would_submit_notional_try": str(would_submit_notional_try),
+            "rejected_min_notional": rejected_min_notional,
+            "would_reject_min_notional": would_reject_min_notional,
         }
         return placed
 
