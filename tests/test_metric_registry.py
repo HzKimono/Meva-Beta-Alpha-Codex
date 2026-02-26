@@ -65,3 +65,18 @@ def test_db_field_metric_map_default_labels_satisfy_registry(
     labels = default_labels_for_db_field(db_field, process_role="LIVE")
     required = REGISTRY[metric_name].required_labels
     assert all(label in labels and labels[label] for label in required)
+
+
+@pytest.mark.parametrize("db_field,metric_name", sorted(DB_FIELD_METRIC_MAP.items()))
+def test_db_field_metric_map_uses_db_safe_metric_namespace(
+    db_field: str,
+    metric_name: str,
+) -> None:
+    del db_field
+    assert metric_name.startswith("bot_db_")
+
+
+def test_api_429_backoff_metric_label_contract_matches_rest_emission() -> None:
+    required = set(REGISTRY["bot_api_429_backoff_total"].required_labels)
+    emitted_by_rest_client = {"process_role", "mode_final"}
+    assert required == emitted_by_rest_client

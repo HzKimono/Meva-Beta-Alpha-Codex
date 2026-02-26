@@ -118,15 +118,24 @@ def test_cancel_safe_treats_not_found_as_success_when_not_open() -> None:
     assert result["success"] is True
 
 
-def test_429_metrics_are_counted_once_per_event_and_include_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_429_metrics_are_counted_once_per_attempt_and_include_retry_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     counts: dict[str, int] = {}
     labels_seen: dict[str, dict[str, str]] = {}
+    observed_histograms: list[tuple[str, float, dict[str, str]]] = []
 
     def _capture(name: str, labels: dict[str, str], delta: int = 1) -> None:
         counts[name] = counts.get(name, 0) + int(delta)
         labels_seen.setdefault(name, dict(labels))
 
+    def _capture_hist(name: str, value: float, labels: dict[str, str]) -> None:
+        observed_histograms.append((name, float(value), dict(labels)))
+
     monkeypatch.setattr("btcbot.adapters.btcturk.rest_client.inc_counter", _capture)
+    monkeypatch.setattr(
+        "btcbot.adapters.btcturk.rest_client.observe_histogram", _capture_hist
+    )
 
     client = _make_client(
         httpx.MockTransport(lambda request: httpx.Response(429, headers={"Retry-After": "1"}, text="rate limited"))
@@ -136,10 +145,18 @@ def test_429_metrics_are_counted_once_per_event_and_include_backoff(monkeypatch:
     with pytest.raises(ExchangeError):
         asyncio.run(client.request("GET", "/x", is_private=False))
 
+    # Semantics are per-attempt: 3 attempts that each return 429 => +3.
     assert counts.get("bot_api_errors_total", 0) == 3
     assert counts.get("bot_api_429_backoff_total", 0) == 3
     assert counts.get("bot_rest_retry_attempts_total", 0) == 3
     assert labels_seen["bot_api_errors_total"]["process_role"] == "MONITOR"
+    retry_backoff_values = [
+        value
+        for metric_name, value, _labels in observed_histograms
+        if metric_name == "bot_rest_retry_backoff_seconds"
+    ]
+    assert len(retry_backoff_values) == 3
+    assert all(value > 0 for value in retry_backoff_values)
 
 
 def test_submit_safe_detects_existing_order_after_retryable_error_emits_recovery_found(
