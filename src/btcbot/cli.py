@@ -1195,6 +1195,7 @@ def _build_canary_settings(
         "max_notional_per_order_try": notional_try,
         "ttl_seconds": ttl_seconds,
         "state_db_path": db_path,
+        "process_role": ProcessRole.LIVE.value,
     }
     if market_data_mode:
         overrides["market_data_mode"] = market_data_mode
@@ -1345,6 +1346,10 @@ def run_canary(
                 db_path=resolved_db_path,
                 market_data_mode=market_data_mode,
             )
+            set_base_context(
+                process_role=canary_settings.process_role,
+                state_db_path=canary_settings.state_db_path,
+            )
             _print_effective_side_effects_state(
                 canary_settings,
                 force_dry_run=False,
@@ -1405,62 +1410,74 @@ def run_canary(
             cycles_run = 0
             rc = 0
             doctor_recheck_every_cycles = 5
-            while True:
-                rc = run_cycle(
-                    canary_settings,
-                    force_dry_run=False,
-                    state_store=runtime_state_store,
-                )
-                cycles_run += 1
-                if rc != 0:
-                    break
-                if mode == "once" or (max_cycles is not None and cycles_run >= max_cycles):
-                    break
-
-                if cycles_run % doctor_recheck_every_cycles == 0:
-                    final_doctor_status, doctor_rc = _run_canary_doctor_gate(
+            try:
+                while True:
+                    heartbeat_instance_lock = getattr(runtime_state_store, "heartbeat_instance_lock", None)
+                    if callable(heartbeat_instance_lock):
+                        heartbeat_instance_lock()
+                    rc = run_cycle(
                         canary_settings,
-                        db_path=resolved_db_path,
-                        allow_warn=allow_warn,
+                        force_dry_run=False,
+                        state_store=runtime_state_store,
                     )
-                    if doctor_rc != 0:
-                        rc = doctor_rc
+                    cycles_run += 1
+                    if rc != 0:
+                        break
+                    if mode == "once" or (max_cycles is not None and cycles_run >= max_cycles):
                         break
 
-                sleep_for = cycle_seconds if cycle_seconds > 0 else 1
-                time.sleep(sleep_for)
+                    if cycles_run % doctor_recheck_every_cycles == 0:
+                        final_doctor_status, doctor_rc = _run_canary_doctor_gate(
+                            canary_settings,
+                            db_path=resolved_db_path,
+                            allow_warn=allow_warn,
+                        )
+                        if doctor_rc != 0:
+                            rc = doctor_rc
+                            break
 
-            started_at_iso = started_at.isoformat()
-            summary = _canary_summary_counts(resolved_db_path, started_at_iso)
-            canary_payload = redact_data(
-                {
-                    "mode": mode,
-                    "cycles": cycles_run,
-                    **summary,
-                    "final_doctor_status": final_doctor_status.upper(),
-                }
-            )
-            if json_output:
-                print(json.dumps(canary_payload, sort_keys=True, default=str))
-            else:
-                print(
-                    "canary summary: "
-                    f"mode={mode} cycles={cycles_run} orders_submitted={summary['orders_submitted']} "
-                    f"orders_filled={summary['orders_filled']} orders_rejected={summary['orders_rejected']} "
-                    f"stale_blocks={summary['stale_blocks']} final_doctor_status={final_doctor_status.upper()}"
-                )
+                    sleep_for = cycle_seconds if cycle_seconds > 0 else 1
+                    time.sleep(sleep_for)
 
-            if export_out:
-                run_stage7_export(
-                    canary_settings,
-                    db_path=resolved_db_path,
-                    last=50,
-                    export_format="jsonl",
-                    out_path=export_out,
+                    heartbeat_instance_lock = getattr(runtime_state_store, "heartbeat_instance_lock", None)
+                    if callable(heartbeat_instance_lock):
+                        heartbeat_instance_lock()
+
+                started_at_iso = started_at.isoformat()
+                summary = _canary_summary_counts(resolved_db_path, started_at_iso)
+                canary_payload = redact_data(
+                    {
+                        "mode": mode,
+                        "cycles": cycles_run,
+                        **summary,
+                        "final_doctor_status": final_doctor_status.upper(),
+                    }
                 )
-                print(f"canary: exported stage7 rows to {export_out}")
-            _print_canary_evidence_commands(export_out)
-            return rc
+                if json_output:
+                    print(json.dumps(canary_payload, sort_keys=True, default=str))
+                else:
+                    print(
+                        "canary summary: "
+                        f"mode={mode} cycles={cycles_run} orders_submitted={summary['orders_submitted']} "
+                        f"orders_filled={summary['orders_filled']} orders_rejected={summary['orders_rejected']} "
+                        f"stale_blocks={summary['stale_blocks']} final_doctor_status={final_doctor_status.upper()}"
+                    )
+
+                if export_out:
+                    run_stage7_export(
+                        canary_settings,
+                        db_path=resolved_db_path,
+                        last=50,
+                        export_format="jsonl",
+                        out_path=export_out,
+                    )
+                    print(f"canary: exported stage7 rows to {export_out}")
+                _print_canary_evidence_commands(export_out)
+                return rc
+            finally:
+                release_instance_lock = getattr(runtime_state_store, "release_instance_lock", None)
+                if callable(release_instance_lock):
+                    release_instance_lock(status="ended")
     except RuntimeError as exc:
         logger.error("canary_lock_acquire_failed", extra={"extra": {"error": str(exc)}})
         print(str(exc))

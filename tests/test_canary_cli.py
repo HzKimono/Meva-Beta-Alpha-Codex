@@ -273,3 +273,109 @@ def test_canary_loop_reuses_single_state_store(monkeypatch, tmp_path: Path) -> N
     assert rc == 0
     assert len(stores) == 1
     assert len(set(seen_ids)) == 1
+
+
+def test_canary_once_reentrant_state_store_self_conflict_does_not_fail(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    @contextmanager
+    def _fake_lock(*, db_path: str, account_key: str):
+        del db_path, account_key
+        yield
+
+    monkeypatch.setattr(cli, "single_instance_lock", _fake_lock)
+    monkeypatch.setattr(cli, "run_health_checks", lambda *args, **kwargs: _DoctorReport("pass"))
+    monkeypatch.setattr(cli, "doctor_status", lambda report: report._status)
+    monkeypatch.setattr(cli, "_check_canary_min_notional", lambda *args, **kwargs: (True, ""))
+
+    def _fake_run_cycle(effective_settings: Settings, **kwargs) -> int:
+        # Simulate downstream re-entrant lock acquisition within same process/db path.
+        from btcbot.services.state_store import StateStore
+
+        StateStore(db_path=effective_settings.state_db_path, strict_instance_lock=True)
+        assert kwargs.get("state_store") is not None
+        return 0
+
+    monkeypatch.setattr(cli, "run_cycle", _fake_run_cycle)
+
+    rc = cli.run_canary(
+        settings,
+        mode="once",
+        symbol="BTCTRY",
+        notional_try=Decimal("150"),
+        cycle_seconds=0,
+        max_cycles=None,
+        ttl_seconds=30,
+        db_path=str(tmp_path / "state.db"),
+        market_data_mode=None,
+        allow_warn=False,
+        export_out=None,
+    )
+
+    assert rc == 0
+
+
+def test_canary_uses_live_process_role_override() -> None:
+    settings = Settings(
+        STATE_DB_PATH="/tmp/monitor_state.db",
+        UNIVERSE_SYMBOLS='["BTCTRY"]',
+        PROCESS_ROLE="MONITOR",
+    )
+
+    canary_settings = cli._build_canary_settings(
+        settings,
+        symbol="BTCTRY",
+        notional_try=Decimal("150"),
+        ttl_seconds=30,
+        db_path="/tmp/live_canary_state.db",
+        market_data_mode=None,
+    )
+
+    assert canary_settings.process_role == "LIVE"
+
+
+def test_canary_releases_runtime_lock_in_finally(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    @contextmanager
+    def _fake_lock(*, db_path: str, account_key: str):
+        del db_path, account_key
+        yield
+
+    calls: dict[str, int] = {"heartbeat": 0, "release": 0}
+
+    class _Store:
+        db_path_abs = ""
+        instance_id = "instance-1"
+
+        def heartbeat_instance_lock(self) -> None:
+            calls["heartbeat"] += 1
+
+        def release_instance_lock(self, *, status: str = "ended") -> None:
+            assert status == "ended"
+            calls["release"] += 1
+
+    monkeypatch.setattr(cli, "single_instance_lock", _fake_lock)
+    monkeypatch.setattr(cli, "_build_state_store", lambda *args, **kwargs: _Store())
+    monkeypatch.setattr(cli, "run_health_checks", lambda *args, **kwargs: _DoctorReport("pass"))
+    monkeypatch.setattr(cli, "doctor_status", lambda report: report._status)
+    monkeypatch.setattr(cli, "_check_canary_min_notional", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(cli, "run_cycle", lambda *args, **kwargs: 2)
+
+    rc = cli.run_canary(
+        settings,
+        mode="once",
+        symbol="BTCTRY",
+        notional_try=Decimal("150"),
+        cycle_seconds=0,
+        max_cycles=None,
+        ttl_seconds=30,
+        db_path=str(tmp_path / "state.db"),
+        market_data_mode=None,
+        allow_warn=False,
+        export_out=None,
+    )
+
+    assert rc == 2
+    assert calls["heartbeat"] >= 1
+    assert calls["release"] == 1
