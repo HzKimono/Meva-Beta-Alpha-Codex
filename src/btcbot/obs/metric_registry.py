@@ -129,17 +129,60 @@ REGISTRY: dict[str, MetricDef] = {
         type=MetricType.HISTOGRAM,
         required_labels=("exchange", "endpoint", "error_kind", "process_role"),
     ),
+
+    "bot_idempotency_recovery_attempts_total": MetricDef(
+        name="bot_idempotency_recovery_attempts_total",
+        type=MetricType.COUNTER,
+        required_labels=("exchange", "operation", "outcome", "process_role"),
+    ),
+    "bot_db_cycle_latency_ms": MetricDef(
+        name="bot_db_cycle_latency_ms",
+        type=MetricType.HISTOGRAM,
+        required_labels=("process_role",),
+    ),
+    "bot_db_orders_submitted_total": MetricDef(
+        name="bot_db_orders_submitted_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role",),
+    ),
+    "bot_db_rejects_total": MetricDef(
+        name="bot_db_rejects_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role",),
+    ),
+    "bot_db_pnl_realized_quote": MetricDef(
+        name="bot_db_pnl_realized_quote",
+        type=MetricType.GAUGE,
+        required_labels=("process_role",),
+    ),
+    "bot_db_pnl_unrealized_quote": MetricDef(
+        name="bot_db_pnl_unrealized_quote",
+        type=MetricType.GAUGE,
+        required_labels=("process_role",),
+    ),
 }
 
 
 DB_FIELD_METRIC_MAP: dict[str, str] = {
-    "stage7_run_metrics.cycle_total_ms": "bot_cycle_latency_ms",
-    "stage7_run_metrics.latency_ms_total": "bot_cycle_latency_ms",
-    "cycle_metrics.orders_submitted": "bot_orders_submitted_total",
-    "cycle_metrics.rejects_count": "bot_orders_failed_total",
-    "stage7_ledger_metrics.realized_pnl_try": "bot_pnl_realized_quote",
-    "stage7_ledger_metrics.unrealized_pnl_try": "bot_pnl_unrealized_quote",
+    "stage7_run_metrics.cycle_total_ms": "bot_db_cycle_latency_ms",
+    "stage7_run_metrics.latency_ms_total": "bot_db_cycle_latency_ms",
+    "cycle_metrics.orders_submitted": "bot_db_orders_submitted_total",
+    "cycle_metrics.rejects_count": "bot_db_rejects_total",
+    "stage7_ledger_metrics.realized_pnl_try": "bot_db_pnl_realized_quote",
+    "stage7_ledger_metrics.unrealized_pnl_try": "bot_db_pnl_unrealized_quote",
 }
+
+
+def default_labels_for_db_field(field_name: str, *, process_role: str = "UNKNOWN") -> dict[str, str]:
+    metric_name = DB_FIELD_METRIC_MAP[field_name]
+    defn = REGISTRY[metric_name]
+    labels: dict[str, str] = {}
+    for label in defn.required_labels:
+        if label == "process_role":
+            labels[label] = process_role
+        else:
+            labels[label] = "unknown"
+    return labels
 
 
 _NAME_PATTERN = re.compile(r"^[a-z]+(?:_[a-z0-9]+)+$")

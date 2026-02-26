@@ -176,6 +176,13 @@ class BtcturkRestClient:
                         "process_role": self.process_role,
                     },
                 )
+                inc_counter(
+                    "bot_api_429_backoff_total",
+                    labels={
+                        "process_role": self.process_role,
+                        "mode_final": "unknown",
+                    },
+                )
 
             if response.status_code >= 400:
                 self._raise_http_error(response)
@@ -251,14 +258,15 @@ class BtcturkRestClient:
                 classify=_classify,
             )
         except RestRequestError as exc:
-            inc_counter(
-                "bot_api_errors_total",
-                labels={
-                    "exchange": "btcturk",
-                    "endpoint": path,
-                    "process_role": self.process_role,
-                },
-            )
+            if exc.kind is not RestErrorKind.RATE_LIMIT:
+                inc_counter(
+                    "bot_api_errors_total",
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": self.process_role,
+                    },
+                )
             raise self._to_exchange_error(exc, method=method, path=path) from exc
 
     async def submit_order_safe(
@@ -310,7 +318,11 @@ class BtcturkRestClient:
     async def find_open_order_by_client_order_id(
         self, client_order_id: str
     ) -> dict[str, object] | None:
-        payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        try:
+            payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        except ExchangeError:
+            self._emit_idempotency_recovery_outcome(operation="submit_lookup", outcome="error")
+            raise
         for side_key in ("bids", "asks"):
             data = payload.get("data")
             side_rows = data.get(side_key, []) if isinstance(data, dict) else []
@@ -318,13 +330,20 @@ class BtcturkRestClient:
                 continue
             for row in side_rows:
                 if isinstance(row, dict) and row.get("orderClientId") == client_order_id:
+                    self._emit_idempotency_recovery_outcome(operation="submit_lookup", outcome="found")
                     return row
+        self._emit_idempotency_recovery_outcome(operation="submit_lookup", outcome="not_found")
         return None
 
     async def is_order_open(self, order_id: str) -> bool:
-        payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        try:
+            payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        except ExchangeError:
+            self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="error")
+            raise
         data = payload.get("data")
         if not isinstance(data, dict):
+            self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="not_found")
             return False
         for side_key in ("bids", "asks"):
             side_rows = data.get(side_key, [])
@@ -332,8 +351,22 @@ class BtcturkRestClient:
                 continue
             for row in side_rows:
                 if isinstance(row, dict) and str(row.get("id")) == str(order_id):
+                    self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="found")
                     return True
+        self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="not_found")
         return False
+
+
+    def _emit_idempotency_recovery_outcome(self, *, operation: str, outcome: str) -> None:
+        inc_counter(
+            "bot_idempotency_recovery_attempts_total",
+            labels={
+                "exchange": "btcturk",
+                "operation": operation,
+                "outcome": outcome,
+                "process_role": self.process_role,
+            },
+        )
 
     def _auth_headers(self) -> dict[str, str]:
         stamp = str(self.clock_sync.stamped_now_ms())

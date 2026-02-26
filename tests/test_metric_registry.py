@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from btcbot.obs.metric_registry import REGISTRY, MetricDef, MetricType, validate_registry
+from btcbot.obs.metric_registry import (
+    DB_FIELD_METRIC_MAP,
+    REGISTRY,
+    MetricDef,
+    MetricType,
+    default_labels_for_db_field,
+    validate_registry,
+)
 from btcbot.obs.metrics import emit_metric
 
 
@@ -40,5 +47,21 @@ def test_phase5_metrics_registered_for_stage4_and_rest_instrumentation() -> None
         "bot_rate_limit_wait_total",
         "bot_rest_retry_attempts_total",
         "bot_rest_retry_backoff_seconds",
+        "bot_idempotency_recovery_attempts_total",
+        "bot_db_cycle_latency_ms",
+        "bot_db_orders_submitted_total",
+        "bot_db_rejects_total",
+        "bot_db_pnl_realized_quote",
+        "bot_db_pnl_unrealized_quote",
     }
     assert expected.issubset(REGISTRY.keys())
+
+
+@pytest.mark.parametrize("db_field,metric_name", sorted(DB_FIELD_METRIC_MAP.items()))
+def test_db_field_metric_map_default_labels_satisfy_registry(
+    db_field: str,
+    metric_name: str,
+) -> None:
+    labels = default_labels_for_db_field(db_field, process_role="LIVE")
+    required = REGISTRY[metric_name].required_labels
+    assert all(label in labels and labels[label] for label in required)
