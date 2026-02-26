@@ -4,11 +4,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from btcbot.config import Settings
+from btcbot.domain.order_intent import OrderIntent
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.risk_engine import CycleRiskOutput
 from btcbot.domain.risk_models import ExposureSnapshot
-from btcbot.domain.stage4 import LifecycleActionType
-from btcbot.domain.order_intent import OrderIntent
 from btcbot.services.risk_policy_service import ActionPortfolioSnapshot, RiskPolicyService
 from btcbot.services.stage7_cycle_runner import _filter_order_intents_by_risk
 from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs

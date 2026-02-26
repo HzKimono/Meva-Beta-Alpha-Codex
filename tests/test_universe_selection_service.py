@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from btcbot.config import Settings
+from btcbot.domain.universe import UniverseSelectionResult
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import UniverseSelectionService
 
@@ -277,6 +278,19 @@ def test_governance_cooldown_and_probation(tmp_path) -> None:
     ex.mode = 1
     third = service.select_universe(exchange=ex, settings=settings, now_utc=now)
     assert "CCCTRY" not in third.selected_symbols
+
+
+def test_universe_selection_result_derives_single_freeze_reason() -> None:
+    result = UniverseSelectionResult(
+        selected_symbols=[],
+        scored=[],
+        reasons=[],
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        freeze_reason=None,
+        freeze_reasons=["STALE_DATA", "OBSERVE_ONLY"],
+    )
+
+    assert result.freeze_reason == "STALE_DATA"
 
 
 def test_spread_bps_computation() -> None:

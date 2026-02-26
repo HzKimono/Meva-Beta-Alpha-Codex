@@ -13,7 +13,6 @@ from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.order_state import Stage7Order
 from btcbot.domain.risk_budget import Mode, RiskLimits, RiskSignals
 from btcbot.domain.risk_budget import RiskDecision as BudgetRiskDecision
-from btcbot.domain.risk_budget import Mode
 from btcbot.domain.risk_engine import CycleRiskOutput
 from btcbot.services import state_store as state_store_module
 from btcbot.services.parity import compute_run_fingerprint
@@ -76,13 +75,16 @@ def test_state_store_mode_persistence(tmp_path) -> None:
 
     with sqlite3.connect(str(tmp_path / "state.db")) as conn:
         row = conn.execute(
-            "SELECT mode, prev_mode FROM risk_decisions WHERE decision_id='c1'"
+            "SELECT mode, prev_mode, reasons_json FROM risk_decisions WHERE decision_id='c1'"
         ).fetchone()
         current = conn.execute(
             "SELECT current_mode FROM risk_state_current WHERE state_id=1"
         ).fetchone()
 
-    assert row == ("REDUCE_RISK_ONLY", "NORMAL")
+    assert row is not None
+    assert row[0] == "REDUCE_RISK_ONLY"
+    assert row[1] == "NORMAL"
+    assert row[2] == '["test"]'
     assert current == ("REDUCE_RISK_ONLY",)
 
     with sqlite3.connect(str(tmp_path / "state.db")) as conn:
@@ -202,7 +204,9 @@ def test_state_store_takeover_race_only_one_startup_succeeds(tmp_path) -> None:
     def _attempt_startup() -> None:
         gate.wait(timeout=5)
         try:
-            _ = StateStore(db_path=db_path, process_instance_ttl_seconds=60, strict_instance_lock=True)
+            _ = StateStore(
+                db_path=db_path, process_instance_ttl_seconds=60, strict_instance_lock=True
+            )
         except RuntimeError:
             results.append("conflict")
         else:
@@ -245,6 +249,21 @@ def test_state_store_heartbeat_updates_timestamp(tmp_path) -> None:
         )
 
     assert after >= before
+
+
+def test_state_store_memory_db_instance_lock_lifecycle() -> None:
+    store = StateStore(db_path=":memory:")
+
+    store.heartbeat_instance_lock()
+    store.release_instance_lock()
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM process_instances WHERE instance_id=?",
+            (store.instance_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "ended"
 
 
 def test_reserve_idempotency_payload_mismatch_raises(tmp_path) -> None:
@@ -823,7 +842,9 @@ def test_stage7_risk_reasons_json_is_stable_sorted(tmp_path) -> None:
     store.save_stage7_risk_decision(cycle_id="c2", decision=decision)
 
     with sqlite3.connect(str(db_path)) as conn:
-        row = conn.execute("SELECT reasons_json, caps_json FROM stage7_risk_decisions LIMIT 1").fetchone()
+        row = conn.execute(
+            "SELECT reasons_json, caps_json FROM stage7_risk_decisions LIMIT 1"
+        ).fetchone()
 
     assert row is not None
     assert json.loads(row[0]) == ["B", "A"]
