@@ -635,6 +635,40 @@ class StateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS stage7_universe_state (
+                role TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                selected_symbols_json TEXT NOT NULL,
+                scored_json TEXT NOT NULL DEFAULT '[]',
+                reasons_json TEXT NOT NULL DEFAULT '[]',
+                freeze_reason TEXT,
+                excluded_counts_json TEXT NOT NULL DEFAULT '{}',
+                churn_count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stage7_universe_symbol_state (
+                symbol TEXT PRIMARY KEY,
+                probation_passes INTEGER NOT NULL DEFAULT 0,
+                last_seen_ts TEXT,
+                last_added_ts TEXT,
+                last_removed_ts TEXT,
+                cooldown_until_ts TEXT,
+                updated_at_ts TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_universe_state_ts ON stage7_universe_state(ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stage7_universe_symbol_cooldown ON stage7_universe_symbol_state(cooldown_until_ts)"
+        )
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS stage7_run_metrics (
                 cycle_id TEXT PRIMARY KEY,
                 ts TEXT NOT NULL,
@@ -4342,6 +4376,120 @@ class StateStore:
         if row is None:
             return None
         return Decimal(str(row["mid_price"]))
+
+    def get_stage7_universe_snapshot(self, *, role: str = "default") -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage7_universe_state WHERE role = ?",
+                (str(role).strip().lower(),),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = {key: row[key] for key in row.keys()}
+        payload["selected_symbols"] = json.loads(str(payload.pop("selected_symbols_json") or "[]"))
+        payload["scored"] = json.loads(str(payload.pop("scored_json") or "[]"))
+        payload["reasons"] = json.loads(str(payload.pop("reasons_json") or "[]"))
+        payload["excluded_counts"] = json.loads(str(payload.pop("excluded_counts_json") or "{}"))
+        return payload
+
+    def save_stage7_universe_snapshot(
+        self,
+        *,
+        role: str,
+        ts: datetime,
+        selected_symbols: list[str],
+        scored: list[dict[str, object]],
+        reasons: list[str],
+        freeze_reason: str | None,
+        excluded_counts: dict[str, int],
+        churn_count: int,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage7_universe_state(
+                    role, ts, selected_symbols_json, scored_json, reasons_json,
+                    freeze_reason, excluded_counts_json, churn_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(role) DO UPDATE SET
+                    ts=excluded.ts,
+                    selected_symbols_json=excluded.selected_symbols_json,
+                    scored_json=excluded.scored_json,
+                    reasons_json=excluded.reasons_json,
+                    freeze_reason=excluded.freeze_reason,
+                    excluded_counts_json=excluded.excluded_counts_json,
+                    churn_count=excluded.churn_count
+                """,
+                (
+                    str(role).strip().lower(),
+                    ensure_utc(ts).isoformat(),
+                    json.dumps(selected_symbols, sort_keys=True),
+                    json.dumps(scored, sort_keys=True),
+                    json.dumps(reasons, sort_keys=True),
+                    freeze_reason,
+                    json.dumps(excluded_counts, sort_keys=True),
+                    int(churn_count),
+                ),
+            )
+
+    def get_stage7_universe_symbol_state(self, symbol: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM stage7_universe_symbol_state WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {key: row[key] for key in row.keys()}
+
+    def upsert_stage7_universe_symbol_state(
+        self,
+        *,
+        symbol: str,
+        updated_at: datetime,
+        probation_passes: int,
+        last_seen_ts: datetime | None,
+        last_added_ts: datetime | None,
+        last_removed_ts: datetime | None,
+        cooldown_until_ts: datetime | None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage7_universe_symbol_state(
+                    symbol, probation_passes, last_seen_ts, last_added_ts,
+                    last_removed_ts, cooldown_until_ts, updated_at_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    probation_passes=excluded.probation_passes,
+                    last_seen_ts=excluded.last_seen_ts,
+                    last_added_ts=excluded.last_added_ts,
+                    last_removed_ts=excluded.last_removed_ts,
+                    cooldown_until_ts=excluded.cooldown_until_ts,
+                    updated_at_ts=excluded.updated_at_ts
+                """,
+                (
+                    symbol,
+                    int(probation_passes),
+                    ensure_utc(last_seen_ts).isoformat() if last_seen_ts else None,
+                    ensure_utc(last_added_ts).isoformat() if last_added_ts else None,
+                    ensure_utc(last_removed_ts).isoformat() if last_removed_ts else None,
+                    ensure_utc(cooldown_until_ts).isoformat() if cooldown_until_ts else None,
+                    ensure_utc(updated_at).isoformat(),
+                ),
+            )
+
+    def get_stage7_universe_churn_count_since(self, *, role: str, since_utc: datetime) -> int:
+        snapshot = self.get_stage7_universe_snapshot(role=role)
+        if snapshot is None:
+            return 0
+        ts_raw = snapshot.get("ts")
+        if not ts_raw:
+            return 0
+        ts = ensure_utc(datetime.fromisoformat(str(ts_raw)))
+        if ts < ensure_utc(since_utc):
+            return 0
+        return int(snapshot.get("churn_count", 0))
 
     def save_dynamic_universe_selection(
         self,
