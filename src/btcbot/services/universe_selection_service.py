@@ -52,7 +52,7 @@ class UniverseSelectionService:
 
         ticker_stats = self._fetch_ticker_stats(exchange)
         raw_metrics: dict[str, _RawMetrics] = {}
-        stale_detected = False
+        observed_ages: list[float | None] = []
         for symbol in symbols:
             volume_try = self._extract_quote_volume_try(symbol=symbol, ticker_stats=ticker_stats)
             spread_bps, age_sec = self._fetch_spread_bps_and_age(
@@ -74,106 +74,11 @@ class UniverseSelectionService:
                 volatility=volatility,
                 age_sec=age_sec,
             )
-            if age_sec is None or age_sec > settings.stage7_max_data_age_sec:
-                stale_detected = True
-            raw_metrics[symbol] = _RawMetrics(volume_try, spread_bps, volatility, age_sec)
+            observed_ages.append(age_sec)
 
-        if stale_detected:
-            freeze_reasons.append("stale_market_data")
-
-        scored_all = self._score_candidates(raw_metrics=raw_metrics, settings=settings)
-        eligible: list[UniverseCandidate] = []
-        for candidate in scored_all:
-            reasons = self._candidate_exclusions(candidate=candidate, settings=settings)
-            if reasons:
-                for reason in reasons:
-                    excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
-                continue
-            eligible.append(candidate)
-
-        governed = self._apply_governance(
-            store=store,
-            eligible=eligible,
-            previous=prev_symbols,
-            settings=settings,
-            now_utc=now_utc,
+        stale_detected = any(
+            age is None or age > settings.stage7_max_data_age_sec for age in observed_ages
         )
-        selected = governed[: max(0, settings.stage7_universe_size)]
-
-        if stale_detected:
-            freeze_reasons.append("STALE_DATA")
-
-        scored = self._score_candidates(raw_metrics=raw_metrics, settings=settings)
-        eligible: list[UniverseCandidate] = []
-        excluded_counts = dict(discovery_exclusions)
-        for candidate in scored:
-            candidate_reasons = self._candidate_exclusions(candidate=candidate, settings=settings)
-            for reason in candidate_reasons:
-                excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
-            if candidate_reasons:
-                continue
-            eligible.append(candidate)
-
-        selected = self._apply_governance(
-            store=store,
-            eligible=eligible,
-            previous=prev_symbols,
-            settings=settings,
-            now_utc=now_utc,
-            role=role,
-        )
-
-        freeze = bool(freeze_reasons) and bool(prev_symbols)
-        if freeze:
-            selected = prev_symbols[: max(0, settings.stage7_universe_size)]
-
-        selected_set = set(selected)
-        selected_scored = [item for item in scored if item.symbol in selected_set]
-
-        additions = sorted(set(selected) - set(prev_symbols))
-        removals = sorted(set(prev_symbols) - set(selected))
-        churn_total = len(additions) + len(removals)
-        excluded_counts["churn_additions"] = len(additions)
-        excluded_counts["churn_removals"] = len(removals)
-        excluded_counts["churn_total"] = churn_total
-
-        if stale_detected:
-            freeze_reasons.append("STALE_DATA")
-
-        scored = self._score_candidates(raw_metrics=raw_metrics, settings=settings)
-        eligible: list[UniverseCandidate] = []
-        excluded_counts = dict(discovery_exclusions)
-        for candidate in scored:
-            candidate_reasons = self._candidate_exclusions(candidate=candidate, settings=settings)
-            for reason in candidate_reasons:
-                excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
-            if candidate_reasons:
-                continue
-            eligible.append(candidate)
-
-        selected = self._apply_governance(
-            store=store,
-            eligible=eligible,
-            previous=prev_symbols,
-            settings=settings,
-            now_utc=now_utc,
-            role=role,
-        )
-
-        freeze = bool(freeze_reasons) and bool(prev_symbols)
-        if freeze:
-            selected = prev_symbols[: max(0, settings.stage7_universe_size)]
-
-        selected_set = set(selected)
-        selected_scored = [item for item in scored if item.symbol in selected_set]
-
-        additions = sorted(set(selected) - set(prev_symbols))
-        removals = sorted(set(prev_symbols) - set(selected))
-        churn_total = len(additions) + len(removals)
-        excluded_counts["churn_additions"] = len(additions)
-        excluded_counts["churn_removals"] = len(removals)
-        excluded_counts["churn_total"] = churn_total
-
         if stale_detected:
             freeze_reasons.append("STALE_DATA")
 
