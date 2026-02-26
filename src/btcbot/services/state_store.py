@@ -2158,6 +2158,7 @@ class StateStore:
     def _register_instance_lock(self, conn: sqlite3.Connection) -> None:
         now_epoch = int(datetime.now(UTC).timestamp())
         ttl_cutoff = now_epoch - self.process_instance_ttl_seconds
+        current_pid = os.getpid()
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             """
@@ -2172,6 +2173,25 @@ class StateStore:
         ).fetchall()
         active_row = next((row for row in rows if int(row["heartbeat_at_epoch"]) >= ttl_cutoff), None)
         if active_row is not None:
+            # Re-entrant startup in the same process should reuse the existing active
+            # instance registration for this DB path instead of raising a self-conflict.
+            if int(active_row["pid"]) == current_pid:
+                self.instance_id = str(active_row["instance_id"])
+                conn.execute(
+                    "UPDATE process_instances SET heartbeat_at_epoch = ? WHERE instance_id = ?",
+                    (now_epoch, self.instance_id),
+                )
+                logger.info(
+                    "instance_reentrant_reuse",
+                    extra={
+                        "extra": {
+                            "db_path": self.db_path_abs,
+                            "instance_id": self.instance_id,
+                            "pid": current_pid,
+                        }
+                    },
+                )
+                return
             conflict_payload = {
                 "db_path": self.db_path_abs,
                 "instance_id": self.instance_id,
@@ -2220,7 +2240,7 @@ class StateStore:
             )
             VALUES (?, ?, ?, ?, ?, 'active', NULL)
             """,
-            (self.instance_id, os.getpid(), self.db_path_abs, now_epoch, now_epoch),
+            (self.instance_id, current_pid, self.db_path_abs, now_epoch, now_epoch),
         )
         if stale_ids:
             logger.info(

@@ -146,12 +146,21 @@ def test_state_store_strict_instance_lock_fails_on_active_conflict(tmp_path) -> 
                 99999,
                 store.db_path_abs,
                 now_epoch,
-                now_epoch,
+                now_epoch + 10,
             ),
         )
 
     with pytest.raises(RuntimeError, match="STATE_DB_LOCK_CONFLICT"):
         StateStore(db_path=db_path, strict_instance_lock=True)
+
+
+def test_state_store_strict_instance_lock_is_reentrant_for_same_pid(tmp_path) -> None:
+    db_path = str(tmp_path / "strict_same_pid.db")
+
+    first = StateStore(db_path=db_path, strict_instance_lock=True)
+    second = StateStore(db_path=db_path, strict_instance_lock=True)
+
+    assert second.instance_id == first.instance_id
 
 
 def test_state_store_stale_instance_takeover_marks_old_instance(tmp_path) -> None:
