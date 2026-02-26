@@ -4,13 +4,16 @@ import asyncio
 import base64
 import hashlib
 import hmac
+from typing import Any
 
 import httpx
+import pytest
 
 from btcbot.adapters.btcturk.clock_sync import ClockSyncService
 from btcbot.adapters.btcturk.instrumentation import InMemoryMetricsSink
 from btcbot.adapters.btcturk.rate_limit import AsyncTokenBucket
 from btcbot.adapters.btcturk.rest_client import BtcturkRestClient, RestReliabilityConfig
+from btcbot.domain.models import ExchangeError
 
 
 class _Provider:
@@ -113,3 +116,25 @@ def test_cancel_safe_treats_not_found_as_success_when_not_open() -> None:
     client = _make_client(httpx.MockTransport(handler))
     result = asyncio.run(client.cancel_order_safe(order_id="ord-1", correlation_id="corr-2"))
     assert result["success"] is True
+
+
+def test_429_metric_uses_effective_process_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def _capture(name: str, labels: dict[str, str], delta: int = 1) -> None:
+        del delta
+        if name == "bot_api_errors_total":
+            captured.append(dict(labels))
+
+    monkeypatch.setattr("btcbot.adapters.btcturk.rest_client.inc_counter", _capture)
+
+    client = _make_client(
+        httpx.MockTransport(lambda request: httpx.Response(429, text="rate limited"))
+    )
+    client.process_role = "MONITOR"
+
+    with pytest.raises(ExchangeError):
+        asyncio.run(client.request("GET", "/x", is_private=False))
+
+    assert captured
+    assert captured[0]["process_role"] == "MONITOR"

@@ -327,6 +327,35 @@ def main() -> int:
         help="Operator reason for override",
     )
 
+
+    db_locks_parser = subparsers.add_parser("state-db-locks", help="List state DB process locks")
+    db_locks_parser.add_argument(
+        "list_command",
+        nargs="?",
+        default="list",
+        choices=["list"],
+        help="List process lock rows",
+    )
+    db_locks_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+
+    db_unlock_parser = subparsers.add_parser("state-db-unlock", help="Safely release stale state DB process lock")
+    db_unlock_parser.add_argument(
+        "--db",
+        default=None,
+        help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+    db_unlock_parser.add_argument("--instance-id", required=True, help="Target process instance id")
+    db_unlock_parser.add_argument("--force", action="store_true", help="Force unlock even if heartbeat is fresh")
+    db_unlock_parser.add_argument(
+        "--force-ack",
+        default=None,
+        help="Required with --force: set to I_UNDERSTAND_STATE_DB_UNLOCK",
+    )
+
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
     stage7_run_parser.add_argument("--dry-run", action="store_true", help="Required for stage7")
     stage7_run_parser.add_argument(
@@ -635,6 +664,18 @@ def main() -> int:
                 reason=args.reason,
             )
 
+    if args.command == "state-db-locks":
+        return run_state_db_locks_list(settings=settings, db_path=args.db)
+
+    if args.command == "state-db-unlock":
+        return run_state_db_unlock(
+            settings=settings,
+            db_path=args.db,
+            instance_id=args.instance_id,
+            force=bool(args.force),
+            force_ack=args.force_ack,
+        )
+
     if args.command == "stage7-run":
         return run_cycle_stage7(
             settings,
@@ -769,6 +810,8 @@ def _command_touches_state_db(command_name: str) -> bool:
         "stage4-freeze-status",
         "stage4-freeze-clear",
         "degrade",
+        "state-db-locks",
+        "state-db-unlock",
         "stage7-run",
         "health",
         "stage7-report",
@@ -789,6 +832,8 @@ def _enforce_role_db_convention_for_command(command_name: str) -> bool:
         "stage4-freeze-status",
         "stage4-freeze-clear",
         "degrade",
+        "state-db-locks",
+        "state-db-unlock",
         "health",
         "stage7-report",
         "stage7-export",
@@ -2224,6 +2269,114 @@ def run_degrade_override(
     return 0
 
 
+
+
+_FORCE_UNLOCK_ACK = "I_UNDERSTAND_STATE_DB_UNLOCK"
+
+
+def _pid_appears_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_state_db_locks_list(*, settings: Settings, db_path: str | None = None) -> int:
+    resolved_db = normalize_db_path(db_path or settings.state_db_path)
+    store = StateStore(str(resolved_db))
+    now_epoch = int(datetime.now(UTC).timestamp())
+    with store._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT instance_id, pid, db_path, started_at_epoch, heartbeat_at_epoch, status, ended_at_epoch
+            FROM process_instances
+            ORDER BY heartbeat_at_epoch DESC
+            """
+        ).fetchall()
+    payload_rows: list[dict[str, object]] = []
+    for row in rows:
+        heartbeat_age_seconds = max(0, now_epoch - int(row["heartbeat_at_epoch"]))
+        payload_rows.append(
+            {
+                "instance_id": str(row["instance_id"]),
+                "pid": int(row["pid"]),
+                "status": str(row["status"]),
+                "heartbeat_age_seconds": heartbeat_age_seconds,
+                "strict_instance_lock": bool(store.strict_instance_lock),
+                "pid_appears_alive": _pid_appears_alive(int(row["pid"])),
+            }
+        )
+    print(json.dumps({"db_path": str(resolved_db), "locks": payload_rows}, sort_keys=True))
+    return 0
+
+
+def run_state_db_unlock(
+    *,
+    settings: Settings,
+    db_path: str | None = None,
+    instance_id: str,
+    force: bool,
+    force_ack: str | None,
+) -> int:
+    resolved_db = normalize_db_path(db_path or settings.state_db_path)
+    store = StateStore(str(resolved_db))
+    now_epoch = int(datetime.now(UTC).timestamp())
+    ttl_seconds = int(store.process_instance_ttl_seconds)
+    with store._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT instance_id, pid, heartbeat_at_epoch, status
+            FROM process_instances
+            WHERE instance_id=?
+            """,
+            (instance_id,),
+        ).fetchone()
+        if row is None:
+            print(f"No process lock instance found for instance_id={instance_id}")
+            return 2
+        pid = int(row["pid"])
+        heartbeat_age_seconds = max(0, now_epoch - int(row["heartbeat_at_epoch"]))
+        heartbeat_fresh = heartbeat_age_seconds <= ttl_seconds
+        pid_alive = _pid_appears_alive(pid)
+        appears_active = str(row["status"]) == "active" and (heartbeat_fresh or pid_alive)
+        if appears_active and not force:
+            print(
+                "Refusing to unlock active instance. Re-run with --force "
+                f"--force-ack={_FORCE_UNLOCK_ACK} only if you are sure the process is dead."
+            )
+            return 2
+        if force and force_ack != _FORCE_UNLOCK_ACK:
+            print(f"--force requires --force-ack={_FORCE_UNLOCK_ACK}")
+            return 2
+
+        conn.execute(
+            """
+            UPDATE process_instances
+            SET status='force_unlocked', ended_at_epoch=?, heartbeat_at_epoch=?
+            WHERE instance_id=?
+            """,
+            (now_epoch, now_epoch, instance_id),
+        )
+    logger.warning(
+        "state_db_unlock_audit",
+        extra={
+            "extra": {
+                "instance_id": instance_id,
+                "db_path": str(resolved_db),
+                "forced": bool(force),
+                "force_ack": bool(force),
+            }
+        },
+    )
+    print(json.dumps({"unlocked": True, "instance_id": instance_id, "forced": bool(force)}, sort_keys=True))
+    return 0
 
 def run_cycle_stage4(
     settings: Settings, force_dry_run: bool = False, db_path: str | None = None

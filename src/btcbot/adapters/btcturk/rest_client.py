@@ -16,7 +16,7 @@ from btcbot.adapters.btcturk.instrumentation import MetricsSink
 from btcbot.adapters.btcturk.rate_limit import AsyncTokenBucket
 from btcbot.adapters.btcturk.retry import RetryDecision, async_retry, compute_delay
 from btcbot.domain.models import ExchangeError
-from btcbot.obs.metrics import inc_counter
+from btcbot.obs.metrics import inc_counter, observe_histogram
 from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
 from btcbot.observability import get_instrumentation
 
@@ -122,7 +122,27 @@ class BtcturkRestClient:
         await self.clock_sync.maybe_sync()
 
         async def _call() -> dict[str, Any]:
+            limiter_started = monotonic()
             await self.limiter.acquire()
+            rate_limit_wait_seconds = max(0.0, monotonic() - limiter_started)
+            if rate_limit_wait_seconds > 0:
+                observe_histogram(
+                    "bot_rate_limit_wait_seconds",
+                    rate_limit_wait_seconds,
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": self.process_role,
+                    },
+                )
+                inc_counter(
+                    "bot_rate_limit_wait_total",
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": self.process_role,
+                    },
+                )
             headers = {"X-Correlation-ID": correlation_id or "n/a"}
             if is_private:
                 headers.update(self._auth_headers())
@@ -153,7 +173,7 @@ class BtcturkRestClient:
                     labels={
                         "exchange": "btcturk",
                         "endpoint": path,
-                        "process_role": "LIVE",
+                        "process_role": self.process_role,
                     },
                 )
 
@@ -203,6 +223,25 @@ class BtcturkRestClient:
             )
             self.metrics.inc("rest_retries")
             self.metrics.inc("rest_retry_rate")
+            inc_counter(
+                "bot_rest_retry_attempts_total",
+                labels={
+                    "exchange": "btcturk",
+                    "endpoint": path,
+                    "error_kind": exc.kind.value,
+                    "process_role": self.process_role,
+                },
+            )
+            observe_histogram(
+                "bot_rest_retry_backoff_seconds",
+                delay,
+                labels={
+                    "exchange": "btcturk",
+                    "endpoint": path,
+                    "error_kind": exc.kind.value,
+                    "process_role": self.process_role,
+                },
+            )
             return RetryDecision(retry=True, delay_seconds=delay)
 
         try:

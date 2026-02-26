@@ -2700,3 +2700,49 @@ def test_degrade_override_status_and_clear(tmp_path, capsys) -> None:
 def test_degrade_command_is_classified_as_db_touching() -> None:
     assert cli._command_touches_state_db("degrade") is True
     assert cli._enforce_role_db_convention_for_command("degrade") is True
+
+
+def test_state_db_unlock_refuses_when_heartbeat_fresh(tmp_path, capsys) -> None:
+    db_path = tmp_path / "locks.db"
+    settings = Settings(DRY_RUN=True, STATE_DB_PATH=str(db_path))
+    store = cli.StateStore(str(db_path))
+
+    rc = cli.run_state_db_unlock(
+        settings=settings,
+        db_path=str(db_path),
+        instance_id=store.instance_id,
+        force=False,
+        force_ack=None,
+    )
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "Refusing to unlock active instance" in out
+
+
+def test_state_db_unlock_force_requires_ack_and_audits(tmp_path, capsys, caplog) -> None:
+    db_path = tmp_path / "locks_force.db"
+    settings = Settings(DRY_RUN=True, STATE_DB_PATH=str(db_path))
+    store = cli.StateStore(str(db_path))
+
+    caplog.set_level("WARNING", logger="btcbot.cli")
+    rc = cli.run_state_db_unlock(
+        settings=settings,
+        db_path=str(db_path),
+        instance_id=store.instance_id,
+        force=True,
+        force_ack="I_UNDERSTAND_STATE_DB_UNLOCK",
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["unlocked"] is True
+    assert payload["forced"] is True
+    assert any(record.message == "state_db_unlock_audit" for record in caplog.records)
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM process_instances WHERE instance_id=?",
+            (store.instance_id,),
+        ).fetchone()
+    assert row is not None
+    assert str(row["status"]) == "force_unlocked"
