@@ -66,6 +66,8 @@ class UniverseSelectionService:
                 settings=settings,
                 ticker_stats=ticker_stats,
             )
+            if age_sec is None or age_sec > settings.stage7_max_data_age_sec:
+                stale_detected = True
             raw_metrics[symbol] = _RawMetrics(
                 volume_try=volume_try,
                 spread_bps=spread_bps,
@@ -150,7 +152,10 @@ class UniverseSelectionService:
             selected_symbols=selected,
             scored=selected_scored,
             reasons=reasons,
-            timestamp=now_utc,
+            freeze_reason=(freeze_reasons[0] if freeze_reasons else None),
+            freeze_reasons=freeze_reasons,
+            excluded_counts=excluded_counts,
+            churn_count=churn_total,
         )
 
     def _discover_symbols(
@@ -388,14 +393,10 @@ class UniverseSelectionService:
             symbol = canonical_symbol(str(symbol_raw))
             parsed[symbol] = {
                 "volume": self._as_decimal(row.get("volume") or row.get("quoteVolume")),
-                "last": self._as_decimal(
-                    row.get("last") or row.get("lastPrice") or row.get("close")
-                ),
+                "last": self._as_decimal(row.get("last") or row.get("lastPrice") or row.get("close")),
                 "high": self._as_decimal(row.get("high") or row.get("highPrice")),
                 "low": self._as_decimal(row.get("low") or row.get("lowPrice")),
-                "price_change": self._as_decimal(
-                    row.get("priceChangePercent") or row.get("dailyPercent")
-                ),
+                "price_change": self._as_decimal(row.get("priceChangePercent") or row.get("dailyPercent")),
             }
         return parsed
 
@@ -571,15 +572,9 @@ class UniverseSelectionService:
         settings: Settings,
     ) -> list[UniverseCandidate]:
         weights = self._resolve_weights(settings)
-        liquidity_values = [
-            item.volume_try for item in raw_metrics.values() if item.volume_try is not None
-        ]
-        spread_values = [
-            item.spread_bps for item in raw_metrics.values() if item.spread_bps is not None
-        ]
-        volatility_values = [
-            item.volatility for item in raw_metrics.values() if item.volatility is not None
-        ]
+        liquidity_values = [item.volume_try for item in raw_metrics.values() if item.volume_try is not None]
+        spread_values = [item.spread_bps for item in raw_metrics.values() if item.spread_bps is not None]
+        volatility_values = [item.volatility for item in raw_metrics.values() if item.volatility is not None]
 
         liquidity_min, liquidity_max = self._bounds(liquidity_values)
         spread_min, spread_max = self._bounds(spread_values)
@@ -587,9 +582,7 @@ class UniverseSelectionService:
 
         scored: list[UniverseCandidate] = []
         for symbol, metrics in raw_metrics.items():
-            liquidity_score = self._normalize_linear(
-                metrics.volume_try, liquidity_min, liquidity_max
-            )
+            liquidity_score = self._normalize_linear(metrics.volume_try, liquidity_min, liquidity_max)
             spread_score = self._normalize_inverse(metrics.spread_bps, spread_min, spread_max)
             volatility_score = self._normalize_inverse(
                 metrics.volatility, volatility_min, volatility_max
