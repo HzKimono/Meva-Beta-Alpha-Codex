@@ -259,6 +259,7 @@ class StateStore:
         scope_digest = hashlib.sha256(self.db_path_abs.encode("utf-8")).hexdigest()[:12]
         self.instance_id = f"{os.getpid()}-{scope_digest}-{uuid4().hex[:8]}"
         self._transaction_conn: sqlite3.Connection | None = None
+        self._shared_conn: sqlite3.Connection | None = None
         self._init_db()
         with self._connect() as conn:
             self._ensure_risk_budget_schema(conn)
@@ -285,6 +286,12 @@ class StateStore:
         tx_conn = getattr(self, "_transaction_conn", None)
         if tx_conn is not None:
             yield tx_conn
+            return
+        if self.db_path == ":memory:":
+            if self._shared_conn is None:
+                self._shared_conn = create_sqlite_connection(self.db_path)
+            yield self._shared_conn
+            self._shared_conn.commit()
             return
         conn = create_sqlite_connection(self.db_path)
         try:
@@ -851,15 +858,25 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS idx_stage7_risk_decisions_decided_at "
             "ON stage7_risk_decisions(decided_at)"
         )
-        risk_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_risk_decisions)")}
+        risk_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_risk_decisions)")
+        }
         if "caps_json" not in risk_columns:
-            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN caps_json TEXT NOT NULL DEFAULT '{}'" )
+            conn.execute(
+                "ALTER TABLE stage7_risk_decisions ADD COLUMN caps_json TEXT NOT NULL DEFAULT '{}'"
+            )
         if "allow_submit" not in risk_columns:
-            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN allow_submit INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE stage7_risk_decisions ADD COLUMN allow_submit INTEGER NOT NULL DEFAULT 0"
+            )
         if "allow_cancel" not in risk_columns:
-            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN allow_cancel INTEGER NOT NULL DEFAULT 1")
+            conn.execute(
+                "ALTER TABLE stage7_risk_decisions ADD COLUMN allow_cancel INTEGER NOT NULL DEFAULT 1"
+            )
         if "metrics_json" not in risk_columns:
-            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'" )
+            conn.execute(
+                "ALTER TABLE stage7_risk_decisions ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS stage7_params_active(
@@ -1310,7 +1327,6 @@ class StateStore:
         cycle_id: str | None,
         decision: CycleRiskOutput,
     ) -> None:
-        reasons = getattr(decision, "reasons", [])
         caps_payload = {
             "max_order_notional_try": str(getattr(decision, "max_order_notional_try", "0")),
             "max_orders_per_cycle": int(getattr(decision, "max_orders_per_cycle", 0)),
@@ -1319,7 +1335,9 @@ class StateStore:
             "max_drawdown_bps": int(getattr(decision, "max_drawdown_bps", 0)),
             "fee_burn_limit_try": str(getattr(decision, "fee_burn_limit_try", "0")),
         }
-        cooldown_until = getattr(decision, "cooldown_until_utc", None) or getattr(decision, "cooldown_until", None)
+        cooldown_until = getattr(decision, "cooldown_until_utc", None) or getattr(
+            decision, "cooldown_until", None
+        )
         conn.execute(
             """
             INSERT INTO stage7_risk_decisions(
@@ -1339,13 +1357,9 @@ class StateStore:
                 cycle_id,
                 ensure_utc(decision.decided_at).isoformat(),
                 dump_risk_mode(decision.mode),
-                json.dumps(reasons, sort_keys=True),
+                json.dumps(getattr(decision, "reasons", []), sort_keys=True),
                 json.dumps(caps_payload, sort_keys=True),
-                (
-                    ensure_utc(cooldown_until).isoformat()
-                    if cooldown_until is not None
-                    else None
-                ),
+                (ensure_utc(cooldown_until).isoformat() if cooldown_until is not None else None),
                 int(getattr(decision, "allow_submit", False)),
                 int(getattr(decision, "allow_cancel", True)),
                 json.dumps(getattr(decision, "metrics", {}), sort_keys=True),
@@ -5106,6 +5120,7 @@ class StateStore:
         decision: RiskDecision,
         prev_mode: str | None,
     ) -> None:
+        reasons = getattr(decision, "reasons", [])
         conn.execute(
             """
             INSERT INTO risk_decisions(

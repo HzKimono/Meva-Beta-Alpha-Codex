@@ -7,7 +7,6 @@ from decimal import Decimal
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode
 from btcbot.domain.risk_engine import (
-    CycleRiskOutput,
     REASON_DRAWDOWN_LIMIT,
     REASON_EXCHANGE_DEGRADED,
     REASON_FEE_BURN,
@@ -16,6 +15,7 @@ from btcbot.domain.risk_engine import (
     REASON_LOSS_LIMIT,
     REASON_OK,
     REASON_STALE_DATA,
+    CycleRiskOutput,
 )
 from btcbot.domain.risk_models import ExposureSnapshot, stable_hash_payload
 
@@ -48,7 +48,9 @@ class Stage7RiskBudgetService:
         reasons: list[str] = []
         cooldown_until: datetime | None = None
 
-        max_order_notional_try = min(settings.max_order_notional_try, settings.notional_cap_try_per_cycle)
+        max_order_notional_try = min(
+            settings.max_order_notional_try, settings.notional_cap_try_per_cycle
+        )
         max_orders_per_cycle = settings.max_orders_per_cycle
         max_symbol_exposure_try = settings.max_symbol_exposure_try
 
@@ -59,7 +61,9 @@ class Stage7RiskBudgetService:
             if next_mode == Mode.OBSERVE_ONLY:
                 mode = Mode.OBSERVE_ONLY
                 if settings.risk_cooldown_sec > 0:
-                    cooldown_until = now_utc.astimezone(UTC) + timedelta(seconds=settings.risk_cooldown_sec)
+                    cooldown_until = now_utc.astimezone(UTC) + timedelta(
+                        seconds=settings.risk_cooldown_sec
+                    )
             elif next_mode == Mode.REDUCE_RISK_ONLY and mode == Mode.NORMAL:
                 mode = Mode.REDUCE_RISK_ONLY
 

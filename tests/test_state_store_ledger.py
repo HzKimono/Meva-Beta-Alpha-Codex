@@ -150,9 +150,10 @@ def test_ledger_incremental_rowid_and_checkpoint_io(tmp_path) -> None:
 
 
 def test_checkpoint_equivalence_full_replay_vs_resume(tmp_path) -> None:
+    import logging
+
     from btcbot.domain.ledger import LedgerState, apply_events
     from btcbot.services.ledger_service import LedgerService
-    import logging
 
     store = StateStore(db_path=str(tmp_path / "checkpoint_equivalence.db"))
     base_ts = datetime(2026, 1, 2, tzinfo=UTC)

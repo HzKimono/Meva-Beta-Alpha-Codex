@@ -36,6 +36,10 @@ from btcbot.services.order_builder_service import OrderBuilderService
 from btcbot.services.planning_kernel_adapters import Stage7ExecutionPort, Stage7PlanConsumer
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.price_conversion_service import MarkPriceConverter
+from btcbot.services.risk_policy_service import (
+    ActionPortfolioSnapshot,
+    RiskPolicyService,
+)
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.stage7_planning_kernel_integration import (
     Stage7OrderIntentBuilderAdapter,
@@ -46,10 +50,6 @@ from btcbot.services.stage7_planning_kernel_integration import (
     normalize_stage4_open_orders,
 )
 from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
-from btcbot.services.risk_policy_service import (
-    ActionPortfolioSnapshot,
-    RiskPolicyService,
-)
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
 
@@ -135,7 +135,9 @@ def _filter_order_intents_by_risk(
     portfolio_snapshot: ActionPortfolioSnapshot,
     cycle_risk,
 ) -> tuple[list[OrderIntent], list[dict[str, object]]]:
-    intent_risk_actions = [_to_risk_action(intent) for intent in order_intents if not intent.skipped]
+    intent_risk_actions = [
+        _to_risk_action(intent) for intent in order_intents if not intent.skipped
+    ]
     allowed_intent_actions, intent_decisions = risk_policy_service.filter_actions(
         actions=intent_risk_actions,
         portfolio=portfolio_snapshot,
@@ -157,7 +159,8 @@ def _filter_order_intents_by_risk(
             (
                 decision.reason
                 for decision in intent_decisions
-                if decision.action.client_order_id == intent.client_order_id and not decision.accepted
+                if decision.action.client_order_id == intent.client_order_id
+                and not decision.accepted
             ),
             "risk_blocked",
         )
@@ -558,8 +561,14 @@ class Stage7CycleRunner:
                 "risk_mode": dump_risk_mode(stage7_risk_mode),
                 "risk_reasons": stage7_risk_decision.reasons,
                 "risk_cooldown_until": (
-                    (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None)).isoformat()
-                    if (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None))
+                    (
+                        getattr(stage7_risk_decision, "cooldown_until_utc", None)
+                        or getattr(stage7_risk_decision, "cooldown_until", None)
+                    ).isoformat()
+                    if (
+                        getattr(stage7_risk_decision, "cooldown_until_utc", None)
+                        or getattr(stage7_risk_decision, "cooldown_until", None)
+                    )
                     else None
                 ),
                 "risk_inputs_hash": stage7_risk_decision.inputs_hash,
@@ -636,7 +645,9 @@ class Stage7CycleRunner:
                 positions_by_symbol: dict[str, Decimal] = {}
                 for position in state_store.list_stage4_positions():
                     positions_by_symbol[normalize_symbol(position.symbol)] = position.qty
-                portfolio_snapshot = ActionPortfolioSnapshot(positions_by_symbol=positions_by_symbol)
+                portfolio_snapshot = ActionPortfolioSnapshot(
+                    positions_by_symbol=positions_by_symbol
+                )
                 filtered_actions, policy_decisions = risk_policy_service.filter_actions(
                     actions=filtered_actions,
                     portfolio=portfolio_snapshot,
