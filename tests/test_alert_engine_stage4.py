@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from btcbot.domain.risk_budget import Mode
 from btcbot.obs.alert_engine import AlertDedupe, AlertRuleEvaluator, MetricWindowStore
-from btcbot.obs.alerts import DRY_RUN_ALERT_RULES, AlertRule
+from btcbot.obs.alerts import BASELINE_ALERT_RULES, DRY_RUN_ALERT_RULES, AlertRule
 from btcbot.obs.stage4_alarm_hook import build_cycle_metrics
 
 
@@ -168,3 +168,21 @@ def test_dry_run_alert_rules_emit_on_synthetic_window() -> None:
     assert "dryrun_ws_rest_fallback_spike" in names
     assert "dryrun_cycle_duration_p95_high" in names
     assert "dryrun_cycle_stalled" in names
+
+
+def test_baseline_alerts_trigger_api_spike_cycle_stuck_and_reject_1123() -> None:
+    store = MetricWindowStore()
+    evaluator = AlertRuleEvaluator()
+
+    for minute in range(6):
+        ts = minute * 60
+        store.record("bot_api_errors_total", minute * 15, ts)
+        store.record("bot_orders_submitted_total", 0, ts)
+        store.record("bot_reject_1123_total", minute * 5, ts)
+
+    events = evaluator.evaluate_rules(BASELINE_ALERT_RULES, store, now_epoch=300)
+    names = {event.rule_name for event in events}
+
+    assert "api_error_rate_spike" in names
+    assert "stuck_cycles" in names
+    assert "reject_spike_1123" in names
