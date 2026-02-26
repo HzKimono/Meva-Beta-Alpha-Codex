@@ -81,6 +81,7 @@ from btcbot.services.stage4_cycle_runner import (
 from btcbot.services.stage7_backtest_runner import Stage7BacktestRunner
 from btcbot.services.stage7_cycle_runner import Stage7CycleRunner
 from btcbot.services.stage7_reporting import (
+    STAGE7_REPORT_SCHEMA_VERSION,
     build_cycle_rows,
     validate_cycle_rows,
 )
@@ -2671,6 +2672,7 @@ def run_stage7_report(
         daily = build_stage7_rollup(cycle_rows, "daily")
         weekly = build_stage7_rollup(cycle_rows, "weekly")
         report_obj = {
+            "schema_version": STAGE7_REPORT_SCHEMA_VERSION,
             "cycles": cycle_rows,
             "rollups": {"daily": daily, "weekly": weekly},
             "validations": validations,
@@ -2842,6 +2844,7 @@ def run_stage7_export(
     daily = build_stage7_rollup(cycle_rows, "daily")
     weekly = build_stage7_rollup(cycle_rows, "weekly")
     report_obj = {
+        "schema_version": STAGE7_REPORT_SCHEMA_VERSION,
         "cycles": cycle_rows,
         "rollups": {"daily": daily, "weekly": weekly},
         "validations": validations,

@@ -83,7 +83,10 @@ def test_stage7_export_jsonl(tmp_path: Path) -> None:
         == 0
     )
     assert out.exists()
-    assert "cycle_id" in out.read_text(encoding="utf-8")
+    payload = out.read_text(encoding="utf-8")
+    assert "cycle_id" in payload
+    assert "schema_version" in payload
+    assert "realized_pnl_try" in payload
 
 
 def test_stage7_alerts_all_false_only_header(capsys, tmp_path: Path) -> None:
@@ -406,6 +409,7 @@ def test_report_includes_slo_status(capsys, tmp_path: Path) -> None:
         == 0
     )
     payload = capsys.readouterr().out
+    assert '"schema_version"' in payload
     assert '"cycles"' in payload
     assert '"rollups"' in payload
     assert '"validations"' in payload

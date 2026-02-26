@@ -12,6 +12,7 @@ from btcbot.services.state_store import StateStore
 
 _DECIMAL_ZERO = Decimal("0")
 _NET_TOLERANCE_TRY = Decimal("0.01")
+STAGE7_REPORT_SCHEMA_VERSION = "phase6-v1"
 
 
 @dataclass(slots=True)
@@ -24,7 +25,10 @@ class CycleReportRow:
     universe_size: int
     gross_pnl_try: Decimal
     net_pnl_try: Decimal
+    realized_pnl_try: Decimal
+    unrealized_pnl_try: Decimal
     fees_try: Decimal
+    funding_cost_try: Decimal
     slippage_try: Decimal
     turnover_try: Decimal
     equity_try: Decimal
@@ -90,7 +94,10 @@ def build_cycle_rows(store: StateStore, limit: int) -> list[CycleReportRow]:
                 universe_size=_as_int(row.get("universe_size")),
                 gross_pnl_try=_as_decimal(row.get("gross_pnl_try")),
                 net_pnl_try=_as_decimal(row.get("net_pnl_try")),
+                realized_pnl_try=_as_decimal(row.get("ledger_realized_pnl_try")),
+                unrealized_pnl_try=_as_decimal(row.get("ledger_unrealized_pnl_try")),
                 fees_try=_as_decimal(row.get("fees_try")),
+                funding_cost_try=_as_decimal(row.get("funding_cost_try")),
                 slippage_try=_as_decimal(row.get("slippage_try")),
                 turnover_try=_as_decimal(row.get("turnover_try")),
                 equity_try=_as_decimal(row.get("equity_try")),
@@ -155,7 +162,7 @@ def validate_cycle_rows(rows: list[CycleReportRow]) -> list[ValidationFinding]:
             )
         last_ts = current_ts
 
-        expected_net = row.gross_pnl_try - row.fees_try - row.slippage_try
+        expected_net = row.gross_pnl_try - row.fees_try - row.funding_cost_try - row.slippage_try
         delta = abs(row.net_pnl_try - expected_net)
         if delta > _NET_TOLERANCE_TRY:
             findings.append(
@@ -168,6 +175,7 @@ def validate_cycle_rows(rows: list[CycleReportRow]) -> list[ValidationFinding]:
                         "gross_pnl_try": str(row.gross_pnl_try),
                         "fees_try": str(row.fees_try),
                         "slippage_try": str(row.slippage_try),
+                        "funding_cost_try": str(row.funding_cost_try),
                         "net_pnl_try": str(row.net_pnl_try),
                         "expected_net_pnl_try": str(expected_net),
                         "abs_delta_try": str(delta),
@@ -264,7 +272,10 @@ def render_csv(rows: list[CycleReportRow]) -> str:
         "universe_size",
         "gross_pnl_try",
         "net_pnl_try",
+        "realized_pnl_try",
+        "unrealized_pnl_try",
         "fees_try",
+        "funding_cost_try",
         "slippage_try",
         "turnover_try",
         "equity_try",
@@ -291,7 +302,10 @@ def render_csv(rows: list[CycleReportRow]) -> str:
                 "universe_size": row.universe_size,
                 "gross_pnl_try": str(row.gross_pnl_try),
                 "net_pnl_try": str(row.net_pnl_try),
+                "realized_pnl_try": str(row.realized_pnl_try),
+                "unrealized_pnl_try": str(row.unrealized_pnl_try),
                 "fees_try": str(row.fees_try),
+                "funding_cost_try": str(row.funding_cost_try),
                 "slippage_try": str(row.slippage_try),
                 "turnover_try": str(row.turnover_try),
                 "equity_try": str(row.equity_try),

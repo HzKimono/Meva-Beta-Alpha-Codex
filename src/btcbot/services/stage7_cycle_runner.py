@@ -35,6 +35,7 @@ from btcbot.services.oms_service import OMSService, Stage7MarketSimulator
 from btcbot.services.order_builder_service import OrderBuilderService
 from btcbot.services.planning_kernel_adapters import Stage7ExecutionPort, Stage7PlanConsumer
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
+from btcbot.services.price_conversion_service import MarkPriceConverter
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.stage7_planning_kernel_integration import (
     Stage7OrderIntentBuilderAdapter,
@@ -858,9 +859,11 @@ class Stage7CycleRunner:
             snapshot = ledger_service.snapshot(
                 mark_prices=mark_prices,
                 cash_try=exposure_snapshot.free_cash_try,
+                price_for_fee_conversion=MarkPriceConverter(mark_prices),
                 slippage_try=slippage_try,
                 ts=now,
                 ledger_state=ledger_state,
+                strict_fee_conversion=True,
             )
 
             collector.stop_timer("ledger")
