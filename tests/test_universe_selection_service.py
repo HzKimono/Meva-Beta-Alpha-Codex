@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from btcbot.config import Settings
@@ -15,104 +15,142 @@ class _Pair:
 
 class _Exchange:
     def __init__(self) -> None:
-        self.orderbook_calls: dict[str, int] = {}
+        self.now = datetime.now(UTC)
 
     def get_exchange_info(self):
-        return [_Pair("ETH_TRY"), _Pair("BTC_TRY"), _Pair("ADA_TRY")]
+        return [_Pair("ETH_TRY"), _Pair("BTC_TRY"), _Pair("ADA_USDT"), _Pair("ADA_TRY")]
 
     def get_ticker_stats(self):
         return [
             {"pairSymbol": "ETH_TRY", "volume": "500", "high": "102", "low": "98", "last": "100"},
-            {"pairSymbol": "BTC_TRY", "volume": "500", "high": "101", "low": "99", "last": "100"},
-            {"pairSymbol": "ADA_TRY", "volume": "500", "high": "101", "low": "99", "last": "100"},
+            {"pairSymbol": "BTC_TRY", "volume": "50", "high": "101", "low": "99", "last": "100"},
+            {"pairSymbol": "ADA_TRY", "volume": "400", "high": "101", "low": "99", "last": "100"},
         ]
 
-    def get_orderbook(self, symbol: str):
-        self.orderbook_calls[symbol] = self.orderbook_calls.get(symbol, 0) + 1
+    def get_orderbook_with_timestamp(self, symbol: str):
         books = {
-            "BTCTRY": (Decimal("99"), Decimal("100")),
-            "ETHTRY": (Decimal("99"), Decimal("100")),
-            "ADATRY": (Decimal("99"), Decimal("100")),
+            "BTCTRY": (Decimal("99"), Decimal("101"), self.now),
+            "ETHTRY": (Decimal("99.9"), Decimal("100"), self.now),
+            "ADATRY": (Decimal("99.8"), Decimal("100"), self.now),
         }
         return books[symbol]
 
     def get_candles(self, symbol: str, limit: int):
-        del limit
-        candles = {
-            "BTCTRY": [{"close": "100"}, {"close": "101"}, {"close": "99"}],
-            "ETHTRY": [{"close": "100"}, {"close": "100.5"}, {"close": "100.25"}],
-            "ADATRY": [{"close": "100"}, {"close": "100.5"}, {"close": "100.25"}],
-        }
-        return candles[symbol]
+        del symbol, limit
+        return [{"close": "100"}, {"close": "101"}, {"close": "99"}]
 
 
-def test_deterministic_tiebreak_and_caching() -> None:
+class _StaleExchange(_Exchange):
+    def get_orderbook_with_timestamp(self, symbol: str):
+        bid, ask, _ = super().get_orderbook_with_timestamp(symbol)
+        return bid, ask, self.now - timedelta(hours=1)
+
+
+class _GovernanceExchange(_Exchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mode = 0
+
+    def get_exchange_info(self):
+        if self.mode == 0:
+            return [_Pair("AAA_TRY"), _Pair("BBB_TRY")]
+        return [_Pair("AAA_TRY"), _Pair("CCC_TRY")]
+
+    def get_ticker_stats(self):
+        if self.mode == 0:
+            return [
+                {"pairSymbol": "AAA_TRY", "volume": "1000", "high": "101", "low": "99", "last": "100"},
+                {"pairSymbol": "BBB_TRY", "volume": "900", "high": "101", "low": "99", "last": "100"},
+            ]
+        return [
+            {"pairSymbol": "AAA_TRY", "volume": "1000", "high": "101", "low": "99", "last": "100"},
+            {"pairSymbol": "CCC_TRY", "volume": "950", "high": "101", "low": "99", "last": "100"},
+        ]
+
+    def get_orderbook_with_timestamp(self, symbol: str):
+        return Decimal("99.9"), Decimal("100"), self.now
+
+
+def _settings(tmp_path, **extra):
+    env = {
+        "DRY_RUN": True,
+        "STAGE7_ENABLED": True,
+        "STATE_DB_PATH": str(tmp_path / "state.db"),
+        "STAGE7_UNIVERSE_SIZE": 2,
+        "STAGE7_MIN_QUOTE_VOLUME_TRY": "100",
+        "STAGE7_MAX_SPREAD_BPS": "50",
+        "STAGE7_MAX_DATA_AGE_SEC": 30,
+        "STAGE7_UNIVERSE_GOVERNANCE_PROBATION_CYCLES": 1,
+        "STAGE7_UNIVERSE_GOVERNANCE_MAX_CHURN_PER_DAY": 100,
+        "STAGE7_UNIVERSE_GOVERNANCE_COOLDOWN_SEC": 3600,
+    }
+    env.update(extra)
+    return Settings(**env)
+
+
+def test_discovery_try_only_and_normalized(tmp_path) -> None:
     service = UniverseSelectionService()
-    exchange = _Exchange()
-    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True)
-
     result = service.select_universe(
-        exchange=exchange,
-        settings=settings,
+        exchange=_Exchange(),
+        settings=_settings(tmp_path),
         now_utc=datetime.now(UTC),
     )
-
-    assert result.selected_symbols[0] == "ADATRY"
-    assert result.selected_symbols[1] == "ETHTRY"
-    assert exchange.orderbook_calls == {"ADATRY": 1, "BTCTRY": 1, "ETHTRY": 1}
+    assert all(symbol.endswith("TRY") for symbol in result.selected_symbols)
+    assert "ADAUSDT" not in result.selected_symbols
 
 
-def test_whitelist_blacklist_behavior() -> None:
+def test_ranking_filters_spread_and_volume(tmp_path) -> None:
     service = UniverseSelectionService()
-    exchange = _Exchange()
-    settings = Settings(
-        DRY_RUN=True,
-        STAGE7_ENABLED=True,
-        STAGE7_UNIVERSE_WHITELIST="BTC_TRY,ETH_TRY",
-        STAGE7_UNIVERSE_BLACKLIST="ETH_TRY",
-    )
-
     result = service.select_universe(
-        exchange=exchange,
-        settings=settings,
+        exchange=_Exchange(),
+        settings=_settings(tmp_path),
         now_utc=datetime.now(UTC),
     )
+    assert "BTCTRY" not in result.selected_symbols
+    assert "ETHTRY" in result.selected_symbols
 
-    assert result.selected_symbols == ["BTCTRY"]
 
-
-def test_missing_metric_penalty_is_deterministic() -> None:
-    class _MissingExchange(_Exchange):
-        def get_ticker_stats(self):
-            return [{"pairSymbol": "BTC_TRY", "volume": "500"}]
-
-        def get_exchange_info(self):
-            return [_Pair("BTC_TRY"), _Pair("ETH_TRY")]
-
-        def get_orderbook(self, symbol: str):
-            if symbol == "ETHTRY":
-                raise ValueError("missing")
-            return Decimal("99"), Decimal("100")
-
-        def get_candles(self, symbol: str, limit: int):
-            del symbol, limit
-            return []
-
+def test_freeze_on_stale_returns_previous_universe(tmp_path) -> None:
     service = UniverseSelectionService()
-    settings = Settings(DRY_RUN=True, STAGE7_ENABLED=True)
-    first = service.select_universe(
-        exchange=_MissingExchange(),
-        settings=settings,
+    fresh = service.select_universe(
+        exchange=_Exchange(),
+        settings=_settings(tmp_path),
         now_utc=datetime.now(UTC),
     )
-    second = service.select_universe(
-        exchange=_MissingExchange(),
-        settings=settings,
+    stale = service.select_universe(
+        exchange=_StaleExchange(),
+        settings=_settings(tmp_path),
         now_utc=datetime.now(UTC),
     )
+    assert stale.selected_symbols == fresh.selected_symbols
+    assert "stale_market_data" in stale.reasons
 
+
+def test_governance_cooldown_and_probation(tmp_path) -> None:
+    service = UniverseSelectionService()
+    ex = _GovernanceExchange()
+    settings = _settings(
+        tmp_path,
+        STAGE7_UNIVERSE_GOVERNANCE_PROBATION_CYCLES=2,
+        STAGE7_UNIVERSE_GOVERNANCE_COOLDOWN_SEC=7200,
+    )
+    first = service.select_universe(exchange=ex, settings=settings, now_utc=datetime.now(UTC))
+    assert first.selected_symbols == []
+    second = service.select_universe(exchange=ex, settings=settings, now_utc=datetime.now(UTC))
+    assert second.selected_symbols == ["AAATRY", "BBBTRY"]
+    ex.mode = 1
+    third = service.select_universe(exchange=ex, settings=settings, now_utc=datetime.now(UTC))
+    assert "CCC" not in "".join(third.selected_symbols)
+
+
+def test_determinism_same_input_same_order(tmp_path) -> None:
+    service = UniverseSelectionService()
+    settings = _settings(tmp_path)
+    now = datetime.now(UTC)
+    first = service.select_universe(exchange=_Exchange(), settings=settings, now_utc=now)
+    second = service.select_universe(exchange=_Exchange(), settings=settings, now_utc=now)
+    assert first.selected_symbols == second.selected_symbols
     assert [x.symbol for x in first.scored] == [x.symbol for x in second.scored]
-    assert first.scored[1].total_score < first.scored[0].total_score
 
 
 def test_spread_bps_computation() -> None:

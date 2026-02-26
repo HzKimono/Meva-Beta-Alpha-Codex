@@ -15,9 +15,16 @@ class UniverseCandidate:
     breakdown: dict[str, str]
 
 
+ScoredSymbolCandidate = UniverseCandidate
+
+
 @dataclass(frozen=True)
 class UniverseSelectionResult:
     selected_symbols: list[str]
     scored: list[UniverseCandidate]
     reasons: list[str]
     timestamp: datetime
+
+    @property
+    def ts_utc(self) -> datetime:
+        return self.timestamp

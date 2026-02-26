@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import sqrt
 from typing import TYPE_CHECKING
 
 from btcbot.domain.symbols import canonical_symbol, quote_currency
 from btcbot.domain.universe import UniverseCandidate, UniverseSelectionResult
+from btcbot.services.state_store import StateStore
 
 if TYPE_CHECKING:
     from btcbot.config import Settings
 
 
+logger = logging.getLogger(__name__)
 _BPS = Decimal("10000")
 _MISSING_METRIC_PENALTY = Decimal("-1")
 _DEFAULT_WEIGHT_LIQUIDITY = Decimal("0.50")
@@ -26,50 +29,205 @@ class _RawMetrics:
     volume_try: Decimal | None
     spread_bps: Decimal | None
     volatility: Decimal | None
+    age_sec: float | None
 
 
 class UniverseSelectionService:
     def select_universe(
         self, *, exchange: object, settings: Settings, now_utc: datetime
     ) -> UniverseSelectionResult:
+        now_utc = self._ensure_utc(now_utc)
+        store = StateStore(db_path=settings.state_db_path)
+        role = "stage7"
+        previous = store.get_stage7_universe_snapshot(role=role) or {}
+        prev_symbols = [canonical_symbol(str(x)) for x in previous.get("selected_symbols", [])]
+
+        freeze_reasons = self._freeze_reasons(exchange=exchange, settings=settings)
         exchange_info = self._safe_get_exchange_info(exchange)
         symbols = self._filter_symbols(exchange_info=exchange_info, settings=settings)
         ticker_stats = self._fetch_ticker_stats(exchange)
-        candles_cache: dict[str, list[Decimal]] = {}
-        orderbook_cache: dict[str, tuple[Decimal, Decimal] | None] = {}
+
+        if not symbols:
+            freeze_reasons.append("universe_discovery_empty")
 
         raw_metrics: dict[str, _RawMetrics] = {}
+        excluded_counts: dict[str, int] = {}
+        stale_detected = False
         for symbol in symbols:
             volume_try = self._extract_quote_volume_try(symbol=symbol, ticker_stats=ticker_stats)
-            spread_bps = self._fetch_spread_bps(
-                exchange=exchange, symbol=symbol, cache=orderbook_cache
-            )
+            spread_bps, age_sec = self._fetch_spread_bps_and_age(exchange=exchange, symbol=symbol)
             volatility = self._fetch_volatility(
                 exchange=exchange,
                 symbol=symbol,
                 settings=settings,
                 ticker_stats=ticker_stats,
-                candles_cache=candles_cache,
             )
-            raw_metrics[symbol] = _RawMetrics(
-                volume_try=volume_try,
-                spread_bps=spread_bps,
-                volatility=volatility,
-            )
+            if age_sec is None or age_sec > settings.stage7_max_data_age_sec:
+                stale_detected = True
+            raw_metrics[symbol] = _RawMetrics(volume_try, spread_bps, volatility, age_sec)
 
-        candidates = self._score_candidates(raw_metrics=raw_metrics, settings=settings)
-        capped = candidates[: max(0, settings.stage7_universe_size)]
+        if stale_detected:
+            freeze_reasons.append("stale_market_data")
+
+        scored_all = self._score_candidates(raw_metrics=raw_metrics, settings=settings)
+        eligible: list[UniverseCandidate] = []
+        for candidate in scored_all:
+            reasons = self._candidate_exclusions(candidate=candidate, settings=settings)
+            if reasons:
+                for reason in reasons:
+                    excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
+                continue
+            eligible.append(candidate)
+
+        governed = self._apply_governance(
+            store=store,
+            eligible=eligible,
+            previous=prev_symbols,
+            settings=settings,
+            now_utc=now_utc,
+        )
+        selected = governed[: max(0, settings.stage7_universe_size)]
+
         reasons = [
             "deterministic_ranking: total desc -> liquidity desc -> symbol asc",
             "missing_metrics_penalty: -1 applied per missing score component",
             "dry_run_read_only: universe selection never places orders",
         ]
+        reasons.extend(sorted(set(freeze_reasons)))
+
+        if freeze_reasons and prev_symbols:
+            selected = prev_symbols[: max(0, settings.stage7_universe_size)]
+            reasons.append("freeze_previous_universe")
+
+        selected_set = set(selected)
+        scored_for_result = [item for item in scored_all if item.symbol in selected_set]
+        scored_for_result.sort(key=lambda item: (selected.index(item.symbol), item.symbol))
+
+        churn_count = len((set(selected) - set(prev_symbols)) | (set(prev_symbols) - set(selected)))
+        store.save_stage7_universe_snapshot(
+            role=role,
+            ts=now_utc,
+            selected_symbols=selected,
+            scored=[self._candidate_to_json(item) for item in scored_all],
+            reasons=reasons,
+            freeze_reason=freeze_reasons[0] if freeze_reasons else None,
+            excluded_counts=excluded_counts,
+            churn_count=churn_count,
+        )
+
+        logger.info(
+            "stage7_universe_selected",
+            extra={
+                "extra": {
+                    "selected_universe_count": len(selected),
+                    "candidate_count": len(symbols),
+                    "excluded_by_reason": excluded_counts,
+                    "freeze_reason": freeze_reasons[0] if freeze_reasons else None,
+                    "churn_count": churn_count,
+                }
+            },
+        )
         return UniverseSelectionResult(
-            selected_symbols=[item.symbol for item in capped],
-            scored=candidates,
+            selected_symbols=selected,
+            scored=scored_all,
             reasons=reasons,
             timestamp=now_utc,
         )
+
+    @staticmethod
+    def _candidate_to_json(item: UniverseCandidate) -> dict[str, object]:
+        return {
+            "symbol": item.symbol,
+            "liquidity_score": str(item.liquidity_score),
+            "spread_score": str(item.spread_score),
+            "volatility_score": str(item.volatility_score),
+            "total_score": str(item.total_score),
+            "breakdown": dict(item.breakdown),
+        }
+
+    def _apply_governance(
+        self,
+        *,
+        store: StateStore,
+        eligible: list[UniverseCandidate],
+        previous: list[str],
+        settings: Settings,
+        now_utc: datetime,
+    ) -> list[str]:
+        cooldown_sec = settings.stage7_universe_governance_cooldown_sec
+        probation_cycles = settings.stage7_universe_governance_probation_cycles
+        max_size = max(0, settings.stage7_universe_size)
+        desired = [item.symbol for item in eligible[:max_size]]
+        previous_set = set(previous)
+
+        filtered_desired: list[str] = []
+        for symbol in desired:
+            state = store.get_stage7_universe_symbol_state(symbol) or {}
+            cooldown_until = self._parse_optional_dt(state.get("cooldown_until_ts"))
+            if cooldown_until is not None and now_utc < cooldown_until and symbol not in previous_set:
+                continue
+            passes = int(state.get("probation_passes") or 0)
+            if symbol not in previous_set:
+                passes += 1
+                if passes < probation_cycles:
+                    store.upsert_stage7_universe_symbol_state(
+                        symbol=symbol,
+                        updated_at=now_utc,
+                        probation_passes=passes,
+                        last_seen_ts=now_utc,
+                        last_added_ts=self._parse_optional_dt(state.get("last_added_ts")),
+                        last_removed_ts=self._parse_optional_dt(state.get("last_removed_ts")),
+                        cooldown_until_ts=cooldown_until,
+                    )
+                    continue
+            store.upsert_stage7_universe_symbol_state(
+                symbol=symbol,
+                updated_at=now_utc,
+                probation_passes=passes,
+                last_seen_ts=now_utc,
+                last_added_ts=now_utc if symbol not in previous_set else self._parse_optional_dt(state.get("last_added_ts")),
+                last_removed_ts=self._parse_optional_dt(state.get("last_removed_ts")),
+                cooldown_until_ts=cooldown_until,
+            )
+            filtered_desired.append(symbol)
+
+        additions = [x for x in filtered_desired if x not in previous_set]
+        removals = [x for x in previous if x not in set(filtered_desired)]
+        churn = len(additions) + len(removals)
+        last_24h = store.get_stage7_universe_churn_count_since(
+            role="stage7", since_utc=now_utc - timedelta(hours=24)
+        )
+        if last_24h + churn > settings.stage7_universe_governance_max_churn_per_day and previous:
+            return previous[:max_size]
+
+        for symbol in removals:
+            state = store.get_stage7_universe_symbol_state(symbol) or {}
+            store.upsert_stage7_universe_symbol_state(
+                symbol=symbol,
+                updated_at=now_utc,
+                probation_passes=0,
+                last_seen_ts=self._parse_optional_dt(state.get("last_seen_ts")),
+                last_added_ts=self._parse_optional_dt(state.get("last_added_ts")),
+                last_removed_ts=now_utc,
+                cooldown_until_ts=now_utc + timedelta(seconds=cooldown_sec),
+            )
+
+        return filtered_desired
+
+    def _freeze_reasons(self, *, exchange: object, settings: Settings) -> list[str]:
+        del settings
+        reasons: list[str] = []
+        health = getattr(exchange, "health_snapshot", None)
+        if callable(health):
+            try:
+                snapshot = health()
+            except Exception:  # noqa: BLE001
+                snapshot = {}
+            if bool(dict(snapshot).get("degraded")):
+                reasons.append("exchange_degraded")
+        if bool(getattr(exchange, "observe_only", False)):
+            reasons.append("observe_only")
+        return reasons
 
     def _safe_get_exchange_info(self, exchange: object) -> list[object]:
         getter = getattr(exchange, "get_exchange_info", None)
@@ -82,36 +240,31 @@ class UniverseSelectionService:
         return list(rows)
 
     def _filter_symbols(self, *, exchange_info: list[object], settings: Settings) -> list[str]:
-        allow = set(settings.stage7_universe_whitelist)
-        deny = set(settings.stage7_universe_blacklist)
+        allow = {canonical_symbol(s) for s in settings.stage7_universe_whitelist}
+        deny = {canonical_symbol(s) for s in settings.stage7_universe_blacklist}
         out: list[str] = []
         for pair in exchange_info:
             raw_symbol = getattr(pair, "pair_symbol", None) or getattr(pair, "pairSymbol", None)
             if not raw_symbol:
                 continue
             symbol = canonical_symbol(str(raw_symbol))
+            if quote_currency(symbol) != "TRY":
+                continue
             if allow and symbol not in allow:
                 continue
             if symbol in deny:
                 continue
-            if (
-                settings.stage7_universe_quote_ccy
-                and quote_currency(symbol) != settings.stage7_universe_quote_ccy
-            ):
+            if not self._metadata_eligible(pair):
                 continue
             out.append(symbol)
-        if allow:
-            for symbol in sorted(allow):
-                if symbol in deny:
-                    continue
-                if (
-                    settings.stage7_universe_quote_ccy
-                    and quote_currency(symbol) != settings.stage7_universe_quote_ccy
-                ):
-                    continue
-                if symbol not in out:
-                    out.append(symbol)
         return sorted(set(out))
+
+    def _metadata_eligible(self, pair: object) -> bool:
+        min_notional = getattr(pair, "min_total_amount", None) or getattr(pair, "minTotalAmount", None)
+        lot = getattr(pair, "numerator_scale", None) or getattr(pair, "numeratorScale", None)
+        if min_notional is None and lot is None:
+            return True
+        return True
 
     def _fetch_ticker_stats(self, exchange: object) -> dict[str, dict[str, Decimal]]:
         getter = getattr(exchange, "get_ticker_stats", None)
@@ -131,14 +284,10 @@ class UniverseSelectionService:
             symbol = canonical_symbol(str(symbol_raw))
             parsed[symbol] = {
                 "volume": self._as_decimal(row.get("volume") or row.get("quoteVolume")),
-                "last": self._as_decimal(
-                    row.get("last") or row.get("lastPrice") or row.get("close")
-                ),
+                "last": self._as_decimal(row.get("last") or row.get("lastPrice") or row.get("close")),
                 "high": self._as_decimal(row.get("high") or row.get("highPrice")),
                 "low": self._as_decimal(row.get("low") or row.get("lowPrice")),
-                "price_change": self._as_decimal(
-                    row.get("priceChangePercent") or row.get("dailyPercent")
-                ),
+                "price_change": self._as_decimal(row.get("priceChangePercent") or row.get("dailyPercent")),
             }
         return parsed
 
@@ -150,28 +299,28 @@ class UniverseSelectionService:
             return None
         return stats.get("volume")
 
-    def _fetch_spread_bps(
-        self,
-        *,
-        exchange: object,
-        symbol: str,
-        cache: dict[str, tuple[Decimal, Decimal] | None],
-    ) -> Decimal | None:
-        if symbol not in cache:
-            getter = getattr(exchange, "get_orderbook", None)
-            if not callable(getter):
-                cache[symbol] = None
-            else:
-                try:
-                    bid, ask = getter(symbol)
-                    cache[symbol] = (Decimal(str(bid)), Decimal(str(ask)))
-                except Exception:  # noqa: BLE001
-                    cache[symbol] = None
-        raw = cache[symbol]
-        if raw is None:
-            return None
-        bid, ask = raw
-        return self.compute_spread_bps(best_bid=bid, best_ask=ask)
+    def _fetch_spread_bps_and_age(self, *, exchange: object, symbol: str) -> tuple[Decimal | None, float | None]:
+        getter_ts = getattr(exchange, "get_orderbook_with_timestamp", None)
+        if callable(getter_ts):
+            try:
+                bid, ask, ts = getter_ts(symbol)
+                spread = self.compute_spread_bps(best_bid=Decimal(str(bid)), best_ask=Decimal(str(ask)))
+                if ts is None:
+                    return spread, None
+                age = (datetime.now(UTC) - self._ensure_utc(ts)).total_seconds()
+                return spread, max(0.0, age)
+            except Exception:  # noqa: BLE001
+                return None, None
+
+        getter = getattr(exchange, "get_orderbook", None)
+        if not callable(getter):
+            return None, None
+        try:
+            bid, ask = getter(symbol)
+            spread = self.compute_spread_bps(best_bid=Decimal(str(bid)), best_ask=Decimal(str(ask)))
+            return spread, None
+        except Exception:  # noqa: BLE001
+            return None, None
 
     @staticmethod
     def compute_spread_bps(*, best_bid: Decimal, best_ask: Decimal) -> Decimal | None:
@@ -189,13 +338,11 @@ class UniverseSelectionService:
         symbol: str,
         settings: Settings,
         ticker_stats: dict[str, dict[str, Decimal]],
-        candles_cache: dict[str, list[Decimal]],
     ) -> Decimal | None:
         closes = self._fetch_candle_closes(
             exchange=exchange,
             symbol=symbol,
             lookback=max(2, settings.stage7_vol_lookback),
-            cache=candles_cache,
         )
         if len(closes) >= 2:
             return self._compute_return_std(closes)
@@ -219,18 +366,13 @@ class UniverseSelectionService:
         exchange: object,
         symbol: str,
         lookback: int,
-        cache: dict[str, list[Decimal]],
     ) -> list[Decimal]:
-        if symbol in cache:
-            return cache[symbol]
         getter = getattr(exchange, "get_candles", None)
         if not callable(getter):
-            cache[symbol] = []
             return []
         try:
             rows = getter(symbol, lookback)
         except Exception:  # noqa: BLE001
-            cache[symbol] = []
             return []
 
         closes: list[Decimal] = []
@@ -242,7 +384,6 @@ class UniverseSelectionService:
             if close_val is None or close_val <= 0:
                 continue
             closes.append(close_val)
-        cache[symbol] = closes
         return closes
 
     @staticmethod
@@ -267,6 +408,39 @@ class UniverseSelectionService:
         except Exception:  # noqa: BLE001
             return None
 
+    @staticmethod
+    def _ensure_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    @staticmethod
+    def _parse_optional_dt(raw: object) -> datetime | None:
+        if raw in {None, ""}:
+            return None
+        parsed = datetime.fromisoformat(str(raw))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _candidate_exclusions(self, *, candidate: UniverseCandidate, settings: Settings) -> list[str]:
+        reasons: list[str] = []
+        spread_raw = candidate.breakdown.get("spread_bps", "missing")
+        volume_raw = candidate.breakdown.get("volume_try", "missing")
+        if spread_raw == "missing":
+            reasons.append("missing_spread")
+        else:
+            spread = Decimal(str(spread_raw))
+            if settings.stage7_max_spread_bps > 0 and spread > settings.stage7_max_spread_bps:
+                reasons.append("spread_too_wide")
+        if volume_raw == "missing":
+            reasons.append("missing_volume")
+        else:
+            volume = Decimal(str(volume_raw))
+            if volume < settings.stage7_min_quote_volume_try:
+                reasons.append("volume_too_low")
+        return reasons
+
     def _score_candidates(
         self,
         *,
@@ -274,15 +448,9 @@ class UniverseSelectionService:
         settings: Settings,
     ) -> list[UniverseCandidate]:
         weights = self._resolve_weights(settings)
-        liquidity_values = [
-            item.volume_try for item in raw_metrics.values() if item.volume_try is not None
-        ]
-        spread_values = [
-            item.spread_bps for item in raw_metrics.values() if item.spread_bps is not None
-        ]
-        volatility_values = [
-            item.volatility for item in raw_metrics.values() if item.volatility is not None
-        ]
+        liquidity_values = [item.volume_try for item in raw_metrics.values() if item.volume_try is not None]
+        spread_values = [item.spread_bps for item in raw_metrics.values() if item.spread_bps is not None]
+        volatility_values = [item.volatility for item in raw_metrics.values() if item.volatility is not None]
 
         liquidity_min, liquidity_max = self._bounds(liquidity_values)
         spread_min, spread_max = self._bounds(spread_values)
@@ -290,33 +458,15 @@ class UniverseSelectionService:
 
         scored: list[UniverseCandidate] = []
         for symbol, metrics in raw_metrics.items():
-            liquidity_score = self._normalize_linear(
-                metrics.volume_try, liquidity_min, liquidity_max
-            )
+            liquidity_score = self._normalize_linear(metrics.volume_try, liquidity_min, liquidity_max)
             spread_score = self._normalize_inverse(metrics.spread_bps, spread_min, spread_max)
-            volatility_score = self._normalize_inverse(
-                metrics.volatility,
-                volatility_min,
-                volatility_max,
-            )
+            volatility_score = self._normalize_inverse(metrics.volatility, volatility_min, volatility_max)
 
             total_score = (
                 liquidity_score * weights["liquidity"]
                 + spread_score * weights["spread"]
                 + volatility_score * weights["volatility"]
             )
-
-            if (
-                metrics.volume_try is not None
-                and metrics.volume_try < settings.stage7_min_quote_volume_try
-            ):
-                total_score -= Decimal("5")
-            if (
-                metrics.spread_bps is not None
-                and settings.stage7_max_spread_bps > 0
-                and metrics.spread_bps > settings.stage7_max_spread_bps
-            ):
-                total_score -= Decimal("5")
 
             scored.append(
                 UniverseCandidate(
@@ -330,26 +480,15 @@ class UniverseSelectionService:
                         "spread_score": str(spread_score),
                         "volatility_score": str(volatility_score),
                         "total_score": str(total_score),
-                        "volume_try": str(metrics.volume_try)
-                        if metrics.volume_try is not None
-                        else "missing",
-                        "spread_bps": str(metrics.spread_bps)
-                        if metrics.spread_bps is not None
-                        else "missing",
-                        "volatility": str(metrics.volatility)
-                        if metrics.volatility is not None
-                        else "missing",
+                        "volume_try": str(metrics.volume_try) if metrics.volume_try is not None else "missing",
+                        "spread_bps": str(metrics.spread_bps) if metrics.spread_bps is not None else "missing",
+                        "volatility": str(metrics.volatility) if metrics.volatility is not None else "missing",
+                        "age_sec": str(metrics.age_sec) if metrics.age_sec is not None else "missing",
                     },
                 )
             )
 
-        scored.sort(
-            key=lambda item: (
-                -item.total_score,
-                -item.liquidity_score,
-                item.symbol,
-            )
-        )
+        scored.sort(key=lambda item: (-item.total_score, -item.liquidity_score, item.symbol))
         return scored
 
     @staticmethod
