@@ -1375,7 +1375,7 @@ class StateStore:
         if row is None:
             return None
         cooldown = (
-            datetime.fromisoformat(str(row["cooldown_until"]))
+            ensure_utc(datetime.fromisoformat(str(row["cooldown_until"])))
             if row["cooldown_until"] is not None
             else None
         )
@@ -1392,7 +1392,7 @@ class StateStore:
             cooldown_until_utc=cooldown,
             allow_submit=bool(row["allow_submit"]),
             allow_cancel=bool(row["allow_cancel"]),
-            decided_at=datetime.fromisoformat(str(row["decided_at"])),
+            decided_at=ensure_utc(datetime.fromisoformat(str(row["decided_at"]))),
             inputs_hash=str(row["inputs_hash"]),
             metrics=json.loads(str(row["metrics_json"] or "{}")),
         )

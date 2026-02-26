@@ -44,4 +44,4 @@ def test_reduce_risk_only_blocks_risk_increasing_submits_allows_cancels() -> Non
     assert actions[0] in accepted
     assert actions[2] in accepted
     assert actions[1] not in accepted
-    assert any(d.reason == "mode_reduce_risk_only" for d in decisions)
+    assert any(d.reason == "RISK_REDUCE_ONLY_BLOCKED" for d in decisions)
