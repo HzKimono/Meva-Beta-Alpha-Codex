@@ -18,9 +18,6 @@ class UniverseCandidate:
 ScoredSymbolCandidate = UniverseCandidate
 
 
-ScoredSymbolCandidate = UniverseCandidate
-
-
 @dataclass(frozen=True)
 class UniverseSelectionResult:
     selected_symbols: list[str]

@@ -152,10 +152,6 @@ def test_discovery_try_only_and_normalized(tmp_path) -> None:
     assert all(symbol.endswith("TRY") for symbol in result.selected_symbols)
     assert "ADAUSDT" not in result.selected_symbols
 
-    def get_exchange_info(self):
-        if self.mode == 0:
-            return [_Pair("AAA_TRY"), _Pair("BBB_TRY")]
-        return [_Pair("AAA_TRY"), _Pair("CCC_TRY")]
 
 def test_determinism_same_inputs_same_ages_scores_and_order(tmp_path) -> None:
     service = UniverseSelectionService()
