@@ -260,6 +260,18 @@ class Settings(BaseSettings):
     )
     stage7_max_consecutive_losses: int = Field(default=3, alias="STAGE7_MAX_CONSECUTIVE_LOSSES")
     stage7_max_data_age_sec: int = Field(default=60, alias="STAGE7_MAX_DATA_AGE_SEC")
+    stage7_universe_governance_probation_cycles: int = Field(
+        default=1,
+        alias="STAGE7_UNIVERSE_GOVERNANCE_PROBATION_CYCLES",
+    )
+    stage7_universe_governance_cooldown_sec: int = Field(
+        default=21600,
+        alias="STAGE7_UNIVERSE_GOVERNANCE_COOLDOWN_SEC",
+    )
+    stage7_universe_governance_max_churn_per_day: int = Field(
+        default=4,
+        alias="STAGE7_UNIVERSE_GOVERNANCE_MAX_CHURN_PER_DAY",
+    )
     stage7_spread_spike_bps: int = Field(default=300, alias="STAGE7_SPREAD_SPIKE_BPS")
     stage7_risk_cooldown_sec: int = Field(default=900, alias="STAGE7_RISK_COOLDOWN_SEC")
     stage7_concentration_top_n: int = Field(default=3, alias="STAGE7_CONCENTRATION_TOP_N")
@@ -834,6 +846,9 @@ class Settings(BaseSettings):
         "stage7_max_consecutive_losses",
         "stage7_max_data_age_sec",
         "stage7_concentration_top_n",
+        "stage7_universe_governance_probation_cycles",
+        "stage7_universe_governance_cooldown_sec",
+        "stage7_universe_governance_max_churn_per_day",
     )
     def validate_stage7_risk_min_one_int(cls, value: int) -> int:
         if value < 1:
