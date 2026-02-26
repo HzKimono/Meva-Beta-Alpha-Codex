@@ -1627,6 +1627,7 @@ def test_known_min_total_reject_does_not_crash_pipeline(tmp_path, caplog) -> Non
 
     assert placed == 0
     assert service.last_execute_summary["orders_failed_exchange"] == 1
+    assert service.last_execute_summary["rejected_min_notional"] == 1
     assert any(r.message == "exchange_submit_failed" for r in caplog.records)
 
 
@@ -1735,3 +1736,35 @@ def test_live_submit_uses_quantized_notional_path(tmp_path) -> None:
     assert side == OrderSide.BUY
     assert Decimal(str(price)) == Decimal("100.0")
     assert Decimal(str(quantity)) == Decimal("1.5")
+
+
+def test_dry_run_tracks_simulated_orders_not_submitted(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=MinNotionalMarketDataService(),
+        dry_run=True,
+        kill_switch=False,
+    )
+
+    intent = OrderIntent(
+        symbol="BTC_TRY",
+        side=OrderSide.BUY,
+        price=Decimal("100"),
+        quantity=Decimal("1.5"),
+        notional=Decimal("150"),
+        cycle_id="c-simulated",
+    )
+
+    placed = service.execute_intents([intent])
+
+    assert placed == 0
+    assert exchange.placed == []
+    summary = service.last_execute_summary
+    assert summary["orders_submitted"] == 0
+    assert summary["orders_simulated"] == 1
+    assert summary["would_submit_orders"] == 1
+    assert summary["would_submit_notional_try"] == "150.0"
+

@@ -574,6 +574,17 @@ class ExecutionService:
             return False, asset, required, available
         return True, None, None, None
 
+    def _is_known_min_notional_reject(self, exc: Exception) -> bool:
+        if not isinstance(exc, ExchangeError):
+            return False
+
+        if str(exc.error_code) == "1123" and (exc.error_message or "").upper() == "FAILED_MIN_TOTAL_AMOUNT":
+            return True
+
+        haystacks = [str(exc.error_code), exc.error_message or "", exc.response_body or "", str(exc)]
+        joined = " ".join(haystacks).upper()
+        return "1123" in joined and "FAILED_MIN_TOTAL_AMOUNT" in joined
+
     def _is_exchange_429_error(self, exc: Exception) -> bool:
         if isinstance(exc, httpx.HTTPStatusError):
             return exc.response is not None and exc.response.status_code == 429
@@ -1032,6 +1043,7 @@ class ExecutionService:
             "attempted_exchange_calls": 0,
             "would_submit_orders": 0,
             "would_submit_notional_try": "0",
+            "orders_simulated": 0,
             "rejected_min_notional": 0,
             "would_reject_min_notional": 0,
         }
@@ -1116,6 +1128,7 @@ class ExecutionService:
             cycle_balances = self._get_cycle_balances(cycle_id=execution_cycle_id)
 
         placed = 0
+        orders_simulated = 0
         rejected_intents = 0
         intents_rejected_precheck = 0
         orders_failed_exchange = 0
@@ -1357,7 +1370,7 @@ class ExecutionService:
                     order_id=None,
                     status="SIMULATED",
                 )
-                placed += 1
+                orders_simulated += 1
                 continue
 
             attempted_exchange_calls += 1
@@ -1375,6 +1388,9 @@ class ExecutionService:
                 if isinstance(exc, SubmitBlockedDueToUnknownError):
                     raise
                 orders_failed_exchange += 1
+                known_min_notional_reject = self._is_known_min_notional_reject(exc)
+                if known_min_notional_reject:
+                    rejected_min_notional += 1
                 if not self._is_uncertain_error(exc):
                     response_body = None
                     status_code = None
@@ -1425,6 +1441,8 @@ class ExecutionService:
                                 "status_code": status_code,
                                 "error_code": error_code,
                                 "error_message": error_message,
+                                "known_min_notional_reject": known_min_notional_reject,
+                                "computed_notional_try": str(computed_notional_try),
                             }
                         },
                     )
@@ -1698,6 +1716,7 @@ class ExecutionService:
 
         self.last_execute_summary = {
             "orders_submitted": placed,
+            "orders_simulated": orders_simulated,
             "orders_failed_exchange": orders_failed_exchange,
             "rejected_intents": rejected_intents,
             "intents_rejected_precheck": intents_rejected_precheck,
