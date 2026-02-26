@@ -64,6 +64,71 @@ REGISTRY: dict[str, MetricDef] = {
         type=MetricType.GAUGE,
         required_labels=("quote", "process_role"),
     ),
+    "bot_intents_created_total": MetricDef(
+        name="bot_intents_created_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_intents_executed_total": MetricDef(
+        name="bot_intents_executed_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_rejects_total": MetricDef(
+        name="bot_rejects_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_reject_1123_total": MetricDef(
+        name="bot_reject_1123_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_api_429_backoff_total": MetricDef(
+        name="bot_api_429_backoff_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_breaker_open": MetricDef(
+        name="bot_breaker_open",
+        type=MetricType.GAUGE,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_degraded_mode": MetricDef(
+        name="bot_degraded_mode",
+        type=MetricType.GAUGE,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_unknown_order_present": MetricDef(
+        name="bot_unknown_order_present",
+        type=MetricType.GAUGE,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_cursor_stall_total": MetricDef(
+        name="bot_cursor_stall_total",
+        type=MetricType.COUNTER,
+        required_labels=("process_role", "mode_final"),
+    ),
+    "bot_rate_limit_wait_seconds": MetricDef(
+        name="bot_rate_limit_wait_seconds",
+        type=MetricType.HISTOGRAM,
+        required_labels=("exchange", "endpoint", "process_role"),
+    ),
+    "bot_rate_limit_wait_total": MetricDef(
+        name="bot_rate_limit_wait_total",
+        type=MetricType.COUNTER,
+        required_labels=("exchange", "endpoint", "process_role"),
+    ),
+    "bot_rest_retry_attempts_total": MetricDef(
+        name="bot_rest_retry_attempts_total",
+        type=MetricType.COUNTER,
+        required_labels=("exchange", "endpoint", "error_kind", "process_role"),
+    ),
+    "bot_rest_retry_backoff_seconds": MetricDef(
+        name="bot_rest_retry_backoff_seconds",
+        type=MetricType.HISTOGRAM,
+        required_labels=("exchange", "endpoint", "error_kind", "process_role"),
+    ),
 }
 
 
