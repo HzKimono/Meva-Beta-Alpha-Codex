@@ -45,6 +45,10 @@ from btcbot.services.stage7_planning_kernel_integration import (
     normalize_stage4_open_orders,
 )
 from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
+from btcbot.services.risk_policy_service import (
+    ActionPortfolioSnapshot,
+    RiskPolicyService,
+)
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
 
@@ -109,6 +113,80 @@ def _coerce_int(value: object, default: int = 0) -> int:
             except ValueError:
                 return default
     return default
+
+
+def _to_risk_action(intent: OrderIntent) -> LifecycleAction:
+    return LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol=normalize_symbol(intent.symbol),
+        side=str(intent.side),
+        price=intent.price_try,
+        qty=intent.qty,
+        reason=str(intent.reason),
+        client_order_id=intent.client_order_id,
+    )
+
+
+def _filter_order_intents_by_risk(
+    *,
+    order_intents: list[OrderIntent],
+    risk_policy_service: RiskPolicyService,
+    portfolio_snapshot: ActionPortfolioSnapshot,
+    cycle_risk,
+) -> tuple[list[OrderIntent], list[dict[str, object]]]:
+    intent_risk_actions = [_to_risk_action(intent) for intent in order_intents if not intent.skipped]
+    allowed_intent_actions, intent_decisions = risk_policy_service.filter_actions(
+        actions=intent_risk_actions,
+        portfolio=portfolio_snapshot,
+        cycle_risk=cycle_risk,
+    )
+    allowed_intent_ids = {
+        action.client_order_id for action in allowed_intent_actions if action.client_order_id
+    }
+    submitted_intents: list[OrderIntent] = []
+    skipped_actions: list[dict[str, object]] = []
+    for intent in order_intents:
+        if intent.skipped:
+            submitted_intents.append(intent)
+            continue
+        if intent.client_order_id in allowed_intent_ids:
+            submitted_intents.append(intent)
+            continue
+        blocked_reason = next(
+            (
+                decision.reason
+                for decision in intent_decisions
+                if decision.action.client_order_id == intent.client_order_id and not decision.accepted
+            ),
+            "risk_blocked",
+        )
+        submitted_intents.append(
+            OrderIntent(
+                cycle_id=intent.cycle_id,
+                symbol=intent.symbol,
+                side=intent.side,
+                order_type=intent.order_type,
+                price_try=intent.price_try,
+                qty=intent.qty,
+                notional_try=intent.notional_try,
+                client_order_id=intent.client_order_id,
+                reason=intent.reason,
+                constraints_applied=intent.constraints_applied,
+                skipped=True,
+                skip_reason=blocked_reason,
+            )
+        )
+        skipped_actions.append(
+            {
+                "symbol": normalize_symbol(intent.symbol),
+                "side": intent.side,
+                "qty": str(intent.qty),
+                "status": "skipped",
+                "reason": blocked_reason,
+                "client_order_id": intent.client_order_id,
+            }
+        )
+    return submitted_intents, skipped_actions
 
 
 class Stage7CycleRunner:
@@ -226,6 +304,7 @@ class Stage7CycleRunner:
         order_builder = OrderBuilderService()
         exposure_tracker = ExposureTracker()
         risk_budget_service = Stage7RiskBudgetService()
+        risk_policy_service = RiskPolicyService()
 
         open_orders = state_store.list_stage4_open_orders()
         lifecycle_actions: list[LifecycleAction] = []
@@ -356,6 +435,10 @@ class Stage7CycleRunner:
                 observed_spread_bps=spread_bps,
                 quote_volume_try=quote_volume_try,
                 exposure_snapshot=exposure_snapshot,
+                fee_burn_today_try=Decimal(str(latest_metrics.get("fees_try", "0"))),
+                reject_rate_window=Decimal("0"),
+                exchange_degraded=False,
+                stale_age_sec=data_age_sec,
             )
             stage7_risk_decision = risk_budget_service.decide(
                 settings=runtime,
@@ -474,8 +557,8 @@ class Stage7CycleRunner:
                 "risk_mode": dump_risk_mode(stage7_risk_mode),
                 "risk_reasons": stage7_risk_decision.reasons,
                 "risk_cooldown_until": (
-                    stage7_risk_decision.cooldown_until.isoformat()
-                    if stage7_risk_decision.cooldown_until
+                    (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None)).isoformat()
+                    if (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None))
                     else None
                 ),
                 "risk_inputs_hash": stage7_risk_decision.inputs_hash,
@@ -518,17 +601,6 @@ class Stage7CycleRunner:
                 skipped_actions: list[dict[str, object]] = []
                 for action in lifecycle_actions:
                     normalized_symbol = normalize_symbol(action.symbol)
-                    if final_risk_mode == Mode.REDUCE_RISK_ONLY and action.side.upper() != "SELL":
-                        skipped_actions.append(
-                            {
-                                "symbol": normalized_symbol,
-                                "side": action.side,
-                                "qty": str(action.qty),
-                                "status": "skipped",
-                                "reason": "mode_reduce_risk_only",
-                            }
-                        )
-                        continue
                     if normalized_symbol in rules_unavailable:
                         unavailable_status = rules_unavailable[normalized_symbol]
                         unavailable_detail = rules_unavailable_details.get(
@@ -559,6 +631,36 @@ class Stage7CycleRunner:
                         )
                         continue
                     filtered_actions.append(action)
+
+                positions_by_symbol: dict[str, Decimal] = {}
+                for position in state_store.list_stage4_positions():
+                    positions_by_symbol[normalize_symbol(position.symbol)] = position.qty
+                portfolio_snapshot = ActionPortfolioSnapshot(positions_by_symbol=positions_by_symbol)
+                filtered_actions, policy_decisions = risk_policy_service.filter_actions(
+                    actions=filtered_actions,
+                    portfolio=portfolio_snapshot,
+                    cycle_risk=stage7_risk_decision,
+                )
+                for decision in policy_decisions:
+                    if decision.accepted:
+                        continue
+                    skipped_actions.append(
+                        {
+                            "symbol": normalize_symbol(decision.action.symbol),
+                            "side": decision.action.side,
+                            "qty": str(decision.action.qty),
+                            "status": "skipped",
+                            "reason": decision.reason,
+                        }
+                    )
+
+                order_intents, planning_skipped_actions = _filter_order_intents_by_risk(
+                    order_intents=order_intents,
+                    risk_policy_service=risk_policy_service,
+                    portfolio_snapshot=portfolio_snapshot,
+                    cycle_risk=stage7_risk_decision,
+                )
+                skipped_actions.extend(planning_skipped_actions)
 
                 collector.start_timer("oms")
                 oms_service = OMSService()
