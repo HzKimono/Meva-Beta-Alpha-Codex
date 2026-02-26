@@ -33,7 +33,7 @@ from btcbot.persistence.uow import UnitOfWorkFactory
 if TYPE_CHECKING:
     from btcbot.domain.anomalies import AnomalyEvent
     from btcbot.domain.risk_budget import Mode, RiskDecision
-    from btcbot.domain.risk_models import RiskDecision as Stage7RiskDecision
+    from btcbot.domain.risk_engine import CycleRiskOutput
 
 
 def _stage7_ctx(cycle_id: str, run_id: str | None = None) -> str:
@@ -851,6 +851,15 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS idx_stage7_risk_decisions_decided_at "
             "ON stage7_risk_decisions(decided_at)"
         )
+        risk_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_risk_decisions)")}
+        if "caps_json" not in risk_columns:
+            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN caps_json TEXT NOT NULL DEFAULT '{}'" )
+        if "allow_submit" not in risk_columns:
+            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN allow_submit INTEGER NOT NULL DEFAULT 0")
+        if "allow_cancel" not in risk_columns:
+            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN allow_cancel INTEGER NOT NULL DEFAULT 1")
+        if "metrics_json" not in risk_columns:
+            conn.execute("ALTER TABLE stage7_risk_decisions ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'" )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS stage7_params_active(
@@ -1099,7 +1108,7 @@ class StateStore:
         ledger_metrics: dict[str, Decimal],
         order_intents: list[OrderIntent] | None = None,
         order_intents_trace: list[dict[str, object]] | None = None,
-        risk_decision: Stage7RiskDecision | None = None,
+        risk_decision: CycleRiskOutput | None = None,
         run_metrics: dict[str, object] | None = None,
         active_param_version: int = 0,
         param_change: ParamChange | None = None,
@@ -1282,7 +1291,7 @@ class StateStore:
         self,
         *,
         cycle_id: str | None,
-        decision: Stage7RiskDecision,
+        decision: CycleRiskOutput,
     ) -> None:
         with self._connect() as conn:
             self._save_stage7_risk_decision_with_conn(
@@ -1296,36 +1305,68 @@ class StateStore:
         *,
         conn: sqlite3.Connection,
         cycle_id: str | None,
-        decision: Stage7RiskDecision,
+        decision: CycleRiskOutput,
     ) -> None:
+        reasons = getattr(decision, "reasons", [])
+        caps_payload = {
+            "max_order_notional_try": str(getattr(decision, "max_order_notional_try", "0")),
+            "max_orders_per_cycle": int(getattr(decision, "max_orders_per_cycle", 0)),
+            "max_symbol_exposure_try": str(getattr(decision, "max_symbol_exposure_try", "0")),
+            "daily_loss_limit_try": str(getattr(decision, "daily_loss_limit_try", "0")),
+            "max_drawdown_bps": int(getattr(decision, "max_drawdown_bps", 0)),
+            "fee_burn_limit_try": str(getattr(decision, "fee_burn_limit_try", "0")),
+        }
+        cooldown_until = getattr(decision, "cooldown_until_utc", None) or getattr(decision, "cooldown_until", None)
         conn.execute(
             """
             INSERT INTO stage7_risk_decisions(
-                cycle_id, decided_at, mode, reasons_json, cooldown_until, inputs_hash
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                cycle_id,
+                decided_at,
+                mode,
+                reasons_json,
+                caps_json,
+                cooldown_until,
+                allow_submit,
+                allow_cancel,
+                metrics_json,
+                inputs_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 cycle_id,
                 ensure_utc(decision.decided_at).isoformat(),
                 dump_risk_mode(decision.mode),
-                json.dumps(decision.reasons, sort_keys=True),
+                json.dumps(reasons, sort_keys=True),
+                json.dumps(caps_payload, sort_keys=True),
                 (
-                    ensure_utc(decision.cooldown_until).isoformat()
-                    if decision.cooldown_until is not None
+                    ensure_utc(cooldown_until).isoformat()
+                    if cooldown_until is not None
                     else None
                 ),
+                int(getattr(decision, "allow_submit", False)),
+                int(getattr(decision, "allow_cancel", True)),
+                json.dumps(getattr(decision, "metrics", {}), sort_keys=True),
                 decision.inputs_hash,
             ),
         )
 
-    def get_latest_stage7_risk_decision(self) -> Stage7RiskDecision | None:
-        from btcbot.domain.risk_models import RiskDecision as Stage7RiskDecision
-        from btcbot.domain.risk_models import RiskMode
+    def get_latest_stage7_risk_decision(self) -> CycleRiskOutput | None:
+        from btcbot.domain.risk_budget import Mode
+        from btcbot.domain.risk_engine import CycleRiskOutput
 
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT mode, reasons_json, cooldown_until, decided_at, inputs_hash
+                SELECT
+                    mode,
+                    reasons_json,
+                    caps_json,
+                    cooldown_until,
+                    allow_submit,
+                    allow_cancel,
+                    metrics_json,
+                    decided_at,
+                    inputs_hash
                 FROM stage7_risk_decisions
                 ORDER BY decided_at DESC, id DESC
                 LIMIT 1
@@ -1338,12 +1379,22 @@ class StateStore:
             if row["cooldown_until"] is not None
             else None
         )
-        return Stage7RiskDecision(
-            mode=(parse_risk_mode(str(row["mode"])) or RiskMode.NORMAL),
-            reasons=json.loads(str(row["reasons_json"])),
-            cooldown_until=cooldown,
+        caps = json.loads(str(row["caps_json"] or "{}"))
+        return CycleRiskOutput(
+            mode=(parse_risk_mode(str(row["mode"])) or Mode.NORMAL),
+            reasons=json.loads(str(row["reasons_json"] or "[]")),
+            max_order_notional_try=Decimal(str(caps.get("max_order_notional_try", "0"))),
+            max_orders_per_cycle=int(caps.get("max_orders_per_cycle", 0)),
+            max_symbol_exposure_try=Decimal(str(caps.get("max_symbol_exposure_try", "0"))),
+            daily_loss_limit_try=Decimal(str(caps.get("daily_loss_limit_try", "0"))),
+            max_drawdown_bps=int(caps.get("max_drawdown_bps", 0)),
+            fee_burn_limit_try=Decimal(str(caps.get("fee_burn_limit_try", "0"))),
+            cooldown_until_utc=cooldown,
+            allow_submit=bool(row["allow_submit"]),
+            allow_cancel=bool(row["allow_cancel"]),
             decided_at=datetime.fromisoformat(str(row["decided_at"])),
             inputs_hash=str(row["inputs_hash"]),
+            metrics=json.loads(str(row["metrics_json"] or "{}")),
         )
 
     def get_latest_stage7_ledger_metrics(self) -> dict[str, Decimal] | None:
@@ -5071,7 +5122,7 @@ class StateStore:
                 cycle_id,
                 decision.decided_at.isoformat(),
                 dump_risk_mode(decision.mode),
-                json.dumps(decision.reasons, sort_keys=True),
+                json.dumps(reasons, sort_keys=True),
                 self._serialize_risk_payload(decision.signals),
                 self._serialize_risk_payload(decision.limits),
                 self._serialize_risk_payload(decision),

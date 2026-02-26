@@ -274,6 +274,13 @@ class Settings(BaseSettings):
     )
     stage7_spread_spike_bps: int = Field(default=300, alias="STAGE7_SPREAD_SPIKE_BPS")
     stage7_risk_cooldown_sec: int = Field(default=900, alias="STAGE7_RISK_COOLDOWN_SEC")
+    daily_loss_limit_try: Decimal = Field(default=Decimal("500"), alias="DAILY_LOSS_LIMIT_TRY")
+    max_drawdown_bps: int = Field(default=2500, alias="MAX_DRAWDOWN_BPS")
+    fee_burn_limit_try: Decimal = Field(default=Decimal("150"), alias="FEE_BURN_LIMIT_TRY")
+    max_order_notional_try: Decimal = Field(default=Decimal("3000"), alias="MAX_ORDER_NOTIONAL_TRY")
+    max_symbol_exposure_try: Decimal = Field(default=Decimal("8000"), alias="MAX_SYMBOL_EXPOSURE_TRY")
+    high_vol_threshold_bps: Decimal = Field(default=Decimal("250"), alias="HIGH_VOL_THRESHOLD_BPS")
+    risk_cooldown_sec: int = Field(default=900, alias="RISK_COOLDOWN_SEC")
     stage7_concentration_top_n: int = Field(default=3, alias="STAGE7_CONCENTRATION_TOP_N")
     stage7_loss_guardrail_mode: str = Field(
         default="reduce_risk_only", alias="STAGE7_LOSS_GUARDRAIL_MODE"
@@ -811,7 +818,14 @@ class Settings(BaseSettings):
             raise ValueError("STAGE7_MAX_DRAWDOWN_PCT must be in [0, 1]")
         return value
 
-    @field_validator("stage7_max_daily_loss_try")
+    @field_validator(
+        "stage7_max_daily_loss_try",
+        "daily_loss_limit_try",
+        "fee_burn_limit_try",
+        "max_order_notional_try",
+        "max_symbol_exposure_try",
+        "high_vol_threshold_bps",
+    )
     def validate_stage7_max_daily_loss_try(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("Stage7 risk decimal settings must be >= 0")
@@ -820,6 +834,8 @@ class Settings(BaseSettings):
     @field_validator(
         "stage7_spread_spike_bps",
         "stage7_risk_cooldown_sec",
+        "max_drawdown_bps",
+        "risk_cooldown_sec",
         "stage7_retry_max_attempts",
         "stage7_retry_base_delay_ms",
         "stage7_retry_max_delay_ms",

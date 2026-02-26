@@ -13,7 +13,8 @@ from btcbot.domain.order_state import OrderStatus as Stage7OrderStatus
 from btcbot.domain.order_state import Stage7Order
 from btcbot.domain.risk_budget import Mode, RiskLimits, RiskSignals
 from btcbot.domain.risk_budget import RiskDecision as BudgetRiskDecision
-from btcbot.domain.risk_models import RiskDecision, RiskMode
+from btcbot.domain.risk_budget import Mode
+from btcbot.domain.risk_engine import CycleRiskOutput
 from btcbot.services import state_store as state_store_module
 from btcbot.services.parity import compute_run_fingerprint
 from btcbot.services.state_store import IdempotencyConflictError, StateStore
@@ -773,40 +774,60 @@ def test_record_stage4_order_error_persists_context(tmp_path) -> None:
 
 def test_stage7_risk_decision_saved_and_latest_fetchable(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "stage7_risk.db"))
-    decision = RiskDecision(
-        mode=RiskMode.REDUCE_RISK_ONLY,
-        reasons={"a": 1, "z": ["x"]},
-        cooldown_until=None,
+    decision = CycleRiskOutput(
+        mode=Mode.REDUCE_RISK_ONLY,
+        reasons=["LOSS_LIMIT"],
+        max_order_notional_try=Decimal("100"),
+        max_orders_per_cycle=2,
+        max_symbol_exposure_try=Decimal("300"),
+        daily_loss_limit_try=Decimal("400"),
+        max_drawdown_bps=2500,
+        fee_burn_limit_try=Decimal("20"),
+        cooldown_until_utc=None,
+        allow_submit=True,
+        allow_cancel=True,
         decided_at=datetime(2024, 1, 1, tzinfo=UTC),
         inputs_hash="abc",
+        metrics={"stale_age_sec": 5},
     )
 
     store.save_stage7_risk_decision(cycle_id="c1", decision=decision)
     latest = store.get_latest_stage7_risk_decision()
 
     assert latest is not None
-    assert latest.mode == RiskMode.REDUCE_RISK_ONLY
-    assert latest.reasons == {"a": 1, "z": ["x"]}
+    assert latest.mode == Mode.REDUCE_RISK_ONLY
+    assert latest.reasons == ["LOSS_LIMIT"]
     assert latest.inputs_hash == "abc"
+    assert latest.metrics == {"stale_age_sec": 5}
 
 
 def test_stage7_risk_reasons_json_is_stable_sorted(tmp_path) -> None:
     db_path = tmp_path / "stage7_risk_sorted.db"
     store = StateStore(db_path=str(db_path))
-    decision = RiskDecision(
-        mode=RiskMode.OBSERVE_ONLY,
-        reasons={"z": 2, "a": 1},
-        cooldown_until=None,
+    decision = CycleRiskOutput(
+        mode=Mode.OBSERVE_ONLY,
+        reasons=["B", "A"],
+        max_order_notional_try=Decimal("100"),
+        max_orders_per_cycle=2,
+        max_symbol_exposure_try=Decimal("300"),
+        daily_loss_limit_try=Decimal("400"),
+        max_drawdown_bps=2500,
+        fee_burn_limit_try=Decimal("20"),
+        cooldown_until_utc=None,
+        allow_submit=False,
+        allow_cancel=True,
         decided_at=datetime(2024, 1, 1, tzinfo=UTC),
         inputs_hash="hash",
+        metrics={},
     )
     store.save_stage7_risk_decision(cycle_id="c2", decision=decision)
 
     with sqlite3.connect(str(db_path)) as conn:
-        row = conn.execute("SELECT reasons_json FROM stage7_risk_decisions LIMIT 1").fetchone()
+        row = conn.execute("SELECT reasons_json, caps_json FROM stage7_risk_decisions LIMIT 1").fetchone()
 
     assert row is not None
-    assert json.loads(row[0]) == {"a": 1, "z": 2}
+    assert json.loads(row[0]) == ["B", "A"]
+    assert json.loads(row[1])["max_orders_per_cycle"] == 2
 
 
 def test_stage7_upsert_orders_conflict_on_client_order_id_keeps_original_order_id(

@@ -45,6 +45,7 @@ from btcbot.services.stage7_planning_kernel_integration import (
     normalize_stage4_open_orders,
 )
 from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
+from btcbot.services.risk_policy_service import ActionPortfolioSnapshot, RiskPolicyService
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
 
@@ -226,6 +227,7 @@ class Stage7CycleRunner:
         order_builder = OrderBuilderService()
         exposure_tracker = ExposureTracker()
         risk_budget_service = Stage7RiskBudgetService()
+        risk_policy_service = RiskPolicyService()
 
         open_orders = state_store.list_stage4_open_orders()
         lifecycle_actions: list[LifecycleAction] = []
@@ -356,6 +358,10 @@ class Stage7CycleRunner:
                 observed_spread_bps=spread_bps,
                 quote_volume_try=quote_volume_try,
                 exposure_snapshot=exposure_snapshot,
+                fee_burn_today_try=Decimal(str(latest_metrics.get("fees_try", "0"))),
+                reject_rate_window=Decimal("0"),
+                exchange_degraded=False,
+                stale_age_sec=data_age_sec,
             )
             stage7_risk_decision = risk_budget_service.decide(
                 settings=runtime,
@@ -474,8 +480,8 @@ class Stage7CycleRunner:
                 "risk_mode": dump_risk_mode(stage7_risk_mode),
                 "risk_reasons": stage7_risk_decision.reasons,
                 "risk_cooldown_until": (
-                    stage7_risk_decision.cooldown_until.isoformat()
-                    if stage7_risk_decision.cooldown_until
+                    (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None)).isoformat()
+                    if (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None))
                     else None
                 ),
                 "risk_inputs_hash": stage7_risk_decision.inputs_hash,
@@ -559,6 +565,27 @@ class Stage7CycleRunner:
                         )
                         continue
                     filtered_actions.append(action)
+
+                positions_by_symbol: dict[str, Decimal] = {}
+                for position in state_store.list_stage4_positions():
+                    positions_by_symbol[normalize_symbol(position.symbol)] = position.qty
+                filtered_actions, policy_decisions = risk_policy_service.filter_actions(
+                    actions=filtered_actions,
+                    portfolio=ActionPortfolioSnapshot(positions_by_symbol=positions_by_symbol),
+                    cycle_risk=stage7_risk_decision,
+                )
+                for decision in policy_decisions:
+                    if decision.accepted:
+                        continue
+                    skipped_actions.append(
+                        {
+                            "symbol": normalize_symbol(decision.action.symbol),
+                            "side": decision.action.side,
+                            "qty": str(decision.action.qty),
+                            "status": "skipped",
+                            "reason": decision.reason,
+                        }
+                    )
 
                 collector.start_timer("oms")
                 oms_service = OMSService()

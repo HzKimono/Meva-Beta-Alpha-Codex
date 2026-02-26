@@ -5,13 +5,19 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from btcbot.config import Settings
-from btcbot.domain.risk_models import (
-    ExposureSnapshot,
-    RiskDecision,
-    RiskMode,
-    combine_risk_modes,
-    stable_hash_payload,
+from btcbot.domain.risk_budget import Mode
+from btcbot.domain.risk_engine import (
+    CycleRiskOutput,
+    REASON_DRAWDOWN_LIMIT,
+    REASON_EXCHANGE_DEGRADED,
+    REASON_FEE_BURN,
+    REASON_HIGH_VOL,
+    REASON_KILL_SWITCH,
+    REASON_LOSS_LIMIT,
+    REASON_OK,
+    REASON_STALE_DATA,
 )
+from btcbot.domain.risk_models import ExposureSnapshot, stable_hash_payload
 
 
 @dataclass(frozen=True)
@@ -23,6 +29,10 @@ class Stage7RiskInputs:
     observed_spread_bps: Decimal
     quote_volume_try: Decimal
     exposure_snapshot: ExposureSnapshot
+    fee_burn_today_try: Decimal = Decimal("0")
+    reject_rate_window: Decimal = Decimal("0")
+    exchange_degraded: bool = False
+    stale_age_sec: int = 0
 
 
 class Stage7RiskBudgetService:
@@ -32,113 +42,104 @@ class Stage7RiskBudgetService:
         settings: Settings,
         now_utc: datetime,
         inputs: Stage7RiskInputs,
-        previous_decision: RiskDecision | None,
-    ) -> RiskDecision:
-        mode = RiskMode.NORMAL
-        reasons: dict[str, object] = {"rules": []}
+        previous_decision: CycleRiskOutput | None,
+    ) -> CycleRiskOutput:
+        mode = Mode.NORMAL
+        reasons: list[str] = []
         cooldown_until: datetime | None = None
 
-        def _set_mode(next_mode: RiskMode, reason: str, payload: dict[str, object]) -> None:
+        max_order_notional_try = min(settings.max_order_notional_try, settings.notional_cap_try_per_cycle)
+        max_orders_per_cycle = settings.max_orders_per_cycle
+        max_symbol_exposure_try = settings.max_symbol_exposure_try
+
+        def _apply_mode(next_mode: Mode, reason: str) -> None:
             nonlocal mode, cooldown_until
-            mode = combine_risk_modes(mode, next_mode)
-            reasons["rules"].append({"code": reason, **payload})
-            if next_mode == RiskMode.OBSERVE_ONLY and settings.stage7_risk_cooldown_sec > 0:
-                cooldown_until = now_utc.astimezone(UTC) + timedelta(
-                    seconds=settings.stage7_risk_cooldown_sec
-                )
+            if reason not in reasons:
+                reasons.append(reason)
+            if next_mode == Mode.OBSERVE_ONLY:
+                mode = Mode.OBSERVE_ONLY
+                if settings.risk_cooldown_sec > 0:
+                    cooldown_until = now_utc.astimezone(UTC) + timedelta(seconds=settings.risk_cooldown_sec)
+            elif next_mode == Mode.REDUCE_RISK_ONLY and mode == Mode.NORMAL:
+                mode = Mode.REDUCE_RISK_ONLY
 
-        if inputs.max_drawdown_pct >= settings.stage7_max_drawdown_pct:
-            _set_mode(
-                RiskMode.OBSERVE_ONLY,
-                "max_drawdown_breach",
-                {
-                    "max_drawdown_pct": str(inputs.max_drawdown_pct),
-                    "limit": str(settings.stage7_max_drawdown_pct),
-                },
-            )
+        if settings.kill_switch:
+            _apply_mode(Mode.OBSERVE_ONLY, REASON_KILL_SWITCH)
+        if inputs.exchange_degraded:
+            _apply_mode(Mode.OBSERVE_ONLY, REASON_EXCHANGE_DEGRADED)
 
-        if inputs.daily_pnl_try <= -settings.stage7_max_daily_loss_try:
-            _set_mode(
-                RiskMode.OBSERVE_ONLY,
-                "daily_loss_breach",
-                {
-                    "daily_pnl_try": str(inputs.daily_pnl_try),
-                    "limit": str(settings.stage7_max_daily_loss_try),
-                },
-            )
+        stale_age_sec = max(inputs.market_data_age_sec, inputs.stale_age_sec)
+        if stale_age_sec > settings.stage7_max_data_age_sec:
+            _apply_mode(Mode.OBSERVE_ONLY, REASON_STALE_DATA)
 
-        if inputs.consecutive_loss_streak >= settings.stage7_max_consecutive_losses:
-            loss_mode = (
-                RiskMode.OBSERVE_ONLY
-                if settings.stage7_loss_guardrail_mode == "observe_only"
-                else RiskMode.REDUCE_RISK_ONLY
-            )
-            _set_mode(
-                loss_mode,
-                "consecutive_loss_guardrail",
-                {
-                    "loss_streak": inputs.consecutive_loss_streak,
-                    "limit": settings.stage7_max_consecutive_losses,
-                },
-            )
+        drawdown_bps = int((inputs.max_drawdown_pct * Decimal("10000")).to_integral_value())
+        if inputs.daily_pnl_try <= (settings.daily_loss_limit_try * Decimal("-1")):
+            _apply_mode(Mode.REDUCE_RISK_ONLY, REASON_LOSS_LIMIT)
+        if drawdown_bps >= settings.max_drawdown_bps:
+            _apply_mode(Mode.REDUCE_RISK_ONLY, REASON_DRAWDOWN_LIMIT)
+        if inputs.fee_burn_today_try >= settings.fee_burn_limit_try:
+            _apply_mode(Mode.REDUCE_RISK_ONLY, REASON_FEE_BURN)
 
-        if inputs.market_data_age_sec > settings.stage7_max_data_age_sec:
-            _set_mode(
-                RiskMode.OBSERVE_ONLY,
-                "stale_market_data",
-                {
-                    "market_data_age_sec": inputs.market_data_age_sec,
-                    "limit": settings.stage7_max_data_age_sec,
-                },
-            )
+        if inputs.observed_spread_bps >= settings.high_vol_threshold_bps:
+            if REASON_HIGH_VOL not in reasons:
+                reasons.append(REASON_HIGH_VOL)
+            max_order_notional_try *= Decimal("0.5")
+            max_orders_per_cycle = max(1, settings.max_orders_per_cycle // 2)
+            max_symbol_exposure_try *= Decimal("0.5")
+            if inputs.observed_spread_bps >= settings.high_vol_threshold_bps * Decimal("2"):
+                _apply_mode(Mode.REDUCE_RISK_ONLY, REASON_HIGH_VOL)
 
-        if (
-            inputs.observed_spread_bps > Decimal(settings.stage7_spread_spike_bps)
-            or inputs.quote_volume_try < settings.stage7_min_quote_volume_try
-        ):
-            _set_mode(
-                RiskMode.REDUCE_RISK_ONLY,
-                "market_liquidity_guardrail",
-                {
-                    "observed_spread_bps": str(inputs.observed_spread_bps),
-                    "spread_limit_bps": settings.stage7_spread_spike_bps,
-                    "quote_volume_try": str(inputs.quote_volume_try),
-                    "quote_volume_min_try": str(settings.stage7_min_quote_volume_try),
-                },
-            )
+        prev_cooldown = getattr(previous_decision, "cooldown_until_utc", None) or getattr(
+            previous_decision, "cooldown_until", None
+        )
+        if prev_cooldown and prev_cooldown.astimezone(UTC) > now_utc.astimezone(UTC):
+            prev_mode = getattr(previous_decision, "mode", Mode.NORMAL)
+            if prev_mode == Mode.OBSERVE_ONLY:
+                mode = Mode.OBSERVE_ONLY
+            elif prev_mode == Mode.REDUCE_RISK_ONLY and mode == Mode.NORMAL:
+                mode = Mode.REDUCE_RISK_ONLY
+            cooldown_until = prev_cooldown
 
-        if previous_decision and previous_decision.cooldown_until:
-            if previous_decision.cooldown_until.astimezone(UTC) > now_utc.astimezone(UTC):
-                mode = combine_risk_modes(mode, previous_decision.mode)
-                cooldown_until = previous_decision.cooldown_until
-                reasons["cooldown_enforced"] = True
-
-        if not reasons["rules"]:
-            reasons["rules"].append({"code": "ok"})
+        if not reasons:
+            reasons = [REASON_OK]
 
         inputs_hash = stable_hash_payload(
             {
+                "now_utc": now_utc,
                 "inputs": {
                     "max_drawdown_pct": str(inputs.max_drawdown_pct),
                     "daily_pnl_try": str(inputs.daily_pnl_try),
-                    "consecutive_loss_streak": inputs.consecutive_loss_streak,
                     "market_data_age_sec": inputs.market_data_age_sec,
                     "observed_spread_bps": str(inputs.observed_spread_bps),
                     "quote_volume_try": str(inputs.quote_volume_try),
+                    "fee_burn_today_try": str(inputs.fee_burn_today_try),
+                    "reject_rate_window": str(inputs.reject_rate_window),
+                    "exchange_degraded": inputs.exchange_degraded,
+                    "stale_age_sec": stale_age_sec,
                     "exposure_hash": inputs.exposure_snapshot.inputs_hash,
                 },
-                "previous": {
-                    "mode": previous_decision.mode.value,
-                    "cooldown_until": previous_decision.cooldown_until,
-                }
-                if previous_decision
-                else None,
             }
         )
-        return RiskDecision(
+
+        return CycleRiskOutput(
             mode=mode,
             reasons=reasons,
-            cooldown_until=cooldown_until,
+            max_order_notional_try=max_order_notional_try,
+            max_orders_per_cycle=max_orders_per_cycle,
+            max_symbol_exposure_try=max_symbol_exposure_try,
+            daily_loss_limit_try=settings.daily_loss_limit_try,
+            max_drawdown_bps=settings.max_drawdown_bps,
+            fee_burn_limit_try=settings.fee_burn_limit_try,
+            cooldown_until_utc=cooldown_until,
+            allow_submit=(mode != Mode.OBSERVE_ONLY),
+            allow_cancel=True,
             decided_at=now_utc.astimezone(UTC),
             inputs_hash=inputs_hash,
+            metrics={
+                "loss_today": str(inputs.daily_pnl_try),
+                "drawdown_bps": drawdown_bps,
+                "fee_burn_today": str(inputs.fee_burn_today_try),
+                "reject_rate_window": str(inputs.reject_rate_window),
+                "stale_age_sec": stale_age_sec,
+            },
         )
