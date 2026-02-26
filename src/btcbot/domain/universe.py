@@ -12,7 +12,10 @@ class UniverseCandidate:
     spread_score: Decimal
     volatility_score: Decimal
     total_score: Decimal
-    breakdown: dict[str, str]
+    breakdown: dict[str, float | int | str]
+
+
+ScoredSymbolCandidate = UniverseCandidate
 
 
 ScoredSymbolCandidate = UniverseCandidate

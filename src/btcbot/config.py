@@ -261,7 +261,7 @@ class Settings(BaseSettings):
     stage7_max_consecutive_losses: int = Field(default=3, alias="STAGE7_MAX_CONSECUTIVE_LOSSES")
     stage7_max_data_age_sec: int = Field(default=60, alias="STAGE7_MAX_DATA_AGE_SEC")
     stage7_universe_governance_probation_cycles: int = Field(
-        default=2,
+        default=1,
         alias="STAGE7_UNIVERSE_GOVERNANCE_PROBATION_CYCLES",
     )
     stage7_universe_governance_cooldown_sec: int = Field(

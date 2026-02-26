@@ -642,6 +642,7 @@ class StateStore:
                 scored_json TEXT NOT NULL DEFAULT '[]',
                 reasons_json TEXT NOT NULL DEFAULT '[]',
                 freeze_reason TEXT,
+                freeze_reasons_json TEXT NOT NULL DEFAULT '[]',
                 excluded_counts_json TEXT NOT NULL DEFAULT '{}',
                 churn_count INTEGER NOT NULL DEFAULT 0
             )
@@ -660,6 +661,15 @@ class StateStore:
             )
             """
         )
+        stage7_universe_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(stage7_universe_state)")
+        }
+        if "freeze_reasons_json" not in stage7_universe_columns:
+            conn.execute(
+                "ALTER TABLE stage7_universe_state "
+                "ADD COLUMN freeze_reasons_json TEXT NOT NULL DEFAULT '[]'"
+            )
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_stage7_universe_state_ts ON stage7_universe_state(ts)"
         )
@@ -2205,7 +2215,9 @@ class StateStore:
             """,
             (self.db_path_abs, self.instance_id),
         ).fetchall()
-        active_row = next((row for row in rows if int(row["heartbeat_at_epoch"]) >= ttl_cutoff), None)
+        active_row = next(
+            (row for row in rows if int(row["heartbeat_at_epoch"]) >= ttl_cutoff), None
+        )
         if active_row is not None:
             # Re-entrant startup in the same process should reuse the existing active
             # instance registration for this DB path instead of raising a self-conflict.
@@ -2247,9 +2259,7 @@ class StateStore:
                 )
 
         stale_ids = [
-            str(row["instance_id"])
-            for row in rows
-            if int(row["heartbeat_at_epoch"]) < ttl_cutoff
+            str(row["instance_id"]) for row in rows if int(row["heartbeat_at_epoch"]) < ttl_cutoff
         ]
         if stale_ids:
             logger.warning(
@@ -2900,7 +2910,6 @@ class StateStore:
             reason = payload.get("reason")
             until_ts = payload.get("until_ts")
         return enabled, reason, until_ts
-
 
     def stage4_set_freeze(
         self,
@@ -4377,11 +4386,20 @@ class StateStore:
             return None
         return Decimal(str(row["mid_price"]))
 
+    @staticmethod
+    def _canonicalize_stage7_universe_role(role: str) -> str:
+        return _canonicalize_role(role)
+
+    def get_latest_stage7_universe_snapshot(
+        self, *, role: str = "default"
+    ) -> dict[str, object] | None:
+        return self.get_stage7_universe_snapshot(role=role)
+
     def get_stage7_universe_snapshot(self, *, role: str = "default") -> dict[str, object] | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM stage7_universe_state WHERE role = ?",
-                (str(role).strip().lower(),),
+                (self._canonicalize_stage7_universe_role(role),),
             ).fetchone()
         if row is None:
             return None
@@ -4389,6 +4407,7 @@ class StateStore:
         payload["selected_symbols"] = json.loads(str(payload.pop("selected_symbols_json") or "[]"))
         payload["scored"] = json.loads(str(payload.pop("scored_json") or "[]"))
         payload["reasons"] = json.loads(str(payload.pop("reasons_json") or "[]"))
+        payload["freeze_reasons"] = json.loads(str(payload.pop("freeze_reasons_json") or "[]"))
         payload["excluded_counts"] = json.loads(str(payload.pop("excluded_counts_json") or "{}"))
         return payload
 
@@ -4401,6 +4420,7 @@ class StateStore:
         scored: list[dict[str, object]],
         reasons: list[str],
         freeze_reason: str | None,
+        freeze_reasons: list[str] | None,
         excluded_counts: dict[str, int],
         churn_count: int,
     ) -> None:
@@ -4409,24 +4429,26 @@ class StateStore:
                 """
                 INSERT INTO stage7_universe_state(
                     role, ts, selected_symbols_json, scored_json, reasons_json,
-                    freeze_reason, excluded_counts_json, churn_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    freeze_reason, freeze_reasons_json, excluded_counts_json, churn_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(role) DO UPDATE SET
                     ts=excluded.ts,
                     selected_symbols_json=excluded.selected_symbols_json,
                     scored_json=excluded.scored_json,
                     reasons_json=excluded.reasons_json,
                     freeze_reason=excluded.freeze_reason,
+                    freeze_reasons_json=excluded.freeze_reasons_json,
                     excluded_counts_json=excluded.excluded_counts_json,
                     churn_count=excluded.churn_count
                 """,
                 (
-                    str(role).strip().lower(),
+                    self._canonicalize_stage7_universe_role(role),
                     ensure_utc(ts).isoformat(),
                     json.dumps(selected_symbols, sort_keys=True),
                     json.dumps(scored, sort_keys=True),
                     json.dumps(reasons, sort_keys=True),
                     freeze_reason,
+                    json.dumps(freeze_reasons or [], sort_keys=True),
                     json.dumps(excluded_counts, sort_keys=True),
                     int(churn_count),
                 ),
@@ -4618,7 +4640,9 @@ class StateStore:
                     ensure_utc(last_selected_ts).isoformat() if last_selected_ts else None,
                     ensure_utc(cooldown_until_ts).isoformat() if cooldown_until_ts else None,
                     ensure_utc(probation_until_ts).isoformat() if probation_until_ts else None,
-                    ensure_utc(reject_window_start_ts).isoformat() if reject_window_start_ts else None,
+                    ensure_utc(reject_window_start_ts).isoformat()
+                    if reject_window_start_ts
+                    else None,
                     json.dumps(reject_counts or {}, sort_keys=True),
                     ensure_utc(updated_at).isoformat(),
                 ),
@@ -4958,10 +4982,7 @@ class StateStore:
                     int(intents_executed),
                     int(orders_submitted),
                     json.dumps(
-                        {
-                            str(key): int(value)
-                            for key, value in sorted(rejects_by_code.items())
-                        },
+                        {str(key): int(value) for key, value in sorted(rejects_by_code.items())},
                         sort_keys=True,
                     ),
                     breaker_state,
