@@ -12,7 +12,10 @@ class UniverseCandidate:
     spread_score: Decimal
     volatility_score: Decimal
     total_score: Decimal
-    breakdown: dict[str, str]
+    breakdown: dict[str, float | int | str]
+
+
+ScoredSymbolCandidate = UniverseCandidate
 
 
 @dataclass(frozen=True)
@@ -21,3 +24,7 @@ class UniverseSelectionResult:
     scored: list[UniverseCandidate]
     reasons: list[str]
     timestamp: datetime
+
+    @property
+    def ts_utc(self) -> datetime:
+        return self.timestamp
