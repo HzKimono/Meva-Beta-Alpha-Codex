@@ -91,6 +91,22 @@ def test_market_data_ws_age_stale_falls_back_to_rest_when_enabled() -> None:
     assert exchange.orderbook_hits == 1
 
 
+def test_market_data_missing_symbols_sets_stale_flag() -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+
+    def _clock() -> datetime:
+        return now
+
+    service = MarketDataService(exchange=_FakeExchange(), mode="ws", now_provider=_clock)
+    service.set_ws_connected(True)
+    service.ingest_ws_best_bid("BTC_TRY", 100.0)
+
+    _bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY", "ETH_TRY"], max_age_ms=500)
+
+    assert freshness.is_stale is True
+    assert freshness.missing_symbols == ("ETH_TRY",)
+
+
 class _CaptureInstrumentation:
     def __init__(self) -> None:
         self.counters: list[tuple[str, int]] = []

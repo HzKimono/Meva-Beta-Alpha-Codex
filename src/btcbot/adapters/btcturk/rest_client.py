@@ -16,7 +16,7 @@ from btcbot.adapters.btcturk.instrumentation import MetricsSink
 from btcbot.adapters.btcturk.rate_limit import AsyncTokenBucket
 from btcbot.adapters.btcturk.retry import RetryDecision, async_retry, compute_delay
 from btcbot.domain.models import ExchangeError
-from btcbot.obs.metrics import inc_counter
+from btcbot.obs.metrics import inc_counter, observe_histogram
 from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
 from btcbot.observability import get_instrumentation
 
@@ -122,7 +122,27 @@ class BtcturkRestClient:
         await self.clock_sync.maybe_sync()
 
         async def _call() -> dict[str, Any]:
+            limiter_started = monotonic()
             await self.limiter.acquire()
+            rate_limit_wait_seconds = max(0.0, monotonic() - limiter_started)
+            if rate_limit_wait_seconds > 0:
+                observe_histogram(
+                    "bot_rate_limit_wait_seconds",
+                    rate_limit_wait_seconds,
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": self.process_role,
+                    },
+                )
+                inc_counter(
+                    "bot_rate_limit_wait_total",
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": self.process_role,
+                    },
+                )
             headers = {"X-Correlation-ID": correlation_id or "n/a"}
             if is_private:
                 headers.update(self._auth_headers())
@@ -153,7 +173,14 @@ class BtcturkRestClient:
                     labels={
                         "exchange": "btcturk",
                         "endpoint": path,
-                        "process_role": "LIVE",
+                        "process_role": self.process_role,
+                    },
+                )
+                inc_counter(
+                    "bot_api_429_backoff_total",
+                    labels={
+                        "process_role": self.process_role,
+                        "mode_final": "unknown",
                     },
                 )
 
@@ -203,6 +230,25 @@ class BtcturkRestClient:
             )
             self.metrics.inc("rest_retries")
             self.metrics.inc("rest_retry_rate")
+            inc_counter(
+                "bot_rest_retry_attempts_total",
+                labels={
+                    "exchange": "btcturk",
+                    "endpoint": path,
+                    "error_kind": exc.kind.value,
+                    "process_role": self.process_role,
+                },
+            )
+            observe_histogram(
+                "bot_rest_retry_backoff_seconds",
+                delay,
+                labels={
+                    "exchange": "btcturk",
+                    "endpoint": path,
+                    "error_kind": exc.kind.value,
+                    "process_role": self.process_role,
+                },
+            )
             return RetryDecision(retry=True, delay_seconds=delay)
 
         try:
@@ -212,14 +258,15 @@ class BtcturkRestClient:
                 classify=_classify,
             )
         except RestRequestError as exc:
-            inc_counter(
-                "bot_api_errors_total",
-                labels={
-                    "exchange": "btcturk",
-                    "endpoint": path,
-                    "process_role": self.process_role,
-                },
-            )
+            if exc.kind is not RestErrorKind.RATE_LIMIT:
+                inc_counter(
+                    "bot_api_errors_total",
+                    labels={
+                        "exchange": "btcturk",
+                        "endpoint": path,
+                        "process_role": self.process_role,
+                    },
+                )
             raise self._to_exchange_error(exc, method=method, path=path) from exc
 
     async def submit_order_safe(
@@ -271,7 +318,11 @@ class BtcturkRestClient:
     async def find_open_order_by_client_order_id(
         self, client_order_id: str
     ) -> dict[str, object] | None:
-        payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        try:
+            payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        except ExchangeError:
+            self._emit_idempotency_recovery_outcome(operation="submit_lookup", outcome="error")
+            raise
         for side_key in ("bids", "asks"):
             data = payload.get("data")
             side_rows = data.get(side_key, []) if isinstance(data, dict) else []
@@ -279,13 +330,20 @@ class BtcturkRestClient:
                 continue
             for row in side_rows:
                 if isinstance(row, dict) and row.get("orderClientId") == client_order_id:
+                    self._emit_idempotency_recovery_outcome(operation="submit_lookup", outcome="found")
                     return row
+        self._emit_idempotency_recovery_outcome(operation="submit_lookup", outcome="not_found")
         return None
 
     async def is_order_open(self, order_id: str) -> bool:
-        payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        try:
+            payload = await self.request("GET", "/api/v1/openOrders", is_private=True)
+        except ExchangeError:
+            self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="error")
+            raise
         data = payload.get("data")
         if not isinstance(data, dict):
+            self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="not_found")
             return False
         for side_key in ("bids", "asks"):
             side_rows = data.get(side_key, [])
@@ -293,8 +351,22 @@ class BtcturkRestClient:
                 continue
             for row in side_rows:
                 if isinstance(row, dict) and str(row.get("id")) == str(order_id):
+                    self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="found")
                     return True
+        self._emit_idempotency_recovery_outcome(operation="cancel_lookup", outcome="not_found")
         return False
+
+
+    def _emit_idempotency_recovery_outcome(self, *, operation: str, outcome: str) -> None:
+        inc_counter(
+            "bot_idempotency_recovery_attempts_total",
+            labels={
+                "exchange": "btcturk",
+                "operation": operation,
+                "outcome": outcome,
+                "process_role": self.process_role,
+            },
+        )
 
     def _auth_headers(self) -> dict[str, str]:
         stamp = str(self.clock_sync.stamped_now_ms())
