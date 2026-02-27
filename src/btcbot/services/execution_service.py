@@ -1038,6 +1038,12 @@ class ExecutionService:
     def execute_intents(
         self, intents: list[OrderIntent] | list[Intent], *, cycle_id: str | None = None
     ) -> int:
+        """Execute place-order intents and return only *actual* exchange submissions.
+
+        The return value is the number of orders submitted to the exchange as a side effect
+        during this call. Dry-run simulations still record would-place actions and idempotency
+        status, but do not contribute to the returned count.
+        """
         normalized_intents: list[tuple[OrderIntent, Intent | None]] = []
         for raw in intents:
             if isinstance(raw, Intent):
@@ -1746,7 +1752,7 @@ class ExecutionService:
             "rejected_min_notional": rejected_min_notional,
             "would_reject_min_notional": would_reject_min_notional,
         }
-        return placed + orders_simulated
+        return placed
 
     def _submit_limit_order(
         self,
