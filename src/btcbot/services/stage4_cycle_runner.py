@@ -2333,7 +2333,13 @@ class Stage4CycleRunner:
                 continue
 
             rules = build_exchange_rules(rules_source)
-            min_required_notional_try = max(min_order_notional_try, rules.min_notional_try)
+            min_required_notional_try = max(
+                Decimal(str(min_order_notional_try)),
+                rules.min_notional_try,
+            )
+            if bootstrap_notional_try <= 0:
+                self._inc_reason(drop_reasons, "bootstrap_disabled")
+                continue
             if try_cash < min_required_notional_try:
                 self._inc_reason(drop_reasons, "cash_below_min_notional")
                 logger.info(
@@ -2350,24 +2356,40 @@ class Stage4CycleRunner:
                 )
                 continue
 
-            budget = min(try_cash, bootstrap_notional_try)
-            if max_notional_per_order_try > 0:
-                budget = min(budget, max_notional_per_order_try)
-            if budget < min_required_notional_try:
-                self._inc_reason(drop_reasons, "bootstrap_budget_below_min_notional")
+            budget_before_clamp = min(try_cash, Decimal(str(bootstrap_notional_try)))
+            budget = max(budget_before_clamp, min_required_notional_try)
+            if budget != budget_before_clamp:
                 logger.info(
-                    "stage4_bootstrap_dropped_min_notional",
+                    "stage4_bootstrap_budget_clamped_to_min_notional",
                     extra={
                         "extra": {
                             "cycle_id": cycle_id,
                             "symbol": normalized,
-                            "budget_try": str(budget),
+                            "try_cash": str(try_cash),
+                            "bootstrap_setting": str(bootstrap_notional_try),
                             "min_required_notional_try": str(min_required_notional_try),
-                            "reason_code": "bootstrap_budget_below_min_notional",
+                            "effective_bootstrap_before": str(budget_before_clamp),
+                            "effective_bootstrap_after": str(budget),
                         }
                     },
                 )
-                continue
+            if max_notional_per_order_try > 0:
+                if max_notional_per_order_try < min_required_notional_try:
+                    self._inc_reason(drop_reasons, "max_notional_below_min_notional")
+                    logger.info(
+                        "stage4_bootstrap_dropped_min_notional",
+                        extra={
+                            "extra": {
+                                "cycle_id": cycle_id,
+                                "symbol": normalized,
+                                "budget_try": str(max_notional_per_order_try),
+                                "min_required_notional_try": str(min_required_notional_try),
+                                "reason_code": "max_notional_below_min_notional",
+                            }
+                        },
+                    )
+                    continue
+                budget = min(budget, max_notional_per_order_try)
 
             qty_raw = budget / mark
             if qty_raw <= 0:

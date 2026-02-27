@@ -79,6 +79,15 @@ def test_additional_invalid_settings_raise(field: str, value: float) -> None:
         Settings(**kwargs)
 
 
+def test_stage5_bootstrap_notional_clamped_to_min_order_notional() -> None:
+    settings = Settings(MIN_ORDER_NOTIONAL_TRY=100, STAGE5_BOOTSTRAP_NOTIONAL_TRY=50)
+    assert settings.stage5_bootstrap_notional_try == 100
+
+
+def test_stage5_bootstrap_notional_keeps_disabled_zero_value() -> None:
+    settings = Settings(MIN_ORDER_NOTIONAL_TRY=100, STAGE5_BOOTSTRAP_NOTIONAL_TRY=0)
+    assert settings.stage5_bootstrap_notional_try == 0
+
 def test_btcturk_base_url_default() -> None:
     settings = Settings()
     assert settings.btcturk_base_url == "https://api.btcturk.com"
