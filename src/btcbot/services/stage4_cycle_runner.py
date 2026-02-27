@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# P0.2 diagnostics: surface compact reject reason/code/context in stage4_cycle_summary for fast triage.
 import json
 import logging
 import re
@@ -1514,11 +1515,11 @@ class Stage4CycleRunner:
                         }
                     },
                 )
-            reject_breakdown = {
-                key: value
-                for key, value in dict(decision_report.counters).items()
-                if key.startswith("rejected") or key.startswith("scaled")
-            }
+            reject_breakdown = self._build_rejects_breakdown(
+                decision_report.counters,
+                execution_report,
+            )
+            reject_context = self._summary_reject_context(execution_report)
             logger.info(
                 "stage4_cycle_summary",
                 extra={
@@ -1537,7 +1538,9 @@ class Stage4CycleRunner:
                         "submitted": execution_report.submitted,
                         "canceled": execution_report.canceled,
                         "simulated": execution_report.simulated,
+                        "rejects_by_code": rejects_by_code,
                         "rejects_breakdown": reject_breakdown,
+                        "reject_context": reject_context,
                         "cursor_diagnostics": cursor_diag,
                         "cycle_duration_ms": updated_cycle_duration_ms,
                     }
@@ -2430,6 +2433,54 @@ class Stage4CycleRunner:
             code = match.group(1)
             rejects_by_code[code] = rejects_by_code.get(code, 0) + int(value)
         return dict(sorted(rejects_by_code.items()))
+
+
+    @staticmethod
+    def _build_rejects_breakdown(
+        decision_counters: Mapping[str, int],
+        execution_report,
+    ) -> dict[str, object]:
+        execution_breakdown = dict(getattr(execution_report, "rejects_breakdown", {}) or {})
+        if execution_breakdown:
+            return {"by_reason": dict(sorted(execution_breakdown.items()))}
+
+        by_signal = {
+            key: int(value)
+            for key, value in dict(decision_counters).items()
+            if key.startswith("rejected") or key.startswith("scaled")
+        }
+        if by_signal:
+            return {"by_signal": dict(sorted(by_signal.items()))}
+
+        if int(getattr(execution_report, "rejected", 0)) > 0:
+            details = list(getattr(execution_report, "reject_details", ()) or ())
+            if details:
+                first = details[0]
+                return {
+                    "by_reason": {str(first.get("reason", "unknown")): int(getattr(execution_report, "rejected", 0))},
+                    "sample": first,
+                }
+            return {"by_reason": {"unknown": int(getattr(execution_report, "rejected", 0))}}
+
+        return {}
+
+    @staticmethod
+    def _summary_reject_context(execution_report) -> dict[str, object]:
+        details = list(getattr(execution_report, "reject_details", ()) or ())
+        if not details:
+            return {}
+        primary = dict(details[0])
+        return {
+            "reason": primary.get("reason", "unknown"),
+            "rejected_by_code": primary.get("rejected_by_code", "unknown"),
+            "symbol": primary.get("symbol"),
+            "side": primary.get("side"),
+            "q_price": primary.get("q_price"),
+            "q_qty": primary.get("q_qty"),
+            "total_try": primary.get("total_try"),
+            "min_required_settings": primary.get("min_required_settings"),
+            "min_required_exchange_rule": primary.get("min_required_exchange_rule"),
+        }
 
     def _reasons_no_action_enum(
         self,
