@@ -4,6 +4,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
@@ -674,7 +675,38 @@ class ExecutionService:
 
         q_price = Quantizer.quantize_price(action.price, rules)
         q_qty = Quantizer.quantize_qty(action.qty, rules)
-        if not Quantizer.validate_min_notional(q_price, q_qty, rules):
+        min_required_notional = max(
+            Decimal(str(self.settings.min_order_notional_try)), rules.min_notional_try
+        )
+        q_notional = q_price * q_qty
+        if q_notional < min_required_notional:
+            # Root cause: intent_notional can satisfy min-notional, but floor quantization can push
+            # q_price * q_qty below min-required; in that case, ceil qty to step at quantized price.
+            intent_notional = action.price * action.qty
+            if intent_notional >= min_required_notional and q_price > 0:
+                qty_needed = min_required_notional / q_price
+                q_qty2 = Quantizer.quantize_qty_up(qty_needed, rules)
+                notional2 = q_price * q_qty2
+                if notional2 >= min_required_notional:
+                    logger.info(
+                        "stage4_min_notional_rounding_fix_applied",
+                        extra={
+                            "extra": {
+                                "symbol": action.symbol,
+                                "min_required_notional": str(min_required_notional),
+                                "q_price": str(q_price),
+                                "q_qty_before": str(q_qty),
+                                "q_qty_after": str(q_qty2),
+                                "notional_before": str(q_notional),
+                                "notional_after": str(notional2),
+                                "intent_notional": str(intent_notional),
+                            }
+                        },
+                    )
+                    q_qty = q_qty2
+                    q_notional = notional2
+
+        if q_notional < min_required_notional:
             self.state_store.record_stage4_order_rejected(
                 action.client_order_id,
                 "min_notional_violation",
@@ -685,8 +717,6 @@ class ExecutionService:
                 mode=("live" if live_mode else "dry_run"),
             )
             return 0, 0, 1, 1
-
-        q_notional = q_price * q_qty
         max_order_notional_cap = self.settings.risk_max_order_notional_try
         if max_order_notional_cap is not None and max_order_notional_cap > 0:
             if q_notional > max_order_notional_cap:

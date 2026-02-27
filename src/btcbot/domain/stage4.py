@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_UP, Decimal
 from enum import StrEnum
 from typing import Literal
 
@@ -114,6 +114,16 @@ class Quantizer:
             return steps * rules.step_size
         quantum = Decimal("1").scaleb(-rules.qty_precision)
         return qty.quantize(quantum, rounding=ROUND_DOWN)
+
+    @staticmethod
+    def quantize_qty_up(qty: Decimal, rules: ExchangeRules) -> Decimal:
+        if qty <= 0:
+            return Decimal("0")
+        if rules.step_size > 0:
+            steps = (qty / rules.step_size).to_integral_value(rounding=ROUND_CEILING)
+            return steps * rules.step_size
+        quantum = Decimal("1").scaleb(-rules.qty_precision)
+        return qty.quantize(quantum, rounding=ROUND_UP)
 
     @staticmethod
     def validate_min_notional(price: Decimal, qty: Decimal, rules: ExchangeRules) -> bool:
