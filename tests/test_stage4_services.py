@@ -18,6 +18,7 @@ from btcbot.domain.stage4 import (
     Order,
     PnLSnapshot,
     Position,
+    Quantizer,
     now_utc,
 )
 from btcbot.services.accounting_service_stage4 import AccountingIntegrityError, AccountingService
@@ -92,6 +93,128 @@ class MissingRulesService:
 @pytest.fixture
 def store(tmp_path) -> StateStore:
     return StateStore(str(tmp_path / "stage4.sqlite"))
+
+
+def test_quantize_qty_up_ceil_behavior() -> None:
+    rules = ExchangeRules(
+        tick_size=Decimal("0.1"),
+        step_size=Decimal("0.0001"),
+        min_notional_try=Decimal("100"),
+        price_precision=2,
+        qty_precision=4,
+    )
+
+    assert Quantizer.quantize_qty_up(Decimal("0"), rules) == Decimal("0")
+    assert Quantizer.quantize_qty_up(Decimal("1.2345"), rules) == Decimal("1.2345")
+    assert Quantizer.quantize_qty_up(Decimal("1.23451"), rules) == Decimal("1.2346")
+
+
+def test_quantize_qty_up_precision_only_rounds_up() -> None:
+    rules = ExchangeRules(
+        tick_size=Decimal("0.1"),
+        step_size=Decimal("0"),
+        min_notional_try=Decimal("100"),
+        price_precision=2,
+        qty_precision=4,
+    )
+
+    assert Quantizer.quantize_qty_up(Decimal("1.2345"), rules) == Decimal("1.2345")
+    assert Quantizer.quantize_qty_up(Decimal("1.23451"), rules) == Decimal("1.2346")
+
+
+def test_stage4_submit_applies_min_notional_rounding_fix(store: StateStore) -> None:
+    class MinNotionalRulesService:
+        def resolve_boundary(self, symbol: str):
+            del symbol
+            return type(
+                "R",
+                (),
+                {
+                    "rules": ExchangeRules(
+                        tick_size=Decimal("0.01"),
+                        step_size=Decimal("0.0001"),
+                        min_notional_try=Decimal("100"),
+                        price_precision=2,
+                        qty_precision=4,
+                    )
+                },
+            )()
+
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False),
+        rules_service=MinNotionalRulesService(),
+    )
+
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100.005"),
+        qty=Decimal("0.99996"),
+        reason="rounding_fix",
+        client_order_id="cid-rounding-fix",
+    )
+
+    report = svc.execute_with_report([action])
+
+    assert report.rejected == 0
+    assert report.rejected_min_notional == 0
+    assert report.simulated == 1
+    order = store.get_stage4_order_by_client_id("cid-rounding-fix")
+    assert order is not None
+    assert order.price == Decimal("100.00")
+    assert order.qty == Decimal("1.0000")
+    assert order.price * order.qty >= Decimal("100")
+
+
+def test_stage4_submit_keeps_below_min_intent_rejected(store: StateStore) -> None:
+    class MinNotionalRulesService:
+        def resolve_boundary(self, symbol: str):
+            del symbol
+            return type(
+                "R",
+                (),
+                {
+                    "rules": ExchangeRules(
+                        tick_size=Decimal("0.01"),
+                        step_size=Decimal("0.0001"),
+                        min_notional_try=Decimal("100"),
+                        price_precision=2,
+                        qty_precision=4,
+                    )
+                },
+            )()
+
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, LIVE_TRADING=False),
+        rules_service=MinNotionalRulesService(),
+    )
+
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100.005"),
+        qty=Decimal("0.99990"),
+        reason="below_min_intent",
+        client_order_id="cid-below-min-intent",
+    )
+
+    report = svc.execute_with_report([action])
+
+    assert report.rejected == 1
+    assert report.rejected_min_notional == 1
+    assert report.simulated == 0
+    rejected = store.get_stage4_order_by_client_id("cid-below-min-intent")
+    assert rejected is not None
+    assert rejected.status == "rejected"
+
 
 
 def test_execution_enforces_live_ack_and_kill_switch(store: StateStore) -> None:
