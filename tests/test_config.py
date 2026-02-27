@@ -88,6 +88,35 @@ def test_stage5_bootstrap_notional_keeps_disabled_zero_value() -> None:
     settings = Settings(MIN_ORDER_NOTIONAL_TRY=100, STAGE5_BOOTSTRAP_NOTIONAL_TRY=0)
     assert settings.stage5_bootstrap_notional_try == 0
 
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("RATE_LIMIT_MARKETDATA_TPS", 0),
+        ("RATE_LIMIT_ORDERS_TPS", -1),
+        ("RATE_LIMIT_ACCOUNT_TPS", 0),
+        ("BTCTURK_RATE_LIMIT_RPS", 0),
+    ],
+)
+def test_rate_limit_tps_settings_must_be_positive(field: str, value: float) -> None:
+    with pytest.raises(ValueError):
+        Settings(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("RATE_LIMIT_MARKETDATA_BURST", 0),
+        ("RATE_LIMIT_ORDERS_BURST", 0),
+        ("RATE_LIMIT_ACCOUNT_BURST", 0),
+        ("BTCTURK_RATE_LIMIT_BURST", 0),
+    ],
+)
+def test_rate_limit_burst_settings_must_be_at_least_one(field: str, value: int) -> None:
+    with pytest.raises(ValueError):
+        Settings(**{field: value})
+
 def test_btcturk_base_url_default() -> None:
     settings = Settings()
     assert settings.btcturk_base_url == "https://api.btcturk.com"

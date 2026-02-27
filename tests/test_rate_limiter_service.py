@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from btcbot.services.rate_limiter import (
     AsyncTokenBucketRateLimiter,
     EndpointBudget,
     TokenBucketRateLimiter,
+    map_endpoint_group,
 )
 
 
@@ -109,3 +112,48 @@ def test_async_token_bucket_uses_async_sleep() -> None:
 
     asyncio.run(_run())
     assert slept == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_group"),
+    [
+        ("/api/v2/orderbook?pairSymbol=BTCTRY", "market_data"),
+        ("/api/v2/ticker", "market_data"),
+        ("/api/v2/ohlc", "market_data"),
+        ("/api/v1/order", "orders"),
+        ("/api/v1/order/cancel", "orders"),
+        ("/api/v1/users/balances", "account"),
+        ("/api/v1/openOrders", "account"),
+        ("/api/v1/users/transactions", "account"),
+        ("/api/v1/unknown/path", "default"),
+    ],
+)
+def test_map_endpoint_group_classifies_btcturk_paths(path: str, expected_group: str) -> None:
+    assert map_endpoint_group(path) == expected_group
+
+
+def test_rate_limiter_groups_are_isolated() -> None:
+    now = {"t": 0.0}
+
+    limiter = TokenBucketRateLimiter(
+        {
+            "default": EndpointBudget(name="default", rps=1.0, burst=1),
+            "market_data": EndpointBudget(name="market_data", rps=1.0, burst=1),
+            "orders": EndpointBudget(name="orders", rps=10.0, burst=2),
+            "account": EndpointBudget(name="account", rps=2.0, burst=1),
+        },
+        clock=lambda: now["t"],
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert limiter.consume("market_data") is True
+    assert limiter.consume("market_data") is False
+
+    assert limiter.consume("orders") is True
+    assert limiter.consume("orders") is True
+
+    limiter.penalize_on_429("market_data", 1.0)
+    assert limiter.consume("market_data") is False
+
+    now["t"] += 0.1
+    assert limiter.consume("orders") is True

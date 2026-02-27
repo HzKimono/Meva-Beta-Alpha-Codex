@@ -383,15 +383,15 @@ def test_private_get_retries_429_using_retry_after_header_and_penalizes_limiter(
 ) -> None:
     class SpyLimiter:
         def __init__(self) -> None:
-            self.penalties: list[float | None] = []
+            self.acquire_groups: list[str] = []
+            self.penalty_events: list[tuple[str, float | None]] = []
 
-        def acquire(self, group: str, cost: int = 1) -> float:
-            del group, cost
+        def acquire(self, group: str) -> float:
+            self.acquire_groups.append(group)
             return 0.0
 
         def penalize_on_429(self, group: str, retry_after_s: float | None) -> None:
-            del group
-            self.penalties.append(retry_after_s)
+            self.penalty_events.append((group, retry_after_s))
 
     calls = {"count": 0}
     sleeps: list[float] = []
@@ -422,7 +422,8 @@ def test_private_get_retries_429_using_retry_after_header_and_penalizes_limiter(
     assert balances == []
     assert calls["count"] == 2
     assert sleeps == [1.5]
-    assert limiter.penalties == [1.5]
+    assert limiter.acquire_groups == ["account", "account"]
+    assert limiter.penalty_events == [("account", 1.5)]
     client.close()
 
 

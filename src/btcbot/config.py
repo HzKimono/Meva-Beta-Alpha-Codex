@@ -856,6 +856,28 @@ class Settings(BaseSettings):
             raise ValueError("Stage7 risk integer settings must be >= 0")
         return value
 
+    @field_validator(
+        "btcturk_rate_limit_rps",
+        "rate_limit_marketdata_tps",
+        "rate_limit_account_tps",
+        "rate_limit_orders_tps",
+    )
+    def validate_rate_limit_rps(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("Rate limit TPS values must be > 0")
+        return value
+
+    @field_validator(
+        "btcturk_rate_limit_burst",
+        "rate_limit_marketdata_burst",
+        "rate_limit_account_burst",
+        "rate_limit_orders_burst",
+    )
+    def validate_rate_limit_burst(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Rate limit burst values must be >= 1")
+        return value
+
     @field_validator("stage7_rate_limit_rps", mode="before")
     def validate_stage7_rate_limit_rps(cls, value: object) -> float:
         try:
