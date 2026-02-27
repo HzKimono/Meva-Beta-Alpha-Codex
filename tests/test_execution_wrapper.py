@@ -229,3 +229,28 @@ def test_submit_missing_client_order_id_raises_value_error() -> None:
             price=Decimal("1"),
             qty=Decimal("0.1"),
         )
+
+
+def test_submit_breaker_open_retries_and_raises(monkeypatch) -> None:
+    fake_metrics = _FakeInstrumentation()
+    monkeypatch.setattr(wrapper_module, "get_instrumentation", lambda: fake_metrics)
+    error = ExchangeError("rate limit breaker open", status_code=429, error_message="breaker_open")
+    exchange = _Stage4Exchange(submit_error=error)
+    wrapper = ExecutionWrapper(exchange, submit_retry_max_attempts=3, sleep_fn=lambda _: None)
+
+    with pytest.raises(ExchangeError):
+        wrapper.submit_limit_order(
+            symbol="BTCTRY",
+            side="buy",
+            price=Decimal("1"),
+            qty=Decimal("1"),
+            client_order_id="cid-breaker",
+        )
+
+    assert exchange.submit_calls == 3
+    categories = [
+        (event.attrs or {}).get("category")
+        for event in fake_metrics.events
+        if event.name == "execution_attempts_total"
+    ]
+    assert "rate_limit" in categories
