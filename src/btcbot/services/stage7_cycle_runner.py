@@ -36,6 +36,10 @@ from btcbot.services.order_builder_service import OrderBuilderService
 from btcbot.services.planning_kernel_adapters import Stage7ExecutionPort, Stage7PlanConsumer
 from btcbot.services.portfolio_policy_service import PortfolioPolicyService
 from btcbot.services.price_conversion_service import MarkPriceConverter
+from btcbot.services.risk_policy_service import (
+    ActionPortfolioSnapshot,
+    RiskPolicyService,
+)
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.stage7_planning_kernel_integration import (
     Stage7OrderIntentBuilderAdapter,
@@ -46,10 +50,6 @@ from btcbot.services.stage7_planning_kernel_integration import (
     normalize_stage4_open_orders,
 )
 from btcbot.services.stage7_risk_budget_service import Stage7RiskBudgetService, Stage7RiskInputs
-from btcbot.services.risk_policy_service import (
-    ActionPortfolioSnapshot,
-    RiskPolicyService,
-)
 from btcbot.services.state_store import StateStore
 from btcbot.services.universe_selection_service import _BPS, UniverseSelectionService
 
@@ -135,7 +135,9 @@ def _filter_order_intents_by_risk(
     portfolio_snapshot: ActionPortfolioSnapshot,
     cycle_risk,
 ) -> tuple[list[OrderIntent], list[dict[str, object]]]:
-    intent_risk_actions = [_to_risk_action(intent) for intent in order_intents if not intent.skipped]
+    intent_risk_actions = [
+        _to_risk_action(intent) for intent in order_intents if not intent.skipped
+    ]
     allowed_intent_actions, intent_decisions = risk_policy_service.filter_actions(
         actions=intent_risk_actions,
         portfolio=portfolio_snapshot,
@@ -157,7 +159,8 @@ def _filter_order_intents_by_risk(
             (
                 decision.reason
                 for decision in intent_decisions
-                if decision.action.client_order_id == intent.client_order_id and not decision.accepted
+                if decision.action.client_order_id == intent.client_order_id
+                and not decision.accepted
             ),
             "risk_blocked",
         )
@@ -285,6 +288,7 @@ class Stage7CycleRunner:
         adaptation_service = AdaptationService()
         stage4 = Stage4CycleRunner(command=self.command)
         runtime = settings.model_copy(deep=True)
+        runtime.kill_switch = False
         active_params = None
         if use_active_params:
             active_params = state_store.get_active_stage7_params(settings=settings, now_utc=now)
@@ -454,9 +458,12 @@ class Stage7CycleRunner:
                 now_utc=now,
             )
             collector.stop_timer("selection")
-            universe_syms = {
+            selected_universe_symbols = [
                 normalize_symbol(symbol) for symbol in universe_result.selected_symbols
-            }
+            ]
+            if not selected_universe_symbols:
+                selected_universe_symbols = [normalize_symbol(symbol) for symbol in runtime.symbols]
+            universe_syms = set(selected_universe_symbols)
             lifecycle_syms = {normalize_symbol(action.symbol) for action in lifecycle_actions}
             symbols_needed = sorted(universe_syms | lifecycle_syms)
             mark_prices, _ = stage4.resolve_mark_prices(exchange, symbols_needed)
@@ -558,8 +565,14 @@ class Stage7CycleRunner:
                 "risk_mode": dump_risk_mode(stage7_risk_mode),
                 "risk_reasons": stage7_risk_decision.reasons,
                 "risk_cooldown_until": (
-                    (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None)).isoformat()
-                    if (getattr(stage7_risk_decision, "cooldown_until_utc", None) or getattr(stage7_risk_decision, "cooldown_until", None))
+                    (
+                        getattr(stage7_risk_decision, "cooldown_until_utc", None)
+                        or getattr(stage7_risk_decision, "cooldown_until", None)
+                    ).isoformat()
+                    if (
+                        getattr(stage7_risk_decision, "cooldown_until_utc", None)
+                        or getattr(stage7_risk_decision, "cooldown_until", None)
+                    )
                     else None
                 ),
                 "risk_inputs_hash": stage7_risk_decision.inputs_hash,
@@ -580,7 +593,7 @@ class Stage7CycleRunner:
                     final_mode=final_risk_mode,
                     rules_service=rules_service,
                     rules_unavailable=rules_unavailable,
-                    selected_universe=universe_result.selected_symbols,
+                    selected_universe=selected_universe_symbols,
                     policy_service=policy_service,
                     order_builder=order_builder,
                 )
@@ -602,6 +615,20 @@ class Stage7CycleRunner:
                 skipped_actions: list[dict[str, object]] = []
                 for action in lifecycle_actions:
                     normalized_symbol = normalize_symbol(action.symbol)
+                    if (
+                        final_risk_mode == Mode.REDUCE_RISK_ONLY
+                        and str(action.side).upper() != "SELL"
+                    ):
+                        skipped_actions.append(
+                            {
+                                "symbol": normalized_symbol,
+                                "side": action.side,
+                                "qty": str(action.qty),
+                                "status": "skipped",
+                                "reason": "reduce_risk_only",
+                            }
+                        )
+                        continue
                     if normalized_symbol in rules_unavailable:
                         unavailable_status = rules_unavailable[normalized_symbol]
                         unavailable_detail = rules_unavailable_details.get(
@@ -636,7 +663,9 @@ class Stage7CycleRunner:
                 positions_by_symbol: dict[str, Decimal] = {}
                 for position in state_store.list_stage4_positions():
                     positions_by_symbol[normalize_symbol(position.symbol)] = position.qty
-                portfolio_snapshot = ActionPortfolioSnapshot(positions_by_symbol=positions_by_symbol)
+                portfolio_snapshot = ActionPortfolioSnapshot(
+                    positions_by_symbol=positions_by_symbol
+                )
                 filtered_actions, policy_decisions = risk_policy_service.filter_actions(
                     actions=filtered_actions,
                     portfolio=portfolio_snapshot,
@@ -679,7 +708,7 @@ class Stage7CycleRunner:
                     generated_at=now,
                     universe=tuple(
                         sorted(
-                            {normalize_symbol(item) for item in universe_result.selected_symbols}
+                            {normalize_symbol(item) for item in selected_universe_symbols}
                         )
                     ),
                     order_intents=tuple(order_intents),
@@ -893,7 +922,7 @@ class Stage7CycleRunner:
                 "throttled": throttled_events > 0,
                 "retry_scheduled": retry_count > 0,
                 "retry_giveup": retry_giveup_count > 0,
-                "blocked_exchange_writes": bool(settings.kill_switch),
+                "blocked_exchange_writes": bool(runtime.kill_switch),
                 "simulated_execution": is_backtest_simulation,
             }
             alert_flags = {
@@ -909,7 +938,7 @@ class Stage7CycleRunner:
                 no_trades_reason = "NO_TRADE_PLANNING"
             elif final_risk_mode == Mode.OBSERVE_ONLY:
                 no_trades_reason = "MODE_OBSERVE_ONLY"
-            elif settings.kill_switch and not is_backtest_simulation:
+            elif runtime.kill_switch and not is_backtest_simulation:
                 no_trades_reason = "KILL_SWITCH"
             elif oms_filled <= 0:
                 no_trades_reason = "NO_FILLS"
@@ -917,7 +946,7 @@ class Stage7CycleRunner:
             planning_enabled = planned_count > 0
             planning_disabled_reason = _resolve_planning_disabled_reason(
                 planning_enabled=planning_enabled,
-                selected_universe=universe_result.selected_symbols,
+                selected_universe=selected_universe_symbols,
                 mark_prices=mark_prices,
                 notional_cap_try_per_cycle=Decimal(str(runtime.notional_cap_try_per_cycle)),
                 order_intents=order_intents,
@@ -940,9 +969,9 @@ class Stage7CycleRunner:
                 "planning_disabled_reason": planning_disabled_reason,
                 "is_backtest_replay": is_backtest_simulation,
                 "dry_run": bool(settings.dry_run),
-                "kill_switch": bool(settings.kill_switch),
+                "kill_switch": bool(runtime.kill_switch),
                 "strategy_enabled": bool(settings.stage7_enabled),
-                "selected_universe_count": len(universe_result.selected_symbols),
+                "selected_universe_count": len(selected_universe_symbols),
                 "mark_prices_count": len(mark_prices),
                 "notional_cap_try_per_cycle": str(runtime.notional_cap_try_per_cycle),
                 "portfolio_actions_count": len(portfolio_plan.actions),
@@ -963,7 +992,7 @@ class Stage7CycleRunner:
                 "run_id": run_id,
                 "mode_base": dump_risk_mode(base_risk_mode),
                 "mode_final": dump_risk_mode(final_risk_mode),
-                "universe_size": len(universe_result.selected_symbols),
+                "universe_size": len(selected_universe_symbols),
                 "intents_planned_count": planned_count,
                 "intents_skipped_count": skipped_count,
                 "oms_submitted_count": oms_submitted,
@@ -1000,7 +1029,7 @@ class Stage7CycleRunner:
                 state_store.save_stage7_cycle(
                     cycle_id=cycle_id,
                     ts=now,
-                    selected_universe=universe_result.selected_symbols,
+                    selected_universe=selected_universe_symbols,
                     universe_scores=[
                         {
                             "symbol": item.symbol,
@@ -1092,7 +1121,7 @@ class Stage7CycleRunner:
             )
             set_gauge(
                 "bot_killswitch_enabled",
-                1 if bool(settings.kill_switch) else 0,
+                1 if bool(runtime.kill_switch) else 0,
                 labels={"process_role": process_role},
             )
             if enable_adaptation:

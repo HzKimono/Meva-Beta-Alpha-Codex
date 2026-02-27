@@ -39,6 +39,7 @@ class Stage7SingleCycleDriver:
         effective_settings = settings.model_copy(
             update={
                 "dry_run": True,
+                "kill_switch": False,
                 "state_db_path": str(out_db_path),
             }
         )

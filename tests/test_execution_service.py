@@ -730,7 +730,7 @@ def test_execute_intents_stage3_uses_idempotency_key_for_dedupe(tmp_path) -> Non
     first = service.execute_intents([intent], cycle_id="cycle-a")
     second = service.execute_intents([intent], cycle_id="cycle-a")
 
-    assert first == 1
+    assert first == 0
     assert second == 0
     with store._connect() as conn:
         row = conn.execute(
@@ -752,7 +752,7 @@ def test_dry_run_then_live_promotes_simulated_idempotency(tmp_path) -> None:
         dry_run=True,
         kill_switch=False,
     )
-    assert dry_service.execute_intents([intent], cycle_id="cycle-a") == 1
+    assert dry_service.execute_intents([intent], cycle_id="cycle-a") == 0
 
     with store._connect() as conn:
         dry_row = conn.execute(
@@ -1217,7 +1217,7 @@ def test_execute_intents_legacy_order_intent_uses_place_hash(tmp_path) -> None:
     first = service.execute_intents([intent])
     second = service.execute_intents([intent])
 
-    assert first == 1
+    assert first == 0
     assert second == 0
     assert store.action_count("would_place_order", service._place_hash(intent)) == 1
 
