@@ -137,6 +137,7 @@ def test_financial_breakdown_fails_closed_without_non_try_fee_conversion_rate(tm
     ledger = LedgerService(state_store=store, logger=__import__("logging").getLogger(__name__))
 
     import pytest
+
     from btcbot.ports_price_conversion import FeeConversionRateError
 
     with pytest.raises(FeeConversionRateError, match="USDT/TRY"):

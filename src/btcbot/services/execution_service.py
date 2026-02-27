@@ -12,7 +12,6 @@ import httpx
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.domain.decision_codes import ReasonCode
 from btcbot.domain.intent import Intent, to_order_intent
-from btcbot.domain.money_policy import OrderSizingStatus, size_order_from_notional
 from btcbot.domain.models import (
     ExchangeError,
     ExchangeOrderStatus,
@@ -24,6 +23,7 @@ from btcbot.domain.models import (
     ReconcileOutcome,
     ReconcileStatus,
     SubmitOrderResult,
+    SymbolRules,
     fallback_match_by_fields,
     make_client_order_id,
     map_exchange_ack_to_submit_result,
@@ -32,6 +32,7 @@ from btcbot.domain.models import (
     quantize_price,
     quantize_quantity,
 )
+from btcbot.domain.money_policy import OrderSizingStatus, size_order_from_notional
 from btcbot.domain.symbols import split_symbol
 from btcbot.obs.metrics import inc_counter
 from btcbot.obs.process_role import coerce_process_role, get_process_role_from_env
@@ -218,6 +219,16 @@ class ExecutionService:
             if isinstance(snapshot, dict):
                 return snapshot
         return {"degraded": False, "breaker_open": False, "recommended_sleep_seconds": 0.0}
+
+    def _symbol_rules_for_execution(self, symbol: str) -> SymbolRules:
+        if self.market_data_service is not None:
+            return self.market_data_service.get_symbol_rules(symbol)
+        return SymbolRules(
+            pair_symbol=symbol,
+            price_scale=8,
+            quantity_scale=8,
+            min_total=self.fallback_min_notional_try,
+        )
 
     def _submission_guarded_by_runtime_state(self) -> bool:
         if self.dry_run:
@@ -578,10 +589,18 @@ class ExecutionService:
         if not isinstance(exc, ExchangeError):
             return False
 
-        if str(exc.error_code) == "1123" and (exc.error_message or "").upper() == "FAILED_MIN_TOTAL_AMOUNT":
+        if (
+            str(exc.error_code) == "1123"
+            and (exc.error_message or "").upper() == "FAILED_MIN_TOTAL_AMOUNT"
+        ):
             return True
 
-        haystacks = [str(exc.error_code), exc.error_message or "", exc.response_body or "", str(exc)]
+        haystacks = [
+            str(exc.error_code),
+            exc.error_message or "",
+            exc.response_body or "",
+            str(exc),
+        ]
         joined = " ".join(haystacks).upper()
         return "1123" in joined and "FAILED_MIN_TOTAL_AMOUNT" in joined
 
@@ -1147,48 +1166,50 @@ class ExecutionService:
                 )
 
             symbol_normalized = normalize_symbol(intent.symbol)
-            if self.market_data_service is None:
-                raise LiveTradingNotArmedError(
-                    "MarketDataService is required for order validation"
+            if self.market_data_service is None and self.dry_run:
+                price = Decimal(str(intent.price))
+                quantity = Decimal(str(intent.quantity))
+                computed_notional_try = price * quantity
+            else:
+                rules = self._symbol_rules_for_execution(symbol_normalized)
+                sizing = size_order_from_notional(
+                    desired_notional_try=Decimal(str(intent.notional)),
+                    desired_price=Decimal(str(intent.price)),
+                    rules=rules,
+                    fallback_min_notional_try=self.fallback_min_notional_try,
+                    allow_min_notional_upgrade=self.allow_min_notional_upgrade,
                 )
 
-            rules = self.market_data_service.get_symbol_rules(symbol_normalized)
-            sizing = size_order_from_notional(
-                desired_notional_try=Decimal(str(intent.notional)),
-                desired_price=Decimal(str(intent.price)),
-                rules=rules,
-                fallback_min_notional_try=self.fallback_min_notional_try,
-                allow_min_notional_upgrade=self.allow_min_notional_upgrade,
-            )
+                if sizing.status != OrderSizingStatus.OK:
+                    if sizing.status == OrderSizingStatus.BELOW_MIN_NOTIONAL:
+                        if self.dry_run:
+                            would_reject_min_notional += 1
+                        else:
+                            rejected_min_notional += 1
+                    logger.info(
+                        "intent_rejected_pre_submit_validation",
+                        extra={
+                            "extra": {
+                                "cycle_id": intent.cycle_id,
+                                "intent_id": (raw_intent.intent_id if raw_intent else None),
+                                "symbol": symbol_normalized,
+                                "side": intent.side.value,
+                                "status": sizing.status.value,
+                                "reason": sizing.reason,
+                                "desired_notional_try": str(intent.notional),
+                                "min_notional_try": str(
+                                    rules.min_total or self.fallback_min_notional_try
+                                ),
+                                "computed_notional_try": str(sizing.notional_try),
+                            }
+                        },
+                    )
+                    rejected_intents += 1
+                    continue
 
-            if sizing.status != OrderSizingStatus.OK:
-                if sizing.status == OrderSizingStatus.BELOW_MIN_NOTIONAL:
-                    if self.dry_run:
-                        would_reject_min_notional += 1
-                    else:
-                        rejected_min_notional += 1
-                logger.info(
-                    "intent_rejected_pre_submit_validation",
-                    extra={
-                        "extra": {
-                            "cycle_id": intent.cycle_id,
-                            "intent_id": (raw_intent.intent_id if raw_intent else None),
-                            "symbol": symbol_normalized,
-                            "side": intent.side.value,
-                            "status": sizing.status.value,
-                            "reason": sizing.reason,
-                            "desired_notional_try": str(intent.notional),
-                            "min_notional_try": str(rules.min_total or self.fallback_min_notional_try),
-                            "computed_notional_try": str(sizing.notional_try),
-                        }
-                    },
-                )
-                rejected_intents += 1
-                continue
-
-            price = sizing.quantized_price
-            quantity = sizing.quantized_quantity
-            computed_notional_try = sizing.notional_try
+                price = sizing.quantized_price
+                quantity = sizing.quantized_quantity
+                computed_notional_try = sizing.notional_try
 
             logger.debug(
                 "intent_quantized_pre_submit",
@@ -1205,7 +1226,6 @@ class ExecutionService:
             )
 
             if not self.dry_run:
-
                 is_sufficient, asset, required, available = self._check_balance_precondition(
                     balances=cycle_balances,
                     symbol=symbol_normalized,

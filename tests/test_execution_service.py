@@ -730,7 +730,7 @@ def test_execute_intents_stage3_uses_idempotency_key_for_dedupe(tmp_path) -> Non
     first = service.execute_intents([intent], cycle_id="cycle-a")
     second = service.execute_intents([intent], cycle_id="cycle-a")
 
-    assert first == 1
+    assert first == 0
     assert second == 0
     with store._connect() as conn:
         row = conn.execute(
@@ -739,6 +739,13 @@ def test_execute_intents_stage3_uses_idempotency_key_for_dedupe(tmp_path) -> Non
         ).fetchone()
     assert row is not None and row["c"] == 1
     assert row["status"] == "SIMULATED"
+    with store._connect() as conn:
+        action_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM actions WHERE action_type='would_place_order' AND dedupe_key=?",
+            (f"would_place_order:{intent.idempotency_key}",),
+        ).fetchone()
+    assert action_row is not None
+    assert action_row["c"] == 1
 
 
 def test_dry_run_then_live_promotes_simulated_idempotency(tmp_path) -> None:
@@ -752,7 +759,7 @@ def test_dry_run_then_live_promotes_simulated_idempotency(tmp_path) -> None:
         dry_run=True,
         kill_switch=False,
     )
-    assert dry_service.execute_intents([intent], cycle_id="cycle-a") == 1
+    assert dry_service.execute_intents([intent], cycle_id="cycle-a") == 0
 
     with store._connect() as conn:
         dry_row = conn.execute(
@@ -1217,7 +1224,7 @@ def test_execute_intents_legacy_order_intent_uses_place_hash(tmp_path) -> None:
     first = service.execute_intents([intent])
     second = service.execute_intents([intent])
 
-    assert first == 1
+    assert first == 0
     assert second == 0
     assert store.action_count("would_place_order", service._place_hash(intent)) == 1
 
@@ -1768,3 +1775,21 @@ def test_dry_run_tracks_simulated_orders_not_submitted(tmp_path) -> None:
     assert summary["would_submit_orders"] == 1
     assert summary["would_submit_notional_try"] == "150.0"
 
+
+def test_dry_run_never_attempts_submit_or_exchange_submit_failed_log(tmp_path, caplog) -> None:
+    caplog.set_level("ERROR")
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        market_data_service=FakeMarketDataService(),
+        dry_run=True,
+        kill_switch=False,
+    )
+
+    placed = service.execute_intents([_intent(cycle_id="cycle-dry-no-submit")])
+
+    assert placed == 0
+    assert exchange.placed == []
+    assert all(record.message != "exchange_submit_failed" for record in caplog.records)

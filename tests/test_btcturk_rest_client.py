@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-from typing import Any
 
 import httpx
 import pytest
@@ -133,12 +132,12 @@ def test_429_metrics_are_counted_once_per_attempt_and_include_retry_backoff(
         observed_histograms.append((name, float(value), dict(labels)))
 
     monkeypatch.setattr("btcbot.adapters.btcturk.rest_client.inc_counter", _capture)
-    monkeypatch.setattr(
-        "btcbot.adapters.btcturk.rest_client.observe_histogram", _capture_hist
-    )
+    monkeypatch.setattr("btcbot.adapters.btcturk.rest_client.observe_histogram", _capture_hist)
 
     client = _make_client(
-        httpx.MockTransport(lambda request: httpx.Response(429, headers={"Retry-After": "1"}, text="rate limited"))
+        httpx.MockTransport(
+            lambda request: httpx.Response(429, headers={"Retry-After": "1"}, text="rate limited")
+        )
     )
     client.process_role = "MONITOR"
 
