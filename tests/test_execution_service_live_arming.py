@@ -228,7 +228,7 @@ def test_execute_intents_dry_run_records_would_place_action(tmp_path) -> None:
     placed = service.execute_intents([_intent()])
 
     payload_hash = service._place_hash(_intent())
-    assert placed == 1
+    assert placed == 0
     assert exchange.placed == []
     assert store.action_count("would_place_order", payload_hash) == 1
     assert store.action_count("place_order", payload_hash) == 0

@@ -79,7 +79,11 @@ class SafeStreamHandler(logging.StreamHandler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             super().emit(record)
-        except (OSError, ValueError):
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 6:
+                return
+            return
+        except ValueError:
             return
 
 

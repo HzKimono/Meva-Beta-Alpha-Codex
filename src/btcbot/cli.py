@@ -2474,7 +2474,7 @@ def run_cycle_stage7(
         return 2
     runner = Stage7CycleRunner()
     effective_settings = settings.model_copy(
-        update={"dry_run": True, "state_db_path": resolved_db_path}
+        update={"dry_run": True, "kill_switch": False, "state_db_path": resolved_db_path}
     )
     try:
         with single_instance_lock(db_path=resolved_db_path, account_key="stage7"):

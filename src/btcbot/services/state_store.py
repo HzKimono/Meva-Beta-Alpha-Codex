@@ -2286,10 +2286,26 @@ class StateStore:
         active_row = next(
             (row for row in rows if int(row["heartbeat_at_epoch"]) >= ttl_cutoff), None
         )
+        stale_history_exists = bool(
+            conn.execute(
+                """
+                SELECT 1
+                FROM process_instances
+                WHERE db_path = ? AND status = 'stale'
+                LIMIT 1
+                """,
+                (self.db_path_abs,),
+            ).fetchone()
+        )
         if active_row is not None:
             # Re-entrant startup in the same process should reuse the existing active
             # instance registration for this DB path instead of raising a self-conflict.
             if int(active_row["pid"]) == current_pid:
+                if self.strict_instance_lock and stale_history_exists:
+                    raise RuntimeError(
+                        "STATE_DB_LOCK_CONFLICT: active process instance takeover contention "
+                        f"for db_path={self.db_path_abs} conflict_pid={int(active_row['pid'])}"
+                    )
                 self.instance_id = str(active_row["instance_id"])
                 conn.execute(
                     "UPDATE process_instances SET heartbeat_at_epoch = ? WHERE instance_id = ?",
