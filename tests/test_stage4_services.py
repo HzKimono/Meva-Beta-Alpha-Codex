@@ -211,6 +211,15 @@ def test_stage4_submit_keeps_below_min_intent_rejected(store: StateStore) -> Non
     assert report.rejected == 1
     assert report.rejected_min_notional == 1
     assert report.simulated == 0
+    assert report.rejects_breakdown["min_total"] == 1
+    assert len(report.reject_details) == 1
+    detail = report.reject_details[0]
+    assert detail["reason"] == "min_total"
+    assert detail["min_required_settings"] == "10.0"
+    assert detail["min_required_exchange_rule"] == "100"
+    assert detail["q_price"] == "100.00"
+    assert detail["q_qty"] == "0.9999"
+    assert detail["total_try"] == "99.990000"
     rejected = store.get_stage4_order_by_client_id("cid-below-min-intent")
     assert rejected is not None
     assert rejected.status == "rejected"
@@ -2301,6 +2310,52 @@ def test_execution_gate_blocks_submit_when_symbol_on_1123_cooldown(store: StateS
     assert last_error_row is not None
     assert str(last_error_row["last_error"] or "") == REASON_TOKEN_GATE_1123
     assert int(last_error_row["last_error_code"]) == 1123
+
+
+def test_stage4_reject_reason_label_for_1123_gate(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    store.record_symbol_reject("BTC_TRY", 1123, 1000, threshold=1, cooldown_minutes=60)
+
+    class FrozenDateTime:
+        @staticmethod
+        def now(tz):
+            return datetime.fromtimestamp(1200, tz=tz)
+
+    svc_module = __import__("btcbot.services.execution_service_stage4", fromlist=["datetime"])
+    original_datetime = svc_module.datetime
+    svc_module.datetime = FrozenDateTime
+    try:
+        svc = ExecutionService(
+            exchange=exchange,
+            state_store=store,
+            settings=Settings(
+                DRY_RUN=False,
+                KILL_SWITCH=False,
+                LIVE_TRADING=True,
+                SAFE_MODE=False,
+                LIVE_TRADING_ACK="I_UNDERSTAND",
+                BTCTURK_API_KEY="key",
+                BTCTURK_API_SECRET="secret",
+            ),
+            rules_service=ExchangeRulesService(exchange),
+        )
+        action = LifecycleAction(
+            action_type=LifecycleActionType.SUBMIT,
+            symbol="BTC_TRY",
+            side="buy",
+            price=Decimal("120"),
+            qty=Decimal("1"),
+            reason="gate",
+            client_order_id="cid-gate-reason",
+        )
+        report = svc.execute_with_report([action])
+    finally:
+        svc_module.datetime = original_datetime
+
+    assert report.rejected == 1
+    assert report.rejects_breakdown["breaker_open"] == 1
+    assert report.reject_details[0]["reason"] == "breaker_open"
+    assert report.reject_details[0]["rejected_by_code"] == "1123"
 
 
 def test_exchange_reject_1123_records_symbol_cooldown(store: StateStore) -> None:

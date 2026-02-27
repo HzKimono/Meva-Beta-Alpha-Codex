@@ -1051,3 +1051,56 @@ def test_runner_unknown_freeze_suppresses_submits(monkeypatch, tmp_path) -> None
     counts = json.loads(str(row["counts_json"]))
     assert counts["freeze_active"] == 1
     assert counts["freeze_suppressed_submit"] >= 1
+
+
+def test_build_rejects_breakdown_prefers_execution_reasons() -> None:
+    runner = Stage4CycleRunner()
+    execution_report = type(
+        "ExecutionReport",
+        (),
+        {
+            "rejects_breakdown": {"min_total": 2},
+            "reject_details": (
+                {
+                    "reason": "min_total",
+                    "rejected_by_code": "unknown",
+                    "q_price": "100.00",
+                    "q_qty": "0.9999",
+                    "total_try": "99.990000",
+                },
+            ),
+            "rejected": 2,
+        },
+    )()
+
+    breakdown = runner._build_rejects_breakdown({"rejected_min_notional": 2}, execution_report)
+    assert breakdown == {"by_reason": {"min_total": 2}}
+
+
+def test_summary_reject_context_exposes_min_notional_fields() -> None:
+    runner = Stage4CycleRunner()
+    execution_report = type(
+        "ExecutionReport",
+        (),
+        {
+            "reject_details": (
+                {
+                    "reason": "min_total",
+                    "rejected_by_code": "unknown",
+                    "symbol": "BTC_TRY",
+                    "side": "buy",
+                    "q_price": "100.00",
+                    "q_qty": "0.9999",
+                    "total_try": "99.990000",
+                    "min_required_settings": "100",
+                    "min_required_exchange_rule": "100",
+                },
+            )
+        },
+    )()
+
+    context = runner._summary_reject_context(execution_report)
+    assert context["reason"] == "min_total"
+    assert context["q_price"] == "100.00"
+    assert context["min_required_settings"] == "100"
+    assert context["min_required_exchange_rule"] == "100"

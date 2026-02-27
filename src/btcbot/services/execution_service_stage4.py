@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# P0.2 diagnostics: standardize Stage4 reject reason labels and attach min-notional numeric context.
 import hashlib
 import logging
 from dataclasses import dataclass
@@ -8,7 +9,13 @@ from decimal import Decimal
 
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
-from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Quantizer
+from btcbot.domain.stage4 import (
+    LifecycleAction,
+    LifecycleActionType,
+    Quantizer,
+    Stage4RejectReason,
+    map_stage4_reject_reason,
+)
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.client_order_id_service import build_exchange_client_id
@@ -27,6 +34,8 @@ REASON_TOKEN_STATEFAIL_1123 = "exchange_reject_1123_state_read_failed"
 
 @dataclass(frozen=True)
 class ExecutionReport:
+    """P0.2 diagnostics: keep stable reject reason labels + numeric context for root-cause summaries."""
+
     executed_total: int
     submitted: int
     canceled: int
@@ -34,6 +43,8 @@ class ExecutionReport:
     rejected: int
     rejected_min_notional: int
     rejected_by_code: dict[str, int]
+    rejects_breakdown: dict[str, int]
+    reject_details: tuple[dict[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -146,6 +157,8 @@ class ExecutionService:
         freeze_all = bool(getattr(self.settings, "kill_switch_freeze_all", False))
         submitted = canceled = simulated = rejected = rejected_min_notional = 0
         self._rejects_by_code: dict[str, int] = {}
+        self._rejects_breakdown: dict[str, int] = {}
+        self._reject_details: list[dict[str, str]] = []
 
         freeze_state = self.state_store.stage4_get_freeze(process_role)
         freeze_active = bool(freeze_state.active)
@@ -309,11 +322,47 @@ class ExecutionService:
             rejected=rejected,
             rejected_min_notional=rejected_min_notional,
             rejected_by_code=dict(sorted(self._rejects_by_code.items())),
+            rejects_breakdown=dict(sorted(self._rejects_breakdown.items())),
+            reject_details=tuple(self._reject_details),
         )
 
     def _inc_reject_code(self, code: int | str) -> None:
         key = str(code)
         self._rejects_by_code[key] = self._rejects_by_code.get(key, 0) + 1
+
+
+    def _record_reject_detail(
+        self,
+        *,
+        action: LifecycleAction,
+        reason: str,
+        rejected_by_code: int | str | None = None,
+        min_required_settings: Decimal | None = None,
+        min_required_exchange_rule: Decimal | None = None,
+        q_price: Decimal | None = None,
+        q_qty: Decimal | None = None,
+        total_try: Decimal | None = None,
+    ) -> None:
+        mapped_reason = map_stage4_reject_reason(reject_code=rejected_by_code, reject_token=reason)
+        self._rejects_breakdown[mapped_reason] = self._rejects_breakdown.get(mapped_reason, 0) + 1
+        detail: dict[str, str] = {
+            "reason": mapped_reason,
+            "rejected_by_code": str(rejected_by_code if rejected_by_code is not None else "unknown"),
+            "symbol": action.symbol,
+            "side": action.side,
+            "order_type": action.reason,
+        }
+        if min_required_settings is not None:
+            detail["min_required_settings"] = str(min_required_settings)
+        if min_required_exchange_rule is not None:
+            detail["min_required_exchange_rule"] = str(min_required_exchange_rule)
+        if q_price is not None:
+            detail["q_price"] = str(q_price)
+        if q_qty is not None:
+            detail["q_qty"] = str(q_qty)
+        if total_try is not None:
+            detail["total_try"] = str(total_try)
+        self._reject_details.append(detail)
 
     @staticmethod
     def _extract_replace_groups(
@@ -615,6 +664,14 @@ class ExecutionService:
                     error_code=REJECT_1123_CODE,
                 )
                 self._inc_reject_code(REJECT_1123_CODE)
+                self._record_reject_detail(
+                    action=action,
+                    reason=REASON_TOKEN_STATEFAIL_1123,
+                    rejected_by_code=REJECT_1123_CODE,
+                    q_price=action.price,
+                    q_qty=action.qty,
+                    total_try=action.price * action.qty,
+                )
                 return 0, 0, 1, 0
             if cooldown_state is not None and cooldown_state.cooldown_until_ts > now_ts:
                 self.state_store.record_stage4_order_rejected(
@@ -628,6 +685,14 @@ class ExecutionService:
                     error_code=REJECT_1123_CODE,
                 )
                 self._inc_reject_code(REJECT_1123_CODE)
+                self._record_reject_detail(
+                    action=action,
+                    reason=REASON_TOKEN_GATE_1123,
+                    rejected_by_code=REJECT_1123_CODE,
+                    q_price=action.price,
+                    q_qty=action.qty,
+                    total_try=action.price * action.qty,
+                )
                 return 0, 0, 1, 0
 
         exchange_client_id = build_exchange_client_id(
@@ -656,6 +721,13 @@ class ExecutionService:
                     qty=action.qty,
                     mode=("live" if live_mode else "dry_run"),
                 )
+                self._record_reject_detail(
+                    action=action,
+                    reason="missing_exchange_rules",
+                    q_price=action.price,
+                    q_qty=action.qty,
+                    total_try=action.price * action.qty,
+                )
                 return 0, 0, 1, 0
             rules = decision.rules
         else:
@@ -670,6 +742,13 @@ class ExecutionService:
                     price=action.price,
                     qty=action.qty,
                     mode=("live" if live_mode else "dry_run"),
+                )
+                self._record_reject_detail(
+                    action=action,
+                    reason="missing_exchange_rules",
+                    q_price=action.price,
+                    q_qty=action.qty,
+                    total_try=action.price * action.qty,
                 )
                 return 0, 0, 1, 0
 
@@ -716,6 +795,25 @@ class ExecutionService:
                 qty=q_qty,
                 mode=("live" if live_mode else "dry_run"),
             )
+            self._record_reject_detail(
+                action=action,
+                reason=Stage4RejectReason.MIN_TOTAL.value,
+                min_required_settings=Decimal(str(self.settings.min_order_notional_try)),
+                min_required_exchange_rule=rules.min_notional_try,
+                q_price=q_price,
+                q_qty=q_qty,
+                total_try=q_notional,
+            )
+            emit_decision(
+                logger,
+                {
+                    "event_name": "stage4_submit_rejected",
+                    "decision_layer": "execution_stage4",
+                    "reason_code": Stage4RejectReason.MIN_TOTAL.value,
+                    "action": "REJECT",
+                    "payload": self._reject_details[-1],
+                },
+            )
             return 0, 0, 1, 1
         max_order_notional_cap = self.settings.risk_max_order_notional_try
         if max_order_notional_cap is not None and max_order_notional_cap > 0:
@@ -749,6 +847,13 @@ class ExecutionService:
                         "cap_name": "max_order_notional_try",
                         "process_role": self.settings.process_role,
                     },
+                )
+                self._record_reject_detail(
+                    action=action,
+                    reason="max_order_notional_try",
+                    q_price=q_price,
+                    q_qty=q_qty,
+                    total_try=q_notional,
                 )
                 return 0, 0, 1, 0
 
@@ -793,6 +898,14 @@ class ExecutionService:
                     error_code=REJECT_1123_CODE,
                 )
                 self._inc_reject_code(REJECT_1123_CODE)
+                self._record_reject_detail(
+                    action=action,
+                    reason=REASON_TOKEN_EXCHANGE_1123,
+                    rejected_by_code=REJECT_1123_CODE,
+                    q_price=q_price,
+                    q_qty=q_qty,
+                    total_try=q_price * q_qty,
+                )
                 logger.info(
                     "stage4_exchange_reject_1123_recorded",
                     extra={
