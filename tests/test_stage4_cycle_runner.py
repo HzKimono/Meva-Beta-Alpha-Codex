@@ -579,7 +579,7 @@ def test_bootstrap_intents_respect_min_notional_threshold() -> None:
     assert drop_reasons == {}
 
 
-def test_bootstrap_intents_skip_when_budget_below_min_notional() -> None:
+def test_bootstrap_intents_clamp_budget_to_min_notional_when_cash_sufficient() -> None:
     runner = Stage4CycleRunner()
     pair = PairInfo(
         pairSymbol="BTCTRY",
@@ -601,12 +601,99 @@ def test_bootstrap_intents_skip_when_budget_below_min_notional() -> None:
         pair_info=[pair],
         min_order_notional_try=Decimal("200"),
         bootstrap_notional_try=Decimal("50"),
-        max_notional_per_order_try=Decimal("50"),
+        max_notional_per_order_try=Decimal("0"),
+    )
+
+    assert len(intents) == 1
+    assert intents[0].price * intents[0].qty >= Decimal("200")
+    assert drop_reasons == {}
+
+
+def test_bootstrap_intents_skip_when_cash_below_min_notional() -> None:
+    runner = Stage4CycleRunner()
+    pair = PairInfo(
+        pairSymbol="BTCTRY",
+        numeratorScale=6,
+        denominatorScale=2,
+        minTotalAmount=Decimal("10"),
+        tickSize=Decimal("0.1"),
+        stepSize=Decimal("0.0001"),
+    )
+
+    intents, drop_reasons = runner._build_intents(
+        cycle_id="cycle-1",
+        symbols=["BTCTRY"],
+        mark_prices={"BTCTRY": Decimal("100")},
+        try_cash=Decimal("150"),
+        open_orders=[],
+        live_mode=False,
+        bootstrap_enabled=True,
+        pair_info=[pair],
+        min_order_notional_try=Decimal("200"),
+        bootstrap_notional_try=Decimal("50"),
+        max_notional_per_order_try=Decimal("0"),
     )
 
     assert intents == []
-    assert drop_reasons.get("bootstrap_budget_below_min_notional") == 1
+    assert drop_reasons.get("cash_below_min_notional") == 1
 
+
+def test_bootstrap_intents_skip_when_max_notional_below_min_notional() -> None:
+    runner = Stage4CycleRunner()
+    pair = PairInfo(
+        pairSymbol="BTCTRY",
+        numeratorScale=6,
+        denominatorScale=2,
+        minTotalAmount=Decimal("10"),
+        tickSize=Decimal("0.1"),
+        stepSize=Decimal("0.0001"),
+    )
+
+    intents, drop_reasons = runner._build_intents(
+        cycle_id="cycle-1",
+        symbols=["BTCTRY"],
+        mark_prices={"BTCTRY": Decimal("100")},
+        try_cash=Decimal("500"),
+        open_orders=[],
+        live_mode=False,
+        bootstrap_enabled=True,
+        pair_info=[pair],
+        min_order_notional_try=Decimal("200"),
+        bootstrap_notional_try=Decimal("50"),
+        max_notional_per_order_try=Decimal("150"),
+    )
+
+    assert intents == []
+    assert drop_reasons.get("max_notional_below_min_notional") == 1
+
+
+def test_bootstrap_intents_skip_when_bootstrap_notional_is_disabled() -> None:
+    runner = Stage4CycleRunner()
+    pair = PairInfo(
+        pairSymbol="BTCTRY",
+        numeratorScale=6,
+        denominatorScale=2,
+        minTotalAmount=Decimal("10"),
+        tickSize=Decimal("0.1"),
+        stepSize=Decimal("0.0001"),
+    )
+
+    intents, drop_reasons = runner._build_intents(
+        cycle_id="cycle-1",
+        symbols=["BTCTRY"],
+        mark_prices={"BTCTRY": Decimal("100")},
+        try_cash=Decimal("500"),
+        open_orders=[],
+        live_mode=False,
+        bootstrap_enabled=True,
+        pair_info=[pair],
+        min_order_notional_try=Decimal("200"),
+        bootstrap_notional_try=Decimal("0"),
+        max_notional_per_order_try=Decimal("0"),
+    )
+
+    assert intents == []
+    assert drop_reasons.get("bootstrap_disabled") == 1
 
 def test_bootstrap_intents_skip_when_open_buy_order_exists() -> None:
     runner = Stage4CycleRunner()

@@ -586,6 +586,14 @@ class Settings(BaseSettings):
             raise ValueError("MIN_ORDER_NOTIONAL_TRY must be > 0")
         return value
 
+    @model_validator(mode="after")
+    def clamp_stage5_bootstrap_notional_try(self) -> Settings:
+        bootstrap_notional = self.stage5_bootstrap_notional_try
+        if bootstrap_notional > 0:
+            min_notional = Decimal(str(self.min_order_notional_try))
+            self.stage5_bootstrap_notional_try = max(bootstrap_notional, min_notional)
+        return self
+
     @field_validator("dry_run_try_balance")
     def validate_dry_run_try_balance(cls, value: float) -> float:
         if value < 0:
