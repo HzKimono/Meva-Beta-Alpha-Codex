@@ -35,6 +35,8 @@ def classify_exchange_error(exc: Exception) -> ExecutionErrorCategory:
     else:
         status = None
 
+    if _is_breaker_open_error(exc):
+        return ExecutionErrorCategory.RATE_LIMIT
     if status == 429:
         return ExecutionErrorCategory.RATE_LIMIT
     if status in {401, 403}:
@@ -48,3 +50,14 @@ def classify_exchange_error(exc: Exception) -> ExecutionErrorCategory:
     if isinstance(exc, TimeoutError):
         return ExecutionErrorCategory.UNCERTAIN
     return ExecutionErrorCategory.FATAL
+
+
+def _is_breaker_open_error(exc: Exception) -> bool:
+    if type(exc).__name__ == "BreakerOpenError":
+        return True
+    if not isinstance(exc, ExchangeError):
+        return False
+    for candidate in (exc.error_code, exc.error_message):
+        if isinstance(candidate, str) and candidate.strip().lower() == "breaker_open":
+            return True
+    return False

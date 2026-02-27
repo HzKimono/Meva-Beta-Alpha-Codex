@@ -274,15 +274,18 @@ class BtcturkHttpClient(ExchangeClient):
             self._breaker_state[group] = state
         return state
 
-    def _check_breaker(self, group: str) -> None:
+    def _check_breaker(self, group: str, *, request_method: str, request_path: str) -> None:
         state = self._breaker_for(group)
         now = monotonic()
         if state.open_until > now:
             get_instrumentation().counter("breaker_open_total", 1, attrs={"group": group})
             raise ExchangeError(
-                f"Circuit breaker open for group={group}",
+                f"rate limit breaker open for group={group}",
                 status_code=429,
                 error_code="breaker_open",
+                error_message="breaker_open",
+                request_method=request_method,
+                request_path=request_path,
             )
 
     def _record_success(self, group: str) -> None:
@@ -307,7 +310,7 @@ class BtcturkHttpClient(ExchangeClient):
         request_id = uuid4().hex
 
         def _call() -> dict:
-            self._check_breaker(group)
+            self._check_breaker(group, request_method="GET", request_path=path)
             waited = self._rate_limiter.acquire(group)
             get_instrumentation().histogram(
                 "rate_limiter_wait_seconds", waited, attrs={"group": group}
@@ -416,7 +419,7 @@ class BtcturkHttpClient(ExchangeClient):
         is_private_write = normalized_method in {"POST", "PUT", "PATCH", "DELETE"}
 
         def _call() -> dict:
-            self._check_breaker(group)
+            self._check_breaker(group, request_method=normalized_method, request_path=path)
             waited = self._rate_limiter.acquire(group)
             get_instrumentation().histogram(
                 "rate_limiter_wait_seconds", waited, attrs={"group": group}
