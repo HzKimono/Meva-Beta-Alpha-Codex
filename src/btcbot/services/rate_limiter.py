@@ -164,11 +164,41 @@ class AsyncTokenBucketRateLimiter:
 
 
 def map_endpoint_group(path: str) -> str:
-    normalized = path.lower()
-    if "/orderbook" in normalized or "/ticker" in normalized or "/ohlc" in normalized:
+    """Map a BTCTurk REST path to a rate-limit group.
+
+    Examples:
+    - ``/api/v2/orderbook`` -> ``market_data``
+    - ``/api/v1/order`` -> ``orders``
+    - ``/api/v1/users/balances`` -> ``account``
+    - unknown paths -> ``default``
+    """
+
+    normalized = path.lower().split("?", 1)[0]
+
+    market_data_markers = (
+        "/orderbook",
+        "/ticker",
+        "/ohlc",
+        "/api/v2/trades",
+        "/symbols",
+        "/server/exchangeinfo",
+    )
+    if any(marker in normalized for marker in market_data_markers):
         return "market_data"
-    if "/order" in normalized and "/users/transactions" not in normalized:
-        return "orders"
-    if "/users/" in normalized or "/openorders" in normalized:
+
+    account_markers = (
+        "/users/",
+        "/openorders",
+        "/allorders",
+        "/balances",
+        "/transactions",
+        "/portfolio",
+        "/positions",
+    )
+    if any(marker in normalized for marker in account_markers):
         return "account"
-    return "market_data"
+
+    if normalized == "/api/v1/order" or normalized.startswith("/api/v1/order/"):
+        return "orders"
+
+    return "default"

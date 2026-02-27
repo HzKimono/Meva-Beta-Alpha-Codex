@@ -586,6 +586,14 @@ class Settings(BaseSettings):
             raise ValueError("MIN_ORDER_NOTIONAL_TRY must be > 0")
         return value
 
+    @model_validator(mode="after")
+    def clamp_stage5_bootstrap_notional_try(self) -> Settings:
+        bootstrap_notional = self.stage5_bootstrap_notional_try
+        if bootstrap_notional > 0:
+            min_notional = Decimal(str(self.min_order_notional_try))
+            self.stage5_bootstrap_notional_try = max(bootstrap_notional, min_notional)
+        return self
+
     @field_validator("dry_run_try_balance")
     def validate_dry_run_try_balance(cls, value: float) -> float:
         if value < 0:
@@ -846,6 +854,28 @@ class Settings(BaseSettings):
     def validate_stage7_risk_non_negative_int(cls, value: int) -> int:
         if value < 0:
             raise ValueError("Stage7 risk integer settings must be >= 0")
+        return value
+
+    @field_validator(
+        "btcturk_rate_limit_rps",
+        "rate_limit_marketdata_tps",
+        "rate_limit_account_tps",
+        "rate_limit_orders_tps",
+    )
+    def validate_rate_limit_rps(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("Rate limit TPS values must be > 0")
+        return value
+
+    @field_validator(
+        "btcturk_rate_limit_burst",
+        "rate_limit_marketdata_burst",
+        "rate_limit_account_burst",
+        "rate_limit_orders_burst",
+    )
+    def validate_rate_limit_burst(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Rate limit burst values must be >= 1")
         return value
 
     @field_validator("stage7_rate_limit_rps", mode="before")

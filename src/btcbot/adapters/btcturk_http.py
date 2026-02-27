@@ -67,6 +67,27 @@ _BREAKER_CONSECUTIVE_429_THRESHOLD = 3
 _BREAKER_COOLDOWN_SECONDS = 3.0
 
 
+def build_endpoint_budgets(
+    *,
+    default_rps: float = 8.0,
+    default_burst: int = 8,
+    market_data_rps: float = 8.0,
+    market_data_burst: int = 8,
+    account_rps: float = 4.0,
+    account_burst: int = 4,
+    orders_rps: float = 2.0,
+    orders_burst: int = 2,
+) -> dict[str, EndpointBudget]:
+    return {
+        "default": EndpointBudget(name="default", rps=default_rps, burst=default_burst),
+        "market_data": EndpointBudget(
+            name="market_data", rps=market_data_rps, burst=market_data_burst
+        ),
+        "account": EndpointBudget(name="account", rps=account_rps, burst=account_burst),
+        "orders": EndpointBudget(name="orders", rps=orders_rps, burst=orders_burst),
+    }
+
+
 def preflight_validate_and_quantize(
     *,
     symbol: str,
@@ -198,6 +219,7 @@ class BtcturkHttpClient(ExchangeClient):
         base_url: str | None = None,
         transport: httpx.BaseTransport | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
+        endpoint_budgets: dict[str, EndpointBudget] | None = None,
         breaker_429_consecutive_threshold: int = _BREAKER_CONSECUTIVE_429_THRESHOLD,
         breaker_cooldown_seconds: float = _BREAKER_COOLDOWN_SECONDS,
         orderbook_cache_ttl_s: float = 0.2,
@@ -218,12 +240,7 @@ class BtcturkHttpClient(ExchangeClient):
         )
         self._nonce = MonotonicNonceGenerator()
         self._rate_limiter = rate_limiter or TokenBucketRateLimiter(
-            {
-                "default": EndpointBudget(name="default", rps=8.0, burst=8),
-                "market_data": EndpointBudget(name="market_data", rps=8.0, burst=8),
-                "account": EndpointBudget(name="account", rps=4.0, burst=4),
-                "orders": EndpointBudget(name="orders", rps=2.0, burst=2),
-            }
+            endpoint_budgets or build_endpoint_budgets()
         )
         self._breaker_429_consecutive_threshold = max(1, breaker_429_consecutive_threshold)
         self._breaker_cooldown_seconds = max(0.0, breaker_cooldown_seconds)

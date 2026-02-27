@@ -8,12 +8,13 @@ from btcbot.adapters.btcturk_http import (
     BtcturkHttpClientStage4,
     DryRunExchangeClient,
     DryRunExchangeClientStage4,
+    build_endpoint_budgets,
 )
 from btcbot.adapters.exchange import ExchangeClient
 from btcbot.adapters.exchange_stage4 import ExchangeClientStage4
 from btcbot.config import Settings
 from btcbot.domain.models import Balance
-from btcbot.services.rate_limiter import EndpointBudget, TokenBucketRateLimiter
+from btcbot.services.rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -118,26 +119,14 @@ def _close_best_effort(resource: object, label: str) -> None:
 
 def _build_rate_limiter(settings: Settings) -> TokenBucketRateLimiter:
     return TokenBucketRateLimiter(
-        {
-            "default": EndpointBudget(
-                name="default",
-                rps=settings.rate_limit_marketdata_tps,
-                burst=settings.rate_limit_marketdata_burst,
-            ),
-            "market_data": EndpointBudget(
-                name="market_data",
-                rps=settings.rate_limit_marketdata_tps,
-                burst=settings.rate_limit_marketdata_burst,
-            ),
-            "account": EndpointBudget(
-                name="account",
-                rps=settings.rate_limit_account_tps,
-                burst=settings.rate_limit_account_burst,
-            ),
-            "orders": EndpointBudget(
-                name="orders",
-                rps=settings.rate_limit_orders_tps,
-                burst=settings.rate_limit_orders_burst,
-            ),
-        }
+        build_endpoint_budgets(
+            default_rps=settings.btcturk_rate_limit_rps,
+            default_burst=settings.btcturk_rate_limit_burst,
+            market_data_rps=settings.rate_limit_marketdata_tps,
+            market_data_burst=settings.rate_limit_marketdata_burst,
+            account_rps=settings.rate_limit_account_tps,
+            account_burst=settings.rate_limit_account_burst,
+            orders_rps=settings.rate_limit_orders_tps,
+            orders_burst=settings.rate_limit_orders_burst,
+        )
     )
