@@ -8,6 +8,7 @@ from btcbot.observability_decisions import emit_decision
 
 
 class PolicyBlockReason(StrEnum):
+    MONITOR_ROLE = "MONITOR_ROLE"
     KILL_SWITCH = "KILL_SWITCH"
     DRY_RUN = "DRY_RUN"
     NOT_ARMED = "NOT_ARMED"
@@ -22,6 +23,7 @@ class LiveSideEffectsPolicyResult:
 
 
 POLICY_REASON_TO_CODE: dict[PolicyBlockReason, ReasonCode] = {
+    PolicyBlockReason.MONITOR_ROLE: ReasonCode.POLICY_BLOCK_MONITOR_ROLE,
     PolicyBlockReason.KILL_SWITCH: ReasonCode.POLICY_BLOCK_KILL_SWITCH,
     PolicyBlockReason.DRY_RUN: ReasonCode.POLICY_BLOCK_DRY_RUN,
     PolicyBlockReason.NOT_ARMED: ReasonCode.POLICY_BLOCK_NOT_ARMED,
@@ -36,6 +38,8 @@ def policy_reason_to_code(reason: PolicyBlockReason | str) -> ReasonCode:
 
 def validate_live_side_effects_policy(
     *,
+    process_role: str | None = None,
+    enforce_monitor_role: bool = False,
     dry_run: bool,
     kill_switch: bool,
     live_trading_enabled: bool,
@@ -51,6 +55,11 @@ def validate_live_side_effects_policy(
 ) -> LiveSideEffectsPolicyResult:
     reasons: list[str] = []
     message_fragments: list[str] = []
+    role_normalized = (process_role or "").strip().upper()
+
+    if enforce_monitor_role and role_normalized == "MONITOR":
+        reasons.append(PolicyBlockReason.MONITOR_ROLE.value)
+        message_fragments.append(policy_block_message(PolicyBlockReason.MONITOR_ROLE))
 
     if kill_switch:
         reasons.append(PolicyBlockReason.KILL_SWITCH.value)
@@ -100,6 +109,7 @@ def validate_live_side_effects_policy(
 
 def policy_block_message(reason: PolicyBlockReason) -> str:
     messages = {
+        PolicyBlockReason.MONITOR_ROLE: "MONITOR role blocks side effects",
         PolicyBlockReason.KILL_SWITCH: "KILL_SWITCH=true blocks side effects",
         PolicyBlockReason.DRY_RUN: "DRY_RUN=true blocks side effects",
         PolicyBlockReason.NOT_ARMED: (

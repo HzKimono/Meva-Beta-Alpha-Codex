@@ -267,3 +267,11 @@ def test_doctor_slo_threshold_order_validation() -> None:
 
     with pytest.raises(ValueError):
         Settings(DOCTOR_SLO_MIN_FILL_RATE_WARN=0.7, DOCTOR_SLO_MIN_FILL_RATE_FAIL=0.8)
+
+
+def test_dynamic_universe_live_fallback_setting_defaults_and_env_override() -> None:
+    assert Settings().dynamic_universe_live_fallback_enabled is True
+    assert (
+        Settings(DYNAMIC_UNIVERSE_LIVE_FALLBACK_ENABLED=False).dynamic_universe_live_fallback_enabled
+        is False
+    )

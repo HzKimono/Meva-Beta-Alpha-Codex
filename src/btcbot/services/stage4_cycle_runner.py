@@ -174,6 +174,8 @@ class Stage4CycleRunner:
         pair_info = self._resolve_pair_info(exchange) or []
         active_symbols = [self.norm(symbol) for symbol in settings.symbols]
         aggressive_scores: dict[str, Decimal] | None = None
+        dynamic_universe_fallback_triggered = False
+        dynamic_universe_fallback_reason = "not_needed"
         pre_cycle_degrade_state = state_store.get_degrade_state_current()
         pre_cycle_reasons = self._safe_json_dict(pre_cycle_degrade_state.get("last_reasons_json"), default={})
         pre_cycle_level = int(pre_cycle_reasons.get("level", 0) or 0)
@@ -202,6 +204,39 @@ class Stage4CycleRunner:
                 }
             elif settings.dry_run:
                 active_symbols = [self.norm(symbol) for symbol in settings.symbols]
+                dynamic_universe_fallback_triggered = True
+                dynamic_universe_fallback_reason = "dry_run_empty_selection"
+            elif live_mode and settings.dynamic_universe_live_fallback_enabled:
+                # Keep LIVE cycles productive when dynamic selection returns empty; disable with
+                # DYNAMIC_UNIVERSE_LIVE_FALLBACK_ENABLED=false if strict empty-universe behavior is desired.
+                active_symbols = [self.norm(symbol) for symbol in settings.symbols]
+                dynamic_universe_fallback_triggered = True
+                dynamic_universe_fallback_reason = "live_empty_selection"
+            elif live_mode:
+                dynamic_universe_fallback_reason = "live_empty_selection_fallback_disabled"
+                logger.warning(
+                    "stage4_dynamic_universe_empty_live_no_fallback",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "dynamic_universe_live_fallback_enabled": False,
+                            "configured_symbols": [self.norm(symbol) for symbol in settings.symbols],
+                        }
+                    },
+                )
+
+            logger.info(
+                "stage4_dynamic_universe_resolution",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "selection_count": len(selection.selected_symbols),
+                        "fallback_triggered": dynamic_universe_fallback_triggered,
+                        "fallback_reason": dynamic_universe_fallback_reason,
+                        "active_symbols": sorted(self.norm(symbol) for symbol in active_symbols),
+                    }
+                },
+            )
 
         process_role = coerce_process_role(getattr(settings, "process_role", None)).value
         effective_kill_switch, db_kill_switch, kill_switch_source = self._resolve_effective_kill_switch(

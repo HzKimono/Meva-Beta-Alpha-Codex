@@ -2662,3 +2662,58 @@ def test_execution_service_max_order_notional_guard_disabled_when_non_positive(
     assert report.rejected == 0
     assert len(exchange.submits) == 1
     assert not any(name == "stage4_cap_reject_total" for name, _, _ in capture.counters)
+
+
+def test_stage4_monitor_role_blocks_live_write_side_effects(
+    store: StateStore, monkeypatch, caplog
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setenv("PROCESS_ROLE", "MONITOR")
+
+    class RulesService:
+        def get_rules(self, symbol: str):
+            del symbol
+            return ExchangeRules(
+                tick_size=Decimal("0.1"),
+                step_size=Decimal("0.0001"),
+                min_notional_try=Decimal("10"),
+                price_precision=2,
+                qty_precision=4,
+            )
+
+    exchange = FakeExchangeStage4()
+    svc = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=False,
+            KILL_SWITCH=False,
+            LIVE_TRADING=True,
+            LIVE_TRADING_ACK="I_UNDERSTAND",
+            SAFE_MODE=False,
+            BTCTURK_API_KEY="key",
+            BTCTURK_API_SECRET="secret",
+            PROCESS_ROLE="MONITOR",
+        ),
+        rules_service=RulesService(),
+    )
+
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("0.2"),
+        reason="monitor_write_block",
+        client_order_id="cid-monitor-block",
+    )
+
+    with pytest.raises(RuntimeError, match="MONITOR role blocks side effects"):
+        svc.execute_with_report([action])
+    assert exchange.submits == []
+    assert svc._process_role_for_runtime() == "MONITOR"
+    assert any(
+        record.message == "decision_event"
+        and record.__dict__.get("extra", {}).get("reason_code") == "policy_block:monitor_role"
+        for record in caplog.records
+    )

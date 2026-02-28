@@ -16,12 +16,14 @@ from btcbot.domain.stage4 import (
     Stage4RejectReason,
     map_stage4_reject_reason,
 )
+from btcbot.obs.process_role import coerce_process_role
 from btcbot.observability import get_instrumentation
 from btcbot.observability_decisions import emit_decision
 from btcbot.services.client_order_id_service import build_exchange_client_id
 from btcbot.services.exchange_rules_service import ExchangeRulesService
 from btcbot.services.execution_wrapper import ExecutionWrapper, UncertainResult
 from btcbot.services.state_store import StateStore
+from btcbot.services.trading_policy import validate_live_side_effects_policy
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +150,7 @@ class ExecutionService:
             raise RuntimeError("LIVE_TRADING requires LIVE_TRADING_ACK=I_UNDERSTAND")
 
         live_mode = self.settings.is_live_trading_enabled() and not self.settings.dry_run
-        process_role = str(getattr(self.settings, "process_role", "trader"))
+        process_role = self._process_role_for_runtime()
         kill_switch_effective = getattr(self.settings, "kill_switch_effective", None)
         kill_switch_active = bool(
             self.settings.kill_switch if kill_switch_effective is None else kill_switch_effective
@@ -326,6 +328,28 @@ class ExecutionService:
             reject_details=tuple(self._reject_details),
         )
 
+    def _ensure_live_write_side_effects_allowed(self, *, cycle_id: str) -> None:
+        process_role = self._process_role_for_runtime()
+        policy = validate_live_side_effects_policy(
+            process_role=process_role,
+            enforce_monitor_role=True,
+            dry_run=self.settings.dry_run,
+            kill_switch=bool(self.settings.kill_switch),
+            live_trading_enabled=bool(self.settings.live_trading),
+            live_trading_ack=bool(self.settings.live_trading_ack == "I_UNDERSTAND"),
+            cycle_id=cycle_id,
+            logger=logger,
+            decision_layer="policy_gate",
+            action="REJECT",
+            scope="global",
+        )
+        if not policy.allowed:
+            raise RuntimeError(policy.message)
+
+    def _process_role_for_runtime(self) -> str:
+        # Fail-safe role resolution for write enforcement: unknown/missing resolves to MONITOR.
+        return coerce_process_role(getattr(self.settings, "process_role", None)).value
+
     def _inc_reject_code(self, code: int | str) -> None:
         key = str(code)
         self._rejects_by_code[key] = self._rejects_by_code.get(key, 0) + 1
@@ -475,9 +499,7 @@ class ExecutionService:
         if current_state in {"SUBMIT_CONFIRMED", "FAILED"}:
             return 0, 0, 0, 0, 0
 
-        freeze_state = self.state_store.stage4_get_freeze(
-            str(getattr(self.settings, "process_role", "trader"))
-        )
+        freeze_state = self.state_store.stage4_get_freeze(self._process_role_for_runtime())
         if freeze_state.active:
             self.state_store.update_replace_tx_state(
                 replace_tx_id=replace_tx_id,
@@ -630,9 +652,7 @@ class ExecutionService:
     def _execute_submit_action(
         self, *, action: LifecycleAction, live_mode: bool
     ) -> tuple[int, int, int, int]:
-        freeze_state = self.state_store.stage4_get_freeze(
-            str(getattr(self.settings, "process_role", "trader"))
-        )
+        freeze_state = self.state_store.stage4_get_freeze(self._process_role_for_runtime())
         if freeze_state.active:
             logger.warning(
                 "stage4_submit_blocked_due_to_unknown",
@@ -868,6 +888,8 @@ class ExecutionService:
             self.instrumentation.counter("dryrun_submission_suppressed_total", 1)
             return 0, 1, 0, 0
 
+        self._ensure_live_write_side_effects_allowed(cycle_id=action.client_order_id or "stage4")
+
         try:
             ack_or_uncertain = self.execution_wrapper.submit_limit_order(
                 symbol=action.symbol,
@@ -974,6 +996,8 @@ class ExecutionService:
         if not live_mode:
             self.state_store.record_stage4_order_canceled(client_id)
             return 1
+
+        self._ensure_live_write_side_effects_allowed(cycle_id=client_id)
 
         canceled_or_uncertain = self.execution_wrapper.cancel_order(exchange_order_id=exchange_id)
         if isinstance(canceled_or_uncertain, UncertainResult):

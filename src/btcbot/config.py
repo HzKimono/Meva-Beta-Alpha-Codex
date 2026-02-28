@@ -420,6 +420,10 @@ class Settings(BaseSettings):
     universe_require_active: bool = Field(default=True, alias="UNIVERSE_REQUIRE_ACTIVE")
     universe_require_try_quote: bool = Field(default=True, alias="UNIVERSE_REQUIRE_TRY_QUOTE")
     dynamic_universe_enabled: bool = Field(default=True, alias="DYNAMIC_UNIVERSE_ENABLED")
+    dynamic_universe_live_fallback_enabled: bool = Field(
+        default=True,
+        alias="DYNAMIC_UNIVERSE_LIVE_FALLBACK_ENABLED",
+    )
     universe_top_n: int = Field(default=5, alias="UNIVERSE_TOP_N")
     universe_spread_max_bps: Decimal = Field(default=Decimal("60"), alias="UNIVERSE_SPREAD_MAX_BPS")
     universe_min_depth_try: Decimal = Field(

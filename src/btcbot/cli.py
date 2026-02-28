@@ -1723,7 +1723,7 @@ def _compute_live_policy(
     force_dry_run: bool,
     include_safe_mode: bool,
     cycle_id: str | None = None,
-) -> tuple[dict[str, bool], object]:
+) -> tuple[dict[str, object], object]:
     safe_mode_fn = getattr(settings, "is_safe_mode_enabled", None)
     safe_mode = (
         bool(safe_mode_fn())
@@ -1734,12 +1734,14 @@ def _compute_live_policy(
     dry_run = bool(force_dry_run or getattr(settings, "dry_run", False) or effective_safe_mode)
     live_ack = getattr(settings, "live_trading_ack", None) == "I_UNDERSTAND"
     inputs = {
+        "process_role": _canonical_process_role(settings),
         "dry_run": dry_run,
         "kill_switch": bool(getattr(settings, "kill_switch", False) or effective_safe_mode),
         "live_trading_enabled": bool(getattr(settings, "live_trading", False)),
         "live_trading_ack": live_ack,
     }
     policy = validate_live_side_effects_policy(
+        enforce_monitor_role=True,
         **inputs,
         cycle_id=cycle_id,
         logger=logger if cycle_id else None,
@@ -1750,13 +1752,14 @@ def _compute_live_policy(
     return inputs, policy
 
 
-def _format_effective_side_effects_banner(inputs: Mapping[str, bool], policy: object) -> str:
+def _format_effective_side_effects_banner(inputs: Mapping[str, object], policy: object) -> str:
     mode = "ARMED" if getattr(policy, "allowed", False) else "BLOCKED"
     reasons = getattr(policy, "reasons", [])
     reason_text = ",".join(reasons) if reasons else "NONE"
     warning = " | WARNING: Side effects are BLOCKED" if mode == "BLOCKED" else ""
     return (
         f"Effective Side-Effects State: {mode} | "
+        f"process_role={inputs.get('process_role', 'UNKNOWN')} "
         f"dry_run={inputs['dry_run']} "
         f"kill_switch={inputs['kill_switch']} "
         f"live_trading_enabled={inputs['live_trading_enabled']} "
@@ -2701,6 +2704,20 @@ def run_preflight(*, settings: Settings, db_path: str | None = None, profile: st
     for check in summary.get("checks", []):
         marker = "OK" if check.get("ok") else "FAIL"
         print(f" - {check.get('name')}: {marker} ({check.get('detail')})")
+    print(
+        "Preflight context: "
+        f"role={summary.get('process_role')} db_path={summary.get('db_path')} "
+        f"side_effects_allowed={summary.get('side_effects_policy', {}).get('allowed')} "
+        f"reasons={','.join(summary.get('side_effects_policy', {}).get('reasons', [])) or 'NONE'}"
+    )
+    os_lock = summary.get("os_lock", {})
+    db_lock = summary.get("db_instance_lock", {})
+    print(
+        "Lock status: "
+        f"os_owner_pid={os_lock.get('owner_pid')} os_owner_alive={os_lock.get('owner_pid_alive')} "
+        f"instance_id={db_lock.get('instance_id')} active_instances={len(db_lock.get('active_instances', []))} "
+        f"conflict_risk={db_lock.get('conflict_risk')}"
+    )
     print(json.dumps(summary, sort_keys=True))
     return 0 if passed else 2
 
@@ -3398,6 +3415,35 @@ def run_doctor(
     if json_output:
         print(_doctor_report_json(report))
     else:
+        process_role = _canonical_process_role(settings)
+        resolved_db_path = str(db_path or settings.state_db_path)
+        os_lock_key = TRADER_LOCK_ACCOUNT_KEY if process_role == ProcessRole.LIVE.value else MONITOR_LOCK_ACCOUNT_KEY
+        lock_diag = get_lock_diagnostics(db_path=resolved_db_path, account_key=os_lock_key)
+        policy_inputs, _policy_compat = _compute_live_policy(
+            settings,
+            force_dry_run=False,
+            include_safe_mode=True,
+        )
+        policy = validate_live_side_effects_policy(
+            process_role=process_role,
+            enforce_monitor_role=True,
+            dry_run=bool(policy_inputs["dry_run"]),
+            kill_switch=bool(policy_inputs["kill_switch"]),
+            live_trading_enabled=bool(policy_inputs["live_trading_enabled"]),
+            live_trading_ack=bool(policy_inputs["live_trading_ack"]),
+        )
+        print(
+            "doctor_context: "
+            f"role={process_role} db_path={resolved_db_path} "
+            f"os_lock_owner_pid={lock_diag.owner_pid} os_lock_owner_alive={lock_diag.owner_pid_alive} "
+            f"side_effects_allowed={policy.allowed} reasons={','.join(policy.reasons) or 'NONE'} "
+            f"message={policy.message}"
+        )
+        print(
+            "doctor_policy_inputs: "
+            f"dry_run={policy_inputs['dry_run']} kill_switch={policy_inputs['kill_switch']} "
+            f"live_trading_enabled={policy_inputs['live_trading_enabled']} ack={policy_inputs['live_trading_ack']}"
+        )
         for check in report.checks:
             print(
                 f"doctor: {check.status.upper()} [{check.category}] {check.name} - {check.message}"
