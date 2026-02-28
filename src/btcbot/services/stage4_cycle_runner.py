@@ -194,6 +194,8 @@ class Stage4CycleRunner:
                     self.norm(symbol): Decimal(str(score))
                     for symbol, score in selection.scores.items()
                 }
+            elif settings.dry_run:
+                active_symbols = [self.norm(symbol) for symbol in settings.symbols]
 
         process_role = coerce_process_role(getattr(settings, "process_role", None)).value
         effective_kill_switch, db_kill_switch, kill_switch_source = self._resolve_effective_kill_switch(
@@ -976,6 +978,8 @@ class Stage4CycleRunner:
             )
 
             final_mode = combine_modes(risk_decision.mode, degrade_decision.mode_override)
+            if settings.dry_run:
+                final_mode = Mode.NORMAL
             if degrade_decision.universe_cap is not None:
                 allowed_symbols = set(active_symbols[: degrade_decision.universe_cap])
                 accepted_actions = [
