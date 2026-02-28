@@ -1551,6 +1551,42 @@ def test_format_effective_side_effects_banner_blocked_includes_inputs_and_reason
     assert "ack=False" in banner
 
 
+def test_compute_live_policy_monitor_role_is_blocked_by_monitor_reason() -> None:
+    settings = Settings(
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        SAFE_MODE=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
+        PROCESS_ROLE="MONITOR",
+    )
+
+    _inputs, policy = cli._compute_live_policy(
+        settings,
+        force_dry_run=False,
+        include_safe_mode=True,
+    )
+
+    assert policy.allowed is False
+    assert "MONITOR_ROLE" in policy.reasons
+
+
+def test_compute_live_policy_defaults_to_monitor_when_role_missing() -> None:
+    settings = Settings(DRY_RUN=False, KILL_SWITCH=False, LIVE_TRADING=True, LIVE_TRADING_ACK="I_UNDERSTAND", SAFE_MODE=False, BTCTURK_API_KEY="key", BTCTURK_API_SECRET="secret")
+    settings.process_role = None
+
+    _inputs, policy = cli._compute_live_policy(
+        settings,
+        force_dry_run=False,
+        include_safe_mode=True,
+    )
+
+    assert policy.allowed is False
+    assert "MONITOR_ROLE" in policy.reasons
+
+
 def test_main_emits_effective_state_banner_once_for_loop_run(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["btcbot", "run", "--loop", "--max-cycles", "2"])
     monkeypatch.setattr(

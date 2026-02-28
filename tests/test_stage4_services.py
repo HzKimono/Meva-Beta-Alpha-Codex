@@ -2664,7 +2664,10 @@ def test_execution_service_max_order_notional_guard_disabled_when_non_positive(
     assert not any(name == "stage4_cap_reject_total" for name, _, _ in capture.counters)
 
 
-def test_stage4_monitor_role_blocks_live_write_side_effects(store: StateStore, monkeypatch) -> None:
+def test_stage4_monitor_role_blocks_live_write_side_effects(
+    store: StateStore, monkeypatch, caplog
+) -> None:
+    caplog.set_level(logging.INFO)
     monkeypatch.setenv("PROCESS_ROLE", "MONITOR")
 
     class RulesService:
@@ -2708,3 +2711,9 @@ def test_stage4_monitor_role_blocks_live_write_side_effects(store: StateStore, m
     with pytest.raises(RuntimeError, match="MONITOR role blocks side effects"):
         svc.execute_with_report([action])
     assert exchange.submits == []
+    assert svc._process_role_for_runtime() == "MONITOR"
+    assert any(
+        record.message == "decision_event"
+        and record.__dict__.get("extra", {}).get("reason_code") == "policy_block:monitor_role"
+        for record in caplog.records
+    )

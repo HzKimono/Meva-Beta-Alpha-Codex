@@ -1741,6 +1741,7 @@ def _compute_live_policy(
         "live_trading_ack": live_ack,
     }
     policy = validate_live_side_effects_policy(
+        enforce_monitor_role=True,
         **inputs,
         cycle_id=cycle_id,
         logger=logger if cycle_id else None,
