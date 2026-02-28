@@ -756,6 +756,27 @@ class _TimestampedExchange(FakeExchange):
         return (Decimal("100"), Decimal("102"), self._observed_at)
 
 
+class _MissingTimestampExchange(FakeExchange):
+    def get_orderbook_with_timestamp(self, symbol: str):
+        del symbol
+        return (Decimal("100"), Decimal("102"), None)
+
+
+def test_market_snapshot_falls_back_when_timestamp_missing() -> None:
+    runner = Stage4CycleRunner()
+    now = datetime.now(UTC)
+
+    snapshot = runner._resolve_market_snapshot(
+        _MissingTimestampExchange(),
+        ["BTC_TRY"],
+        cycle_now=now,
+    )
+
+    assert snapshot.fetched_at_by_symbol["BTCTRY"] is not None
+    assert snapshot.age_seconds_by_symbol["BTCTRY"] >= Decimal("0")
+    assert snapshot.age_seconds_by_symbol["BTCTRY"] != Decimal("999999")
+
+
 def test_stale_market_snapshot_blocks_symbol_execution(monkeypatch, tmp_path, caplog) -> None:
     exchange = _TimestampedExchange(observed_at=datetime.now(UTC) - timedelta(minutes=30))
     runner = Stage4CycleRunner()

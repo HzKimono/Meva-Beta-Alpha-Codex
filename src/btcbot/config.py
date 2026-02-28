@@ -454,6 +454,12 @@ class Settings(BaseSettings):
         default=3, alias="UNIVERSE_REJECT_1123_THRESHOLD"
     )
     universe_churn_max_per_day: int = Field(default=1, alias="UNIVERSE_CHURN_MAX_PER_DAY")
+    universe_scan_budget_symbols: int = Field(
+        default=50, alias="UNIVERSE_SCAN_BUDGET_SYMBOLS"
+    )
+    universe_max_orderbook_requests_per_cycle: int = Field(
+        default=50, alias="UNIVERSE_MAX_ORDERBOOK_REQUESTS_PER_CYCLE"
+    )
     universe_score_weight_momentum: Decimal = Field(
         default=Decimal("1"), alias="UNIVERSE_SCORE_WEIGHT_MOMENTUM"
     )

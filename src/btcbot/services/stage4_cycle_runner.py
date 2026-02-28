@@ -1626,7 +1626,9 @@ class Stage4CycleRunner:
         settings: Settings | None = None,
     ) -> MarketSnapshot:
         base = getattr(exchange, "client", exchange)
-        get_orderbook = getattr(base, "get_orderbook", None)
+        get_orderbook = getattr(exchange, "get_orderbook", None)
+        if not callable(get_orderbook):
+            get_orderbook = getattr(base, "get_orderbook", None)
         instrumentation = get_instrumentation()
         missing_symbols_count = 0
         freshness_stale = False
@@ -1685,18 +1687,23 @@ class Stage4CycleRunner:
                 max_data_age_seconds=Decimal("999999"),
             )
 
-        get_orderbook_with_ts = getattr(base, "get_orderbook_with_timestamp", None)
+        get_orderbook_with_ts = getattr(exchange, "get_orderbook_with_timestamp", None)
+        if not callable(get_orderbook_with_ts):
+            get_orderbook_with_ts = getattr(base, "get_orderbook_with_timestamp", None)
         for symbol in symbols:
             normalized = self.norm(symbol)
-            observed_at: datetime | None = None
+            observed_at: datetime
             try:
+                fetch_started_at = datetime.now(UTC)
                 if callable(get_orderbook_with_ts):
                     bid_raw, ask_raw, observed_raw = get_orderbook_with_ts(symbol)
                     if isinstance(observed_raw, datetime):
                         observed_at = observed_raw.astimezone(UTC)
+                    else:
+                        observed_at = fetch_started_at
                 else:
                     bid_raw, ask_raw = get_orderbook(symbol)
-                    observed_at = datetime.now(UTC)
+                    observed_at = fetch_started_at
             except Exception:  # noqa: BLE001
                 anomalies.add(normalized)
                 fetch_ages.append(Decimal("999999"))
@@ -1729,15 +1736,7 @@ class Stage4CycleRunner:
                 age_by_symbol[normalized] = Decimal("999999")
                 continue
             mark_prices[normalized] = mark
-            if observed_at is None:
-                logger.warning(
-                    "stale_market_data_timestamp_missing",
-                    extra={"extra": {"symbol": normalized}},
-                )
-                anomalies.add(normalized)
-                age_seconds = Decimal("999999")
-            else:
-                age_seconds = Decimal(str(max(0.0, (cycle_now - observed_at).total_seconds())))
+            age_seconds = Decimal(str(max(0.0, (cycle_now - observed_at).total_seconds())))
             fetch_ages.append(age_seconds)
             age_by_symbol[normalized] = age_seconds
             fetched_at_by_symbol[normalized] = observed_at

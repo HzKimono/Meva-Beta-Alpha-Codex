@@ -39,7 +39,7 @@ class _OrderbookMetrics:
     mid_price: Decimal
     spread_bps: Decimal
     depth_try: Decimal | None
-    observed_at: datetime | None
+    observed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,12 @@ class DynamicUniverseService:
         instr.histogram("universe_fetch_pairs_ms", (perf_counter() - t0) * 1000.0)
         instr.counter("universe_candidates", len(symbols))
 
+        scan_budget_symbols = max(
+            int(settings.universe_top_n),
+            int(settings.universe_scan_budget_symbols),
+        )
+        orderbook_request_cap = max(1, int(settings.universe_max_orderbook_requests_per_cycle))
+
         filters = {
             "top_n": settings.universe_top_n,
             "spread_max_bps": str(settings.universe_spread_max_bps),
@@ -114,15 +120,20 @@ class DynamicUniverseService:
             "exclude_symbols": list(settings.universe_exclude_symbols),
             "orderbook_max_age_seconds": settings.universe_orderbook_max_age_seconds,
             "churn_max_per_day": settings.universe_churn_max_per_day,
+            "scan_budget_symbols": scan_budget_symbols,
+            "orderbook_request_cap": orderbook_request_cap,
         }
         ineligible_counts: dict[str, int] = {}
         candidates: list[_Candidate] = []
 
         excluded = {canonical_symbol(item) for item in settings.universe_exclude_symbols}
         now_bucket = self._bucket_ts(now_utc, settings.universe_history_bucket_minutes)
+        orderbook_requests = 0
+        scanned_symbols = symbols[:scan_budget_symbols]
+        skipped_for_scan_budget = max(0, len(symbols) - len(scanned_symbols))
 
         t_books = perf_counter()
-        for symbol in symbols:
+        for symbol in scanned_symbols:
             symbol_state = state_store.get_dynamic_universe_symbol_state(symbol) or {}
             if self._is_cooldown(symbol_state, now_utc):
                 self._inc(ineligible_counts, "cooldown")
@@ -137,16 +148,17 @@ class DynamicUniverseService:
                 self._inc(ineligible_counts, "stable_symbol")
                 continue
 
+            if orderbook_requests >= orderbook_request_cap:
+                self._inc(ineligible_counts, "scan_budget_exhausted")
+                continue
+
+            orderbook_requests += 1
             metrics = self._fetch_orderbook_metrics(exchange, symbol)
             if metrics is None:
                 self._inc(ineligible_counts, "orderbook_unavailable")
                 continue
-            if metrics.observed_at is None:
-                self._inc(ineligible_counts, "orderbook_no_timestamp")
-                instr.counter("orderbook_no_timestamp", 1)
-                continue
-            age_seconds = (now_utc - ensure_utc(metrics.observed_at)).total_seconds()
-            if age_seconds < 0 or age_seconds > settings.universe_orderbook_max_age_seconds:
+            age_seconds = max(0.0, (now_utc - ensure_utc(metrics.observed_at)).total_seconds())
+            if age_seconds > settings.universe_orderbook_max_age_seconds:
                 self._inc(ineligible_counts, "stale_orderbook")
                 instr.counter("stale_orderbook", 1)
                 continue
@@ -214,6 +226,11 @@ class DynamicUniverseService:
                     score=score,
                 )
             )
+        if skipped_for_scan_budget > 0:
+            ineligible_counts["scan_budget_exhausted"] = (
+                ineligible_counts.get("scan_budget_exhausted", 0) + skipped_for_scan_budget
+            )
+        instr.counter("universe_orderbook_requests_per_cycle", orderbook_requests)
         instr.histogram("universe_fetch_orderbooks_ms", (perf_counter() - t_books) * 1000.0)
 
         t_score = perf_counter()
@@ -292,6 +309,7 @@ class DynamicUniverseService:
                     "ineligible_counts": ineligible_counts,
                     "churn_count": churn_count,
                     "refreshed": not guarded,
+                    "orderbook_requests": orderbook_requests,
                 }
             },
         )
@@ -325,32 +343,39 @@ class DynamicUniverseService:
 
     def _fetch_orderbook_metrics(self, exchange: object, symbol: str) -> _OrderbookMetrics | None:
         base = getattr(exchange, "client", exchange)
-        getter = getattr(base, "get_orderbook_with_timestamp", None)
+        getter = self._resolve_method(exchange, "get_orderbook_with_timestamp")
         if callable(getter):
             try:
+                fetched_at = datetime.now(UTC)
                 data = getter(symbol)
-                parsed = self._parse_timestamped_orderbook(data)
+                parsed = self._parse_timestamped_orderbook(data, fallback_observed_at=fetched_at)
                 if parsed is not None:
                     return parsed
             except Exception:  # noqa: BLE001
                 pass
 
         get_raw = getattr(base, "_get", None)
-        if callable(get_raw):
+        if callable(get_raw) and not callable(getter):
             try:
+                fetched_at = datetime.now(UTC)
                 payload = get_raw("/api/v2/orderbook", params={"pairSymbol": symbol})
                 data = payload.get("data") if isinstance(payload, dict) else None
                 if isinstance(data, dict):
-                    parsed = self._parse_raw_orderbook(data, payload)
+                    parsed = self._parse_raw_orderbook(
+                        data,
+                        payload,
+                        fallback_observed_at=fetched_at,
+                    )
                     if parsed is not None:
                         return parsed
             except Exception:  # noqa: BLE001
                 pass
 
-        get_orderbook = getattr(base, "get_orderbook", None)
+        get_orderbook = self._resolve_method(exchange, "get_orderbook")
         if not callable(get_orderbook):
             return None
         try:
+            fetched_at = datetime.now(UTC)
             bid_raw, ask_raw = get_orderbook(symbol)
             bid = Decimal(str(bid_raw))
             ask = Decimal(str(ask_raw))
@@ -360,24 +385,44 @@ class DynamicUniverseService:
             return None
         mid = (bid + ask) / Decimal("2")
         spread_bps = ((ask - bid) / mid) * _BPS
-        return _OrderbookMetrics(mid_price=mid, spread_bps=spread_bps, depth_try=None, observed_at=None)
+        return _OrderbookMetrics(
+            mid_price=mid,
+            spread_bps=spread_bps,
+            depth_try=None,
+            observed_at=fetched_at,
+        )
 
-    def _parse_timestamped_orderbook(self, data: object) -> _OrderbookMetrics | None:
+    def _parse_timestamped_orderbook(
+        self, data: object, *, fallback_observed_at: datetime
+    ) -> _OrderbookMetrics | None:
         if isinstance(data, dict):
-            return self._parse_raw_orderbook(data, data)
+            return self._parse_raw_orderbook(
+                data,
+                data,
+                fallback_observed_at=fallback_observed_at,
+            )
         if isinstance(data, tuple) and len(data) >= 3:
             bid = Decimal(str(data[0]))
             ask = Decimal(str(data[1]))
-            observed_at = self._parse_timestamp(data[2])
+            observed_at = self._parse_timestamp(data[2]) or fallback_observed_at
             if bid <= 0 or ask <= 0 or ask < bid:
                 return None
             mid = (bid + ask) / Decimal("2")
             spread_bps = ((ask - bid) / mid) * _BPS
-            return _OrderbookMetrics(mid_price=mid, spread_bps=spread_bps, depth_try=None, observed_at=observed_at)
+            return _OrderbookMetrics(
+                mid_price=mid,
+                spread_bps=spread_bps,
+                depth_try=None,
+                observed_at=ensure_utc(observed_at),
+            )
         return None
 
     def _parse_raw_orderbook(
-        self, data: dict[str, object], payload: dict[str, object] | None = None
+        self,
+        data: dict[str, object],
+        payload: dict[str, object] | None = None,
+        *,
+        fallback_observed_at: datetime,
     ) -> _OrderbookMetrics | None:
         bids = data.get("bids")
         asks = data.get("asks")
@@ -403,6 +448,8 @@ class DynamicUniverseService:
             observed_at = self._parse_timestamp(payload.get("timestamp"))
         if observed_at is None and isinstance(payload, dict):
             observed_at = self._parse_timestamp(payload.get("serverTime"))
+        if observed_at is None:
+            observed_at = fallback_observed_at
         mid = (bid_price + ask_price) / Decimal("2")
         spread_bps = ((ask_price - bid_price) / mid) * _BPS
         depth_try = (bid_qty * bid_price) + (ask_qty * ask_price)
@@ -410,8 +457,16 @@ class DynamicUniverseService:
             mid_price=mid,
             spread_bps=spread_bps,
             depth_try=depth_try,
-            observed_at=observed_at,
+            observed_at=ensure_utc(observed_at),
         )
+
+    @staticmethod
+    def _resolve_method(exchange: object, method_name: str) -> object:
+        direct = getattr(exchange, method_name, None)
+        if callable(direct):
+            return direct
+        base = getattr(exchange, "client", None)
+        return getattr(base, method_name, None)
 
     @staticmethod
     def _parse_timestamp(raw: object) -> datetime | None:
