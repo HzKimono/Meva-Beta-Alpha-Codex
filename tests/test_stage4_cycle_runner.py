@@ -12,7 +12,7 @@ from btcbot.adapters.btcturk_http import BtcturkHttpClient
 from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import OrderSide, PairInfo
-from btcbot.domain.stage4 import Order
+from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Order
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
@@ -1212,3 +1212,72 @@ def test_summary_reject_context_exposes_min_notional_fields() -> None:
     assert context["q_price"] == "100.00"
     assert context["min_required_settings"] == "100"
     assert context["min_required_exchange_rule"] == "100"
+
+
+def test_prefilter_min_notional_rescues_floor_rounding_gap() -> None:
+    runner = Stage4CycleRunner()
+    pair_info = [
+        PairInfo(
+            pairSymbol="BTCTRY",
+            numeratorScale=4,
+            denominatorScale=2,
+            minTotalAmount=Decimal("120"),
+            tickSize=Decimal("0.01"),
+            stepSize=Decimal("0.0001"),
+        )
+    ]
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100.005"),
+        qty=Decimal("1.19995"),
+        reason="test",
+        client_order_id="cid-rescue",
+    )
+
+    filtered, dropped = runner._prefilter_submit_actions_min_notional(
+        actions=[action],
+        pair_info=pair_info,
+        min_order_notional_try=Decimal("120"),
+        cycle_id="cycle-1",
+    )
+
+    assert dropped == 0
+    assert len(filtered) == 1
+    rescued = filtered[0]
+    assert rescued.qty > action.qty
+    assert rescued.price * rescued.qty >= Decimal("120")
+
+
+def test_prefilter_min_notional_drops_when_intent_below_minimum() -> None:
+    runner = Stage4CycleRunner()
+    pair_info = [
+        PairInfo(
+            pairSymbol="BTCTRY",
+            numeratorScale=4,
+            denominatorScale=2,
+            minTotalAmount=Decimal("120"),
+            tickSize=Decimal("0.01"),
+            stepSize=Decimal("0.0001"),
+        )
+    ]
+    action = LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1.19995"),
+        reason="test",
+        client_order_id="cid-drop",
+    )
+
+    filtered, dropped = runner._prefilter_submit_actions_min_notional(
+        actions=[action],
+        pair_info=pair_info,
+        min_order_notional_try=Decimal("120"),
+        cycle_id="cycle-1",
+    )
+
+    assert filtered == []
+    assert dropped == 1
