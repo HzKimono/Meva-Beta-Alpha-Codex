@@ -642,8 +642,10 @@ class Stage4CycleRunner:
                 capital_result = risk_budget_service.apply_self_financing_checkpoint(
                     cycle_id=cycle_id,
                     realized_pnl_total_try=pnl_report.realized_pnl_total,
-                    ledger_event_count=ledger_checkpoint.event_count,
+                    ledger_event_count=ledger_checkpoint.event_count_total_applied,
                     ledger_checkpoint_id=ledger_checkpoint.checkpoint_id,
+                    # NOTE: seed from available TRY cash for conservative capital bootstrap.
+                    # Switching to equity_estimate would include MTM and is intentionally deferred.
                     seed_trading_capital_try=try_cash,
                 )
             except CapitalPolicyError as exc:
@@ -657,7 +659,7 @@ class Stage4CycleRunner:
                         "scope": "global",
                         "payload": {
                             "checkpoint_id": ledger_checkpoint.checkpoint_id,
-                            "ledger_event_count": ledger_checkpoint.event_count,
+                            "ledger_event_count": ledger_checkpoint.event_count_total_applied,
                             "error": str(exc),
                         },
                     },
@@ -679,6 +681,11 @@ class Stage4CycleRunner:
                 instrumentation.gauge(
                     "capital_policy.treasury_try",
                     float(capital_result.treasury_try),
+                )
+                instrumentation.counter(
+                    "capital_policy.checkpoint_applied",
+                    1,
+                    attrs={"applied": "true" if capital_result.applied else "false"},
                 )
             current_open_orders = state_store.list_stage4_open_orders()
             positions = state_store.list_stage4_positions()
@@ -759,6 +766,7 @@ class Stage4CycleRunner:
 
             budget_decision, prev_mode, peak_equity, fees_today, risk_day = (
                 risk_budget_service.compute_decision(
+                    cycle_id=cycle_id,
                     limits=risk_limits,
                     pnl_report=pnl_report,
                     positions=positions,

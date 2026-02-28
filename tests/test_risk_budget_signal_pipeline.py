@@ -113,6 +113,7 @@ def test_compute_decision_uses_computed_signal_inputs(tmp_path) -> None:
         )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=PnlReport(
             realized_pnl_total=Decimal("0"),

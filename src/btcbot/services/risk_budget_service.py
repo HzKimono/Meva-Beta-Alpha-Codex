@@ -93,6 +93,7 @@ class RiskBudgetService:
         last_realized_total = Decimal(str(state["last_realized_pnl_total_try"]))
         last_event_count = int(state.get("last_event_count", 0) or 0)
 
+        # Guard with BOTH monotonic dimensions to keep checkpoint replay idempotent and auditable.
         if ledger_event_count < last_event_count:
             emit_decision(
                 logger,
@@ -115,15 +116,40 @@ class RiskBudgetService:
                 f"ledger_event_count={ledger_event_count}"
             )
 
+        if ledger_event_count == last_event_count:
+            if realized_pnl_total_try == last_realized_total:
+                emit_decision(
+                    logger,
+                    {
+                        "cycle_id": cycle_id,
+                        "decision_layer": "capital_policy",
+                        "reason_code": "capital_apply:checkpoint_already_applied",
+                        "action": "SUPPRESS",
+                        "scope": "global",
+                        "payload": {
+                            "checkpoint_id": ledger_checkpoint_id,
+                            "ledger_event_count": ledger_event_count,
+                            "last_event_count": last_event_count,
+                            "realized_pnl_total_try": str(realized_pnl_total_try),
+                            "last_realized_pnl_total_try": str(last_realized_total),
+                        },
+                    },
+                )
+                return CapitalPolicyResult(
+                    trading_capital_try=trading_capital,
+                    treasury_try=treasury,
+                    realized_pnl_delta_try=Decimal("0"),
+                    checkpoint_id=ledger_checkpoint_id,
+                    applied=False,
+                )
 
-        if ledger_event_count <= last_event_count:
             emit_decision(
                 logger,
                 {
                     "cycle_id": cycle_id,
                     "decision_layer": "capital_policy",
-                    "reason_code": "capital_apply:checkpoint_already_applied",
-                    "action": "SUPPRESS",
+                    "reason_code": "capital_policy_block:event_count_same_realized_mismatch",
+                    "action": "BLOCK",
                     "scope": "global",
                     "payload": {
                         "checkpoint_id": ledger_checkpoint_id,
@@ -134,12 +160,34 @@ class RiskBudgetService:
                     },
                 },
             )
-            return CapitalPolicyResult(
-                trading_capital_try=trading_capital,
-                treasury_try=treasury,
-                realized_pnl_delta_try=Decimal("0"),
-                checkpoint_id=ledger_checkpoint_id,
-                applied=False,
+            raise CapitalPolicyError(
+                "ledger_event_count_same_but_realized_total_mismatch "
+                f"last_realized_pnl_total_try={last_realized_total} "
+                f"realized_pnl_total_try={realized_pnl_total_try}"
+            )
+
+        if realized_pnl_total_try < last_realized_total:
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "capital_policy",
+                    "reason_code": "capital_policy_block:realized_total_regressed",
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {
+                        "checkpoint_id": ledger_checkpoint_id,
+                        "ledger_event_count": ledger_event_count,
+                        "last_event_count": last_event_count,
+                        "realized_pnl_total_try": str(realized_pnl_total_try),
+                        "last_realized_pnl_total_try": str(last_realized_total),
+                    },
+                },
+            )
+            raise CapitalPolicyError(
+                "realized_total_regressed "
+                f"last_realized_pnl_total_try={last_realized_total} "
+                f"realized_pnl_total_try={realized_pnl_total_try}"
             )
 
         realized_delta = realized_pnl_total_try - last_realized_total
@@ -192,10 +240,13 @@ class RiskBudgetService:
                 "extra": {
                     "cycle_id": cycle_id,
                     "checkpoint_id": ledger_checkpoint_id,
+                    "ledger_event_count": ledger_event_count,
+                    "last_event_count": last_event_count,
+                    "realized_total_try": str(realized_pnl_total_try),
+                    "last_realized_total_try": str(last_realized_total),
                     "delta_realized_try": str(realized_delta),
                     "trading_capital_try": str(next_trading),
                     "treasury_try": str(next_treasury),
-                    "last_event_count": ledger_event_count,
                 }
             },
         )
@@ -205,11 +256,7 @@ class RiskBudgetService:
             {
                 "cycle_id": cycle_id,
                 "decision_layer": "capital_policy",
-                "reason_code": (
-                    "capital_apply:split_positive_pnl"
-                    if realized_delta > 0
-                    else "capital_apply:apply_negative_pnl"
-                ),
+                "reason_code": "capital_apply:split_positive_pnl",
                 "action": "SUBMIT",
                 "scope": "global",
                 "payload": {
@@ -221,10 +268,6 @@ class RiskBudgetService:
                     "treasury_try_prev": str(treasury),
                     "trading_capital_try_next": str(next_trading),
                     "treasury_try_next": str(next_treasury),
-                    "deposits_try": "0",
-                    "withdrawals_try": "0",
-                    "external_costs_try": "0",
-                    "treasury_management": "manual_managed",
                 },
             },
         )
@@ -240,6 +283,7 @@ class RiskBudgetService:
     def compute_decision(
         self,
         *,
+        cycle_id: str,
         limits: RiskLimits,
         pnl_report: PnlReport,
         positions: list[Position],
@@ -295,16 +339,45 @@ class RiskBudgetService:
             missing_currencies=missing_currencies,
         )
         mode, reasons = decide_mode(limits=limits, signals=signals)
-        if fees_unknown and live_mode and mode == Mode.NORMAL:
-            mode = Mode.REDUCE_RISK_ONLY
-            reasons = [RISK_FEES_UNKNOWN_REASON]
-
-        if pnl_report.fee_conversion_missing_currencies:
-            missing = list(sorted(set(pnl_report.fee_conversion_missing_currencies)))
+        if kill_switch_active:
+            mode = Mode.OBSERVE_ONLY
+            reasons = ["kill_switch_active"]
             emit_decision(
                 logger,
                 {
-                    "cycle_id": f"{today.isoformat()}:compute_decision",
+                    "cycle_id": cycle_id,
+                    "decision_layer": "risk_budget",
+                    "reason_code": "kill_switch_active",
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {},
+                },
+            )
+        elif live_mode and missing_marks:
+            mode = Mode.OBSERVE_ONLY
+            reasons = [
+                "mark_price_missing_fail_closed",
+                f"missing_symbols_count={len(missing_marks)}",
+            ]
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
+                    "decision_layer": "risk_budget",
+                    "reason_code": "mark_price_missing_fail_closed",
+                    "action": "BLOCK",
+                    "scope": "global",
+                    "payload": {"missing_symbols": ",".join(missing_marks)},
+                },
+            )
+        elif pnl_report.fee_conversion_missing_currencies:
+            missing = list(sorted(set(pnl_report.fee_conversion_missing_currencies)))
+            mode = Mode.REDUCE_RISK_ONLY
+            reasons = [FEE_CONVERSION_MISSING_RATE_REASON]
+            emit_decision(
+                logger,
+                {
+                    "cycle_id": cycle_id,
                     "decision_layer": "risk_budget",
                     "reason_code": FEE_CONVERSION_MISSING_RATE_REASON,
                     "action": "BLOCK",
@@ -317,32 +390,25 @@ class RiskBudgetService:
                     },
                 },
             )
+        elif fees_unknown and live_mode:
             mode = Mode.REDUCE_RISK_ONLY
-            reasons = [FEE_CONVERSION_MISSING_RATE_REASON]
-        if missing_marks:
+            reasons = ["fees_unknown_live"]
             emit_decision(
                 logger,
                 {
-                    "cycle_id": f"{today.isoformat()}:compute_decision",
+                    "cycle_id": cycle_id,
                     "decision_layer": "risk_budget",
-                    "reason_code": "mark_price_missing_fail_closed",
+                    "reason_code": "fees_unknown_live",
                     "action": "BLOCK",
                     "scope": "global",
-                    "payload": {"missing_symbols": ",".join(missing_marks)},
+                    "payload": {},
                 },
             )
-            mode = Mode.OBSERVE_ONLY
-            reasons = [
-                "mark_price_missing_fail_closed",
-                f"missing_symbols_count={len(missing_marks)}",
-            ]
+
         decided_at = self.now_provider()
-        if kill_switch_active:
-            mode = Mode.OBSERVE_ONLY
-            reasons = ["KILL_SWITCH"]
 
         capital_state = self._load_or_init_capital_state(
-            cycle_id=f"{today.isoformat()}:compute_decision",
+            cycle_id=cycle_id,
             seed_trading_capital_try=pnl_report.equity_estimate,
             seed_realized_total_try=pnl_report.realized_pnl_total,
         )

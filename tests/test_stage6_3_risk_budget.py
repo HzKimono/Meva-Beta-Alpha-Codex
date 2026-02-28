@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from btcbot.agent.contracts import AgentDecision, DecisionAction, DecisionRationale, SafeDecision
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
@@ -10,7 +12,11 @@ from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType
 from btcbot.risk.budget import RiskBudgetView
 from btcbot.services import stage4_cycle_runner as runner_module
 from btcbot.services.ledger_service import PnlReport
-from btcbot.services.risk_budget_service import BudgetDecision, RiskBudgetService
+from btcbot.services.risk_budget_service import (
+    BudgetDecision,
+    CapitalPolicyError,
+    RiskBudgetService,
+)
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
@@ -104,6 +110,7 @@ def test_risk_budget_service_fees_is_idempotent(tmp_path) -> None:
     )
 
     first, _, peak_first, fees_first, day_first = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -121,6 +128,7 @@ def test_risk_budget_service_fees_is_idempotent(tmp_path) -> None:
         fees_day=day_first,
     )
     second, _, _, fees_second, _ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -163,6 +171,7 @@ def test_compute_decision_invalid_stored_mode_is_safe() -> None:
     )
 
     decision, prev_mode, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -455,6 +464,7 @@ def test_risk_budget_live_missing_mark_price_fail_closed(tmp_path) -> None:
     )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -484,6 +494,7 @@ def test_risk_budget_live_non_positive_mark_price_fail_closed(tmp_path) -> None:
     )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -526,7 +537,7 @@ def test_self_financing_checkpoint_idempotent_and_split(tmp_path) -> None:
     assert second.treasury_try == Decimal("40")
 
 
-def test_self_financing_checkpoint_negative_delta_only_reduces_trading(tmp_path) -> None:
+def test_self_financing_checkpoint_negative_delta_blocks_by_default(tmp_path) -> None:
     db = StateStore(str(tmp_path / "capital_policy_loss.sqlite"))
     service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
 
@@ -539,17 +550,14 @@ def test_self_financing_checkpoint_negative_delta_only_reduces_trading(tmp_path)
         last_cycle_id="seed",
     )
 
-    result = service.apply_self_financing_checkpoint(
-        cycle_id="c2",
-        realized_pnl_total_try=Decimal("80"),
-        ledger_event_count=11,
-        ledger_checkpoint_id="cp-11",
-        seed_trading_capital_try=Decimal("1000"),
-    )
-    assert result.applied is True
-    assert result.realized_pnl_delta_try == Decimal("-20")
-    assert result.trading_capital_try == Decimal("1040")
-    assert result.treasury_try == Decimal("40")
+    with pytest.raises(CapitalPolicyError):
+        service.apply_self_financing_checkpoint(
+            cycle_id="c2",
+            realized_pnl_total_try=Decimal("80"),
+            ledger_event_count=11,
+            ledger_checkpoint_id="cp-11",
+            seed_trading_capital_try=Decimal("1000"),
+        )
 
 
 def test_compute_decision_live_missing_mark_prices_fail_closed() -> None:
@@ -565,6 +573,7 @@ def test_compute_decision_live_missing_mark_prices_fail_closed() -> None:
     )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -594,6 +603,7 @@ def test_compute_decision_fee_conversion_missing_rate_reduces_risk() -> None:
     )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -605,3 +615,75 @@ def test_compute_decision_fee_conversion_missing_rate_reduces_risk() -> None:
     assert decision.mode == Mode.REDUCE_RISK_ONLY
     assert decision.risk_decision.reasons == ["fee_conversion_missing_rate"]
     assert decision.risk_decision.signals.missing_currencies == ("USDT",)
+
+
+def test_self_financing_checkpoint_blocks_on_realized_regression_with_higher_event_count(tmp_path) -> None:
+    db = StateStore(str(tmp_path / "capital_policy_regression.sqlite"))
+    service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
+    db.upsert_capital_policy_state(
+        trading_capital_try=Decimal("1000"),
+        treasury_try=Decimal("100"),
+        last_realized_pnl_total_try=Decimal("200"),
+        last_event_count=10,
+        last_checkpoint_id="cp-10",
+        last_cycle_id="seed",
+    )
+
+    with pytest.raises(CapitalPolicyError):
+        service.apply_self_financing_checkpoint(
+            cycle_id="c-regress",
+            realized_pnl_total_try=Decimal("150"),
+            ledger_event_count=11,
+            ledger_checkpoint_id="cp-11",
+            seed_trading_capital_try=Decimal("1000"),
+        )
+
+
+def test_self_financing_checkpoint_blocks_on_same_event_count_realized_mismatch(tmp_path) -> None:
+    db = StateStore(str(tmp_path / "capital_policy_same_count_mismatch.sqlite"))
+    service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
+    db.upsert_capital_policy_state(
+        trading_capital_try=Decimal("1000"),
+        treasury_try=Decimal("100"),
+        last_realized_pnl_total_try=Decimal("200"),
+        last_event_count=10,
+        last_checkpoint_id="cp-10",
+        last_cycle_id="seed",
+    )
+
+    with pytest.raises(CapitalPolicyError):
+        service.apply_self_financing_checkpoint(
+            cycle_id="c-mismatch",
+            realized_pnl_total_try=Decimal("210"),
+            ledger_event_count=10,
+            ledger_checkpoint_id="cp-10b",
+            seed_trading_capital_try=Decimal("1000"),
+        )
+
+
+def test_compute_decision_kill_switch_takes_precedence_over_mark_price_fail_closed() -> None:
+    db = StateStore(":memory:")
+    service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
+    pnl_report = PnlReport(
+        realized_pnl_total=Decimal("0"),
+        unrealized_pnl_total=Decimal("0"),
+        fees_total_by_currency={"TRY": Decimal("1")},
+        per_symbol=[],
+        equity_estimate=Decimal("1000"),
+        fees_total_try=Decimal("1"),
+    )
+
+    decision, *_ = service.compute_decision(
+        cycle_id="cycle-kill-precedence",
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=True,
+        live_mode=True,
+        tradable_symbols=["BTCTRY"],
+    )
+
+    assert decision.mode == Mode.OBSERVE_ONLY
+    assert decision.risk_decision.reasons == ["kill_switch_active"]

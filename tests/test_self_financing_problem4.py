@@ -161,7 +161,7 @@ def test_self_financing_negative_capital_fails_closed(caplog, tmp_path) -> None:
         )
 
     event = _decision_payloads(caplog)[-1]
-    assert event["reason_code"] == "capital_error:negative_capital"
+    assert event["reason_code"] == "capital_policy_block:realized_total_regressed"
     assert event["action"] == "BLOCK"
     assert event["scope"] == "global"
 
@@ -186,6 +186,7 @@ def test_compute_decision_uses_persisted_capital_state(tmp_path) -> None:
     )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_risk_limits(),
         pnl_report=report,
         positions=[],
