@@ -284,7 +284,7 @@ class RiskBudgetService:
                     },
                 },
             )
-            mode = Mode.OBSERVE_ONLY
+            mode = Mode.REDUCE_RISK_ONLY
             reasons = [FEE_CONVERSION_MISSING_RATE_REASON]
         if missing_marks:
             emit_decision(
@@ -381,6 +381,8 @@ class RiskBudgetService:
             budget_multiplier = Decimal("0")
         elif mode == Mode.REDUCE_RISK_ONLY:
             budget_multiplier = min(budget_multiplier, Decimal("0.5"))
+            if FEE_CONVERSION_MISSING_RATE_REASON in reasons:
+                budget_multiplier = min(budget_multiplier, Decimal("0.25"))
 
         decision = BudgetDecision(
             risk_decision=risk_decision,

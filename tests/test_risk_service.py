@@ -160,3 +160,34 @@ def test_risk_service_phantom_unknown_is_closed_after_time_window() -> None:
         OrderStatus.CANCELED,
         "reconciled_missing_from_exchange_open_orders",
     ) in store.updated
+
+
+
+def test_risk_service_passes_mark_prices_to_policy_context() -> None:
+    store = _Store([])
+    policy = _CapturePolicy()
+    service = RiskService(policy, store)  # type: ignore[arg-type]
+
+    approved = service.filter(
+        "c1",
+        [_intent()],
+        mark_prices={"BTCTRY": Decimal("100")},
+    )
+
+    assert len(approved) == 1
+    assert policy.context.mark_prices == {"BTCTRY": Decimal("100")}
+
+
+def test_risk_service_normalizes_and_scopes_mark_prices_for_context() -> None:
+    store = _Store([])
+    policy = _CapturePolicy()
+    service = RiskService(policy, store)  # type: ignore[arg-type]
+
+    approved = service.filter(
+        "c1",
+        [_intent()],
+        mark_prices={"btc_try": Decimal("100"), "ETHTRY": Decimal("250")},
+    )
+
+    assert len(approved) == 1
+    assert policy.context.mark_prices == {"BTCTRY": Decimal("100")}

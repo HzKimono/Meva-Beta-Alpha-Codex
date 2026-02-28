@@ -52,7 +52,7 @@ def test_risk_budget_fees_try_today_uses_converted_total(tmp_path) -> None:
     assert decision.risk_decision.signals.fees_try_today == Decimal("71")
 
 
-def test_risk_budget_fail_closed_on_missing_fee_conversion_rate(tmp_path) -> None:
+def test_risk_budget_fee_conversion_missing_degrades_not_observe_only(tmp_path) -> None:
     store = StateStore(str(tmp_path / "risk_fail_closed.sqlite"))
     service = RiskBudgetService(store, now_provider=lambda: datetime(2026, 1, 2, tzinfo=UTC))
     pnl_report = PnlReport(
@@ -73,12 +73,56 @@ def test_risk_budget_fail_closed_on_missing_fee_conversion_rate(tmp_path) -> Non
         realized_today_try=Decimal("0"),
         kill_switch_active=False,
     )
-    assert decision.mode == Mode.OBSERVE_ONLY
+    assert decision.mode == Mode.REDUCE_RISK_ONLY
     assert decision.risk_decision.reasons == ["fee_conversion_missing_rate"]
+    assert decision.position_sizing_multiplier <= Decimal("0.25")
+
+    kill_switch_decision, *_ = service.compute_decision(
+        limits=_risk_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=True,
+    )
+    assert kill_switch_decision.mode == Mode.OBSERVE_ONLY
+    assert kill_switch_decision.risk_decision.reasons == ["KILL_SWITCH"]
 
 
-def test_ledger_report_marks_missing_fee_conversion_for_non_try_currency(tmp_path) -> None:
+def test_ledger_fee_conversion_uses_mark_prices_direct_or_inverse(tmp_path) -> None:
     store = StateStore(db_path=str(tmp_path / "fees.db"))
+    store.append_ledger_events(
+        [
+            LedgerEvent(
+                event_id="fee-1",
+                ts=datetime(2026, 1, 2, tzinfo=UTC),
+                symbol="BTCTRY",
+                type=LedgerEventType.FEE,
+                side=None,
+                qty=Decimal("0"),
+                price=None,
+                fee=Decimal("0.001"),
+                fee_currency="BTC",
+                exchange_trade_id="fee-1",
+                exchange_order_id=None,
+                client_order_id=None,
+                meta={},
+            )
+        ]
+    )
+    ledger = LedgerService(state_store=store, logger=__import__("logging").getLogger(__name__))
+
+    direct_report = ledger.report(mark_prices={"BTCTRY": Decimal("100000")}, cash_try=Decimal("0"))
+    assert direct_report.fees_total_try == Decimal("100")
+    assert direct_report.fee_conversion_missing_currencies == ()
+
+    inverse_report = ledger.report(mark_prices={"TRYBTC": Decimal("0.00001")}, cash_try=Decimal("0"))
+    assert inverse_report.fees_total_try == Decimal("100")
+    assert inverse_report.fee_conversion_missing_currencies == ()
+
+
+def test_ledger_fee_conversion_missing_rate_is_reported_without_crash(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "fees_missing.db"))
     store.append_ledger_events(
         [
             LedgerEvent(
@@ -103,14 +147,6 @@ def test_ledger_report_marks_missing_fee_conversion_for_non_try_currency(tmp_pat
     report = ledger.report(mark_prices={}, cash_try=Decimal("0"))
     assert report.fees_total_try == Decimal("0")
     assert report.fee_conversion_missing_currencies == ("USDT",)
-
-    report_with_rate = ledger.report(
-        mark_prices={"USDTTRY": Decimal("35")},
-        cash_try=Decimal("0"),
-        price_for_fee_conversion=MarkPriceConverter({"USDTTRY": Decimal("35")}),
-    )
-    assert report_with_rate.fees_total_try == Decimal("70")
-    assert report_with_rate.fee_conversion_missing_currencies == ()
 
 
 def test_financial_breakdown_fails_closed_without_non_try_fee_conversion_rate(tmp_path) -> None:
@@ -140,7 +176,7 @@ def test_financial_breakdown_fails_closed_without_non_try_fee_conversion_rate(tm
 
     from btcbot.ports_price_conversion import FeeConversionRateError
 
-    with pytest.raises(FeeConversionRateError, match="USDT/TRY"):
+    with pytest.raises(FeeConversionRateError, match="USDT->TRY"):
         ledger.financial_breakdown(
             mark_prices={},
             cash_try=Decimal("0"),

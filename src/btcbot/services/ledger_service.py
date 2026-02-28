@@ -25,6 +25,7 @@ from btcbot.domain.models import normalize_symbol
 from btcbot.domain.money_policy import DEFAULT_MONEY_POLICY, round_quote
 from btcbot.domain.stage4 import Fill, LifecycleAction, LifecycleActionType
 from btcbot.ports_price_conversion import FeeConversionRateError, PriceConverter
+from btcbot.services.price_conversion_service import MarkPriceConverter
 from btcbot.services.state_store import StateStore
 
 LEDGER_REDUCER_SNAPSHOT_VERSION = 1
@@ -271,9 +272,10 @@ class LedgerService:
         }
         unrealized = compute_unrealized_pnl(state, normalized_marks)
 
+        fee_converter = price_for_fee_conversion or MarkPriceConverter(normalized_marks)
         fees_try, _ = self._compute_fees_try(
             fees_by_currency=state.fees_by_currency,
-            price_for_fee_conversion=price_for_fee_conversion,
+            price_for_fee_conversion=fee_converter,
             strict=strict_fee_conversion,
         )
 
@@ -360,9 +362,10 @@ class LedgerService:
         }
         realized = compute_realized_pnl(state)
         unrealized = compute_unrealized_pnl(state, normalized_marks)
+        fee_converter = price_for_fee_conversion or MarkPriceConverter(normalized_marks)
         fees_total_try, missing_currencies = self._compute_fees_try(
             fees_by_currency=state.fees_by_currency,
-            price_for_fee_conversion=price_for_fee_conversion,
+            price_for_fee_conversion=fee_converter,
         )
         mtm = self._position_mtm(state, normalized_marks)
         equity_estimate = cash_try + mtm
