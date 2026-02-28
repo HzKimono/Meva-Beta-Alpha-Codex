@@ -38,6 +38,32 @@ class AccountingService:
         self.last_applied_fills_count = 0
         self.last_apply_stats_by_symbol: dict[str, dict[str, int]] = {}
 
+    def _convert_fee_to_try(
+        self,
+        *,
+        fee_asset: str,
+        fee_amount: Decimal,
+        mark_prices: dict[str, Decimal],
+    ) -> tuple[Decimal, str | None]:
+        currency = fee_asset.upper()
+        if fee_amount <= 0:
+            return Decimal("0"), None
+        if currency == "TRY":
+            return fee_amount, None
+
+        normalized_marks = {
+            normalize_symbol(symbol): Decimal(str(price)) for symbol, price in mark_prices.items()
+        }
+        direct = normalized_marks.get(normalize_symbol(f"{currency}TRY"))
+        if direct is not None and direct > 0:
+            return fee_amount * direct, None
+
+        inverse = normalized_marks.get(normalize_symbol(f"TRY{currency}"))
+        if inverse is not None and inverse > 0:
+            return fee_amount / inverse, None
+
+        return Decimal("0"), f"missing_fee_conversion:{currency}"
+
     def fetch_new_fills(self, symbol: str) -> FetchFillsResult:
         """Fetch fills with a lookback while preserving idempotency invariants.
 
@@ -134,11 +160,13 @@ class AccountingService:
                 last_update_ts=fill.ts,
             )
 
-            fee_try = Decimal("0")
-            if fill.fee_asset.upper() == "TRY":
-                fee_try = fill.fee
-            else:
-                fee_notes.append(f"fee_conversion_missing:{fill.fill_id}:{fill.fee_asset}")
+            fee_try, fee_note = self._convert_fee_to_try(
+                fee_asset=fill.fee_asset,
+                fee_amount=fill.fee,
+                mark_prices=mark_prices,
+            )
+            if fee_note is not None:
+                fee_notes.append(f"{fee_note}:{fill.fill_id}")
 
             if fill.side.lower() == "buy":
                 total_cost = (

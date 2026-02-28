@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
 
@@ -184,6 +185,11 @@ def run_health_checks(
         checks=checks,
         warnings=warnings,
         actions=actions,
+    )
+    _run_p14_accounting_checks(
+        db_path=db_path,
+        checks=checks,
+        warnings=warnings,
     )
 
     report = DoctorReport(checks=checks, errors=errors, warnings=warnings, actions=actions)
@@ -406,6 +412,172 @@ def _run_slo_checks(
     inst.gauge("doctor_slo_latency_ms", metrics["latency_p95_ms"])
     inst.gauge("doctor_slo_max_drawdown_ratio", metrics["max_drawdown_ratio"])
 
+
+
+def _run_p14_accounting_checks(
+    *,
+    db_path: str | None,
+    checks: list[DoctorCheck],
+    warnings: list[str],
+) -> None:
+    if db_path is None:
+        checks.append(DoctorCheck("p1_4", "coverage", "warn", "db_path not provided; skipping P1.4 checks"))
+        return
+
+    store = StateStore(db_path=db_path)
+    with store._connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()
+        ledger_event_count = int(row["c"]) if row is not None else 0
+        max_row = conn.execute("SELECT COALESCE(MAX(rowid), 0) AS m FROM ledger_events").fetchone()
+        max_rowid = int(max_row["m"]) if max_row is not None else 0
+        cp_rows = conn.execute("SELECT scope_id, last_rowid FROM ledger_reducer_checkpoints").fetchall()
+        applied_row = conn.execute("SELECT COUNT(*) AS c FROM applied_fills").fetchone()
+        applied_count = int(applied_row["c"]) if applied_row is not None else 0
+        stage4_count_row = conn.execute("SELECT COUNT(*) AS c FROM stage4_fills").fetchone()
+        stage4_fill_count = int(stage4_count_row["c"]) if stage4_count_row is not None else 0
+        cursor_rows = conn.execute(
+            "SELECT key, value FROM cursors WHERE key LIKE 'fills_cursor:%'"
+        ).fetchall()
+        duplicate_rows = conn.execute(
+            """
+            SELECT COALESCE(SUM(events_appended), 0) AS attempted,
+                   COALESCE(SUM(events_ignored), 0) AS ignored
+            FROM (
+                SELECT events_appended, events_ignored
+                FROM stage7_run_metrics
+                ORDER BY ts DESC
+                LIMIT 20
+            )
+            """
+        ).fetchone()
+        stage4_snapshots = conn.execute(
+            "SELECT ts, total_equity_try FROM pnl_snapshots ORDER BY ts DESC LIMIT 5"
+        ).fetchall()
+        stage7_metrics = conn.execute(
+            "SELECT ts, equity_try, net_pnl_try FROM stage7_ledger_metrics ORDER BY ts DESC LIMIT 5"
+        ).fetchall()
+
+    checks.append(
+        DoctorCheck(
+            "p1_4",
+            "ledger_event_count",
+            "pass",
+            f"event_count={ledger_event_count} max_rowid={max_rowid}",
+        )
+    )
+
+    cp_status = "pass"
+    cp_msg = f"checkpoints={len(cp_rows)} max_rowid={max_rowid}"
+    for cp in cp_rows:
+        last_rowid = int(cp["last_rowid"])
+        if last_rowid > max_rowid:
+            cp_status = "fail"
+            cp_msg = (
+                "checkpoint_rowid_monotonicity_violation "
+                f"scope_id={cp['scope_id']} checkpoint_rowid={last_rowid} max_rowid={max_rowid}"
+            )
+            break
+    checks.append(DoctorCheck("p1_4", "checkpoint_monotonicity", cp_status, cp_msg))
+
+    applied_status = "pass"
+    applied_msg = f"applied_fills={applied_count} stage4_fills={stage4_fill_count}"
+    if applied_count < stage4_fill_count:
+        applied_status = "fail"
+        applied_msg = (
+            "applied_fills_monotonicity_violation "
+            f"applied_fills={applied_count} stage4_fills={stage4_fill_count}"
+        )
+    checks.append(DoctorCheck("p1_4", "applied_fills_monotonicity", applied_status, applied_msg))
+
+    with store._connect() as conn:
+        max_fill_by_symbol = {
+            str(row["symbol"]): int(row["ts_ms"])
+            for row in conn.execute(
+                """
+                SELECT symbol, COALESCE(MAX(CAST(strftime('%s', ts) AS INTEGER) * 1000), 0) AS ts_ms
+                FROM stage4_fills
+                GROUP BY symbol
+                """
+            ).fetchall()
+        }
+
+    cursor_issues: list[str] = []
+    for row in cursor_rows:
+        key = str(row["key"])
+        value = str(row["value"])
+        symbol = key.split(":", 1)[1] if ":" in key else ""
+        if not value.isdigit():
+            continue
+        cursor_ms = int(value)
+        max_fill_ms = max_fill_by_symbol.get(symbol, 0)
+        if cursor_ms < max_fill_ms:
+            cursor_issues.append(f"{key} cursor={cursor_ms} max_fill_ms={max_fill_ms}")
+    if cursor_issues:
+        checks.append(
+            DoctorCheck(
+                "p1_4",
+                "fill_cursor_monotonicity",
+                "fail",
+                "fill cursor moved backwards: " + "; ".join(cursor_issues),
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck(
+                "p1_4",
+                "fill_cursor_monotonicity",
+                "pass",
+                f"fill cursors checked={len(cursor_rows)}",
+            )
+        )
+
+    attempted = int(duplicate_rows["attempted"]) if duplicate_rows is not None else 0
+    ignored = int(duplicate_rows["ignored"]) if duplicate_rows is not None else 0
+    duplicate_ratio = (Decimal(ignored) / Decimal(attempted)) if attempted > 0 else Decimal("0")
+    duplicate_status = "pass"
+    if attempted >= 10 and duplicate_ratio > Decimal("0.50"):
+        duplicate_status = "warn"
+        warnings.append(
+            f"high ledger dedupe ratio ignored={ignored} attempted={attempted} ratio={duplicate_ratio:.4f}"
+        )
+    checks.append(
+        DoctorCheck(
+            "p1_4",
+            "ledger_dedupe_rate",
+            duplicate_status,
+            f"attempted={attempted} ignored={ignored} ratio={duplicate_ratio:.4f}",
+        )
+    )
+
+    mismatch_status = "pass"
+    mismatch_msg = "insufficient snapshots for comparison"
+    pairs = min(len(stage4_snapshots), len(stage7_metrics))
+    if pairs > 0:
+        equity_diffs: list[Decimal] = []
+        pnl_diffs: list[Decimal] = []
+        stage4_baseline = Decimal(str(stage4_snapshots[-1]["total_equity_try"]))
+        for idx in range(pairs):
+            s4 = stage4_snapshots[idx]
+            s7 = stage7_metrics[idx]
+            stage4_equity = Decimal(str(s4["total_equity_try"]))
+            stage7_equity = Decimal(str(s7["equity_try"]))
+            stage4_net = stage4_equity - stage4_baseline
+            stage7_net = Decimal(str(s7["net_pnl_try"]))
+            equity_diffs.append(abs(stage4_equity - stage7_equity))
+            pnl_diffs.append(abs(stage4_net - stage7_net))
+        max_equity_diff = max(equity_diffs)
+        max_pnl_diff = max(pnl_diffs)
+        if max_equity_diff > Decimal("1") or max_pnl_diff > Decimal("1"):
+            mismatch_status = "warn"
+            warnings.append(
+                "accounting_vs_ledger_mismatch "
+                f"max_equity_diff={max_equity_diff} max_net_pnl_diff={max_pnl_diff}"
+            )
+        mismatch_msg = (
+            f"pairs={pairs} max_equity_diff={max_equity_diff} "
+            f"max_net_pnl_diff={max_pnl_diff}"
+        )
+    checks.append(DoctorCheck("p1_4", "accounting_ledger_consistency", mismatch_status, mismatch_msg))
 
 def _slo_metric_check(
     name: str,
