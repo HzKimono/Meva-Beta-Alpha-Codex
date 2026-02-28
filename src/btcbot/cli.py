@@ -2598,7 +2598,10 @@ def run_cycle_stage4(
     try:
         with single_instance_lock(db_path=resolved_db_path, account_key=TRADER_LOCK_ACCOUNT_KEY):
             logger.info("Running Stage 4 cycle")
-            result = cycle_runner.run_one_cycle(effective_settings)
+            result = cycle_runner.run_one_cycle(
+                effective_settings,
+                force_dry_run_submit=bool(force_dry_run),
+            )
             return result
     except Stage4ConfigurationError as exc:
         logger.exception(

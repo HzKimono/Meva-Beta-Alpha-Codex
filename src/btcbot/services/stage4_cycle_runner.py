@@ -133,7 +133,7 @@ class Stage4CycleRunner:
     def norm(symbol: str) -> str:
         return normalize_symbol(symbol)
 
-    def run_one_cycle(self, settings: Settings) -> int:
+    def run_one_cycle(self, settings: Settings, *, force_dry_run_submit: bool = False) -> int:
         instrumentation = get_instrumentation()
         cycle_started_monotonic = datetime.now(UTC)
         if settings is not None and settings.dry_run:
@@ -978,7 +978,7 @@ class Stage4CycleRunner:
             )
 
             final_mode = combine_modes(risk_decision.mode, degrade_decision.mode_override)
-            if settings.dry_run:
+            if force_dry_run_submit:
                 final_mode = Mode.NORMAL
             if degrade_decision.universe_cap is not None:
                 allowed_symbols = set(active_symbols[: degrade_decision.universe_cap])
