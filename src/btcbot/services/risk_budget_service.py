@@ -4,10 +4,10 @@ import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from btcbot.accounting.models import PortfolioAccountingState
+from btcbot.accounting.models import PortfolioAccountingState, quantize_money
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.risk_mode_codec import parse_risk_mode
@@ -20,6 +20,7 @@ from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 FEE_CONVERSION_MISSING_RATE_REASON = "fee_conversion_missing_rate"
+RISK_FEES_UNKNOWN_REASON = "fees_today_unknown"
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,8 @@ class RiskBudgetService:
                 f"ledger_event_count={ledger_event_count}"
             )
 
-        if ledger_event_count == last_event_count:
+
+        if ledger_event_count <= last_event_count:
             emit_decision(
                 logger,
                 {
@@ -126,7 +128,9 @@ class RiskBudgetService:
                     "payload": {
                         "checkpoint_id": ledger_checkpoint_id,
                         "ledger_event_count": ledger_event_count,
+                        "last_event_count": last_event_count,
                         "realized_pnl_total_try": str(realized_pnl_total_try),
+                        "last_realized_pnl_total_try": str(last_realized_total),
                     },
                 },
             )
@@ -139,11 +143,16 @@ class RiskBudgetService:
             )
 
         realized_delta = realized_pnl_total_try - last_realized_total
-        next_trading, next_treasury = self.budget_policy.apply_self_financing(
-            trading_capital_try=trading_capital,
-            treasury_try=treasury,
-            realized_pnl_delta_try=realized_delta,
-        )
+        next_trading = trading_capital
+        next_treasury = treasury
+        if realized_delta > 0:
+            next_trading, next_treasury = self.budget_policy.apply_self_financing(
+                trading_capital_try=trading_capital,
+                treasury_try=treasury,
+                realized_pnl_delta_try=realized_delta,
+            )
+        elif realized_delta < 0:
+            next_trading = quantize_money(trading_capital + realized_delta)
 
         if next_trading < 0 or next_treasury < 0:
             emit_decision(
@@ -175,6 +184,20 @@ class RiskBudgetService:
             last_event_count=ledger_event_count,
             last_checkpoint_id=ledger_checkpoint_id,
             last_cycle_id=cycle_id,
+        )
+
+        logger.info(
+            "capital_policy_checkpoint_applied",
+            extra={
+                "extra": {
+                    "cycle_id": cycle_id,
+                    "checkpoint_id": ledger_checkpoint_id,
+                    "delta_realized_try": str(realized_delta),
+                    "trading_capital_try": str(next_trading),
+                    "treasury_try": str(next_treasury),
+                    "last_event_count": ledger_event_count,
+                }
+            },
         )
 
         emit_decision(
@@ -241,7 +264,7 @@ class RiskBudgetService:
         largest_position_pct = self._compute_largest_position_pct(
             positions, mark_prices, pnl_report.equity_estimate
         )
-        fees_today = self._resolve_fees_today(pnl_report)
+        fees_today, fees_unknown = self._resolve_fees_today(pnl_report, live_mode=live_mode)
 
         missing_marks: list[str] = []
         if live_mode:
@@ -256,6 +279,7 @@ class RiskBudgetService:
                     missing_marks.append(symbol)
             missing_marks = sorted(set(missing_marks))
 
+        missing_currencies = tuple(sorted(set(pnl_report.fee_conversion_missing_currencies)))
         signals = RiskSignals(
             equity_try=pnl_report.equity_estimate,
             peak_equity_try=peak_equity,
@@ -264,8 +288,17 @@ class RiskBudgetService:
             gross_exposure_try=gross_exposure,
             largest_position_pct=largest_position_pct,
             fees_try_today=fees_today,
+            current_equity_try=pnl_report.equity_estimate,
+            realized_today_try=realized_today_try,
+            exposure_try=gross_exposure,
+            missing_mark_prices=tuple(missing_marks),
+            missing_currencies=missing_currencies,
         )
         mode, reasons = decide_mode(limits=limits, signals=signals)
+        if fees_unknown and live_mode and mode == Mode.NORMAL:
+            mode = Mode.REDUCE_RISK_ONLY
+            reasons = [RISK_FEES_UNKNOWN_REASON]
+
         if pnl_report.fee_conversion_missing_currencies:
             missing = list(sorted(set(pnl_report.fee_conversion_missing_currencies)))
             emit_decision(
@@ -299,19 +332,15 @@ class RiskBudgetService:
                 },
             )
             mode = Mode.OBSERVE_ONLY
-            reasons = ["mark_price_missing_fail_closed"]
+            reasons = [
+                "mark_price_missing_fail_closed",
+                f"missing_symbols_count={len(missing_marks)}",
+            ]
         decided_at = self.now_provider()
         if kill_switch_active:
             mode = Mode.OBSERVE_ONLY
             reasons = ["KILL_SWITCH"]
 
-        risk_decision = RiskDecision(
-            mode=mode,
-            reasons=reasons,
-            limits=limits,
-            signals=signals,
-            decided_at=decided_at,
-        )
         capital_state = self._load_or_init_capital_state(
             cycle_id=f"{today.isoformat()}:compute_decision",
             seed_trading_capital_try=pnl_report.equity_estimate,
@@ -384,6 +413,29 @@ class RiskBudgetService:
             if FEE_CONVERSION_MISSING_RATE_REASON in reasons:
                 budget_multiplier = min(budget_multiplier, Decimal("0.25"))
 
+        risk_decision = RiskDecision(
+            mode=mode,
+            reasons=reasons,
+            limits=limits,
+            signals=RiskSignals(
+                equity_try=signals.equity_try,
+                peak_equity_try=signals.peak_equity_try,
+                drawdown_try=signals.drawdown_try,
+                daily_pnl_try=signals.daily_pnl_try,
+                gross_exposure_try=signals.gross_exposure_try,
+                largest_position_pct=signals.largest_position_pct,
+                fees_try_today=signals.fees_try_today,
+                current_equity_try=signals.current_equity_try,
+                realized_today_try=signals.realized_today_try,
+                exposure_try=signals.exposure_try,
+                volatility_state=volatility_regime,
+                loss_streak=consecutive_loss_streak,
+                missing_mark_prices=signals.missing_mark_prices,
+                missing_currencies=signals.missing_currencies,
+            ),
+            decided_at=decided_at,
+        )
+
         decision = BudgetDecision(
             risk_decision=risk_decision,
             budget_view=RiskBudgetView(
@@ -444,31 +496,45 @@ class RiskBudgetService:
         persisted_decision = (
             decision.risk_decision if isinstance(decision, BudgetDecision) else decision
         )
-        if self.uow_factory is not None:
-            with self.uow_factory() as uow:
-                uow.risk.save_risk_decision(
-                    cycle_id=cycle_id,
-                    decision=persisted_decision,
-                    prev_mode=prev_mode,
+        try:
+            if self.uow_factory is not None:
+                with self.uow_factory() as uow:
+                    uow.risk.save_risk_decision(
+                        cycle_id=cycle_id,
+                        decision=persisted_decision,
+                        prev_mode=prev_mode,
+                    )
+                    uow.risk.upsert_risk_state_current(
+                        risk_mode=decision.mode,
+                        peak_equity_try=peak_equity,
+                        peak_equity_date=peak_day.isoformat(),
+                        fees_try_today=fees_today,
+                        fees_day=fees_day.isoformat(),
+                    )
+                return
+            self.state_store.persist_risk(
+                cycle_id=cycle_id,
+                decision=persisted_decision,
+                prev_mode=prev_mode,
+                risk_mode=decision.mode,
+                peak_equity_try=peak_equity,
+                peak_day=peak_day.isoformat(),
+                fees_today_try=fees_today,
+                fees_day=fees_day.isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if self.settings.live_trading:
+                logger.warning(
+                    "risk_decision_persist_failed",
+                    extra={
+                        "extra": {
+                            "cycle_id": cycle_id,
+                            "error_type": type(exc).__name__,
+                        }
+                    },
                 )
-                uow.risk.upsert_risk_state_current(
-                    risk_mode=decision.mode,
-                    peak_equity_try=peak_equity,
-                    peak_equity_date=peak_day.isoformat(),
-                    fees_try_today=fees_today,
-                    fees_day=fees_day.isoformat(),
-                )
-            return
-        self.state_store.persist_risk(
-            cycle_id=cycle_id,
-            decision=persisted_decision,
-            prev_mode=prev_mode,
-            risk_mode=decision.mode,
-            peak_equity_try=peak_equity,
-            peak_day=peak_day.isoformat(),
-            fees_today_try=fees_today,
-            fees_day=fees_day.isoformat(),
-        )
+                return
+            raise
 
     def _resolve_peak_equity(
         self,
@@ -480,10 +546,21 @@ class RiskBudgetService:
             return equity_try
         return max(Decimal(str(peak_raw)), equity_try)
 
-    def _resolve_fees_today(self, pnl_report: PnlReport) -> Decimal:
+    def _resolve_fees_today(self, pnl_report: PnlReport, *, live_mode: bool) -> tuple[Decimal, bool]:
         if pnl_report.fees_total_try is not None:
-            return Decimal(str(pnl_report.fees_total_try))
-        return Decimal(str(pnl_report.fees_total_by_currency.get("TRY", Decimal("0"))))
+            return Decimal(str(pnl_report.fees_total_try)), False
+        fee_try = Decimal(str(pnl_report.fees_total_by_currency.get("TRY", Decimal("0"))))
+        if live_mode:
+            self._warn_fee_unknown_if_needed()
+        return fee_try, live_mode
+
+    def _warn_fee_unknown_if_needed(self) -> None:
+        today = self.now_provider()
+        threshold = today - timedelta(minutes=30)
+        last = getattr(self, "_last_fee_unknown_warning_at", None)
+        if last is None or last <= threshold:
+            logger.warning("risk_budget_fees_try_today_unknown")
+            self._last_fee_unknown_warning_at = today
 
     def _compute_gross_exposure(
         self,
