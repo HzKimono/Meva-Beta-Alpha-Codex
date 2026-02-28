@@ -106,6 +106,12 @@ class DynamicUniverseService:
         instr.histogram("universe_fetch_pairs_ms", (perf_counter() - t0) * 1000.0)
         instr.counter("universe_candidates", len(symbols))
 
+        scan_budget_symbols = max(
+            int(settings.universe_top_n),
+            int(settings.universe_scan_budget_symbols),
+        )
+        orderbook_request_cap = max(1, int(settings.universe_max_orderbook_requests_per_cycle))
+
         filters = {
             "top_n": settings.universe_top_n,
             "spread_max_bps": str(settings.universe_spread_max_bps),
@@ -114,15 +120,20 @@ class DynamicUniverseService:
             "exclude_symbols": list(settings.universe_exclude_symbols),
             "orderbook_max_age_seconds": settings.universe_orderbook_max_age_seconds,
             "churn_max_per_day": settings.universe_churn_max_per_day,
+            "scan_budget_symbols": scan_budget_symbols,
+            "orderbook_request_cap": orderbook_request_cap,
         }
         ineligible_counts: dict[str, int] = {}
         candidates: list[_Candidate] = []
 
         excluded = {canonical_symbol(item) for item in settings.universe_exclude_symbols}
         now_bucket = self._bucket_ts(now_utc, settings.universe_history_bucket_minutes)
+        orderbook_requests = 0
+        scanned_symbols = symbols[:scan_budget_symbols]
+        skipped_for_scan_budget = max(0, len(symbols) - len(scanned_symbols))
 
         t_books = perf_counter()
-        for symbol in symbols:
+        for symbol in scanned_symbols:
             symbol_state = state_store.get_dynamic_universe_symbol_state(symbol) or {}
             if self._is_cooldown(symbol_state, now_utc):
                 self._inc(ineligible_counts, "cooldown")
@@ -137,6 +148,11 @@ class DynamicUniverseService:
                 self._inc(ineligible_counts, "stable_symbol")
                 continue
 
+            if orderbook_requests >= orderbook_request_cap:
+                self._inc(ineligible_counts, "scan_budget_exhausted")
+                continue
+
+            orderbook_requests += 1
             metrics = self._fetch_orderbook_metrics(exchange, symbol)
             if metrics is None:
                 self._inc(ineligible_counts, "orderbook_unavailable")
@@ -210,6 +226,11 @@ class DynamicUniverseService:
                     score=score,
                 )
             )
+        if skipped_for_scan_budget > 0:
+            ineligible_counts["scan_budget_exhausted"] = (
+                ineligible_counts.get("scan_budget_exhausted", 0) + skipped_for_scan_budget
+            )
+        instr.counter("universe_orderbook_requests_per_cycle", orderbook_requests)
         instr.histogram("universe_fetch_orderbooks_ms", (perf_counter() - t_books) * 1000.0)
 
         t_score = perf_counter()
@@ -288,6 +309,7 @@ class DynamicUniverseService:
                     "ineligible_counts": ineligible_counts,
                     "churn_count": churn_count,
                     "refreshed": not guarded,
+                    "orderbook_requests": orderbook_requests,
                 }
             },
         )

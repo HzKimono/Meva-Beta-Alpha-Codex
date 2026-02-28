@@ -774,6 +774,7 @@ def test_market_snapshot_falls_back_when_timestamp_missing() -> None:
 
     assert snapshot.fetched_at_by_symbol["BTCTRY"] is not None
     assert snapshot.age_seconds_by_symbol["BTCTRY"] >= Decimal("0")
+    assert snapshot.age_seconds_by_symbol["BTCTRY"] != Decimal("999999")
 
 
 def test_stale_market_snapshot_blocks_symbol_execution(monkeypatch, tmp_path, caplog) -> None:

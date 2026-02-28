@@ -1692,7 +1692,7 @@ class Stage4CycleRunner:
             get_orderbook_with_ts = getattr(base, "get_orderbook_with_timestamp", None)
         for symbol in symbols:
             normalized = self.norm(symbol)
-            observed_at: datetime | None = None
+            observed_at: datetime
             try:
                 fetch_started_at = datetime.now(UTC)
                 if callable(get_orderbook_with_ts):
@@ -1736,15 +1736,7 @@ class Stage4CycleRunner:
                 age_by_symbol[normalized] = Decimal("999999")
                 continue
             mark_prices[normalized] = mark
-            if observed_at is None:
-                logger.warning(
-                    "stale_market_data_timestamp_missing",
-                    extra={"extra": {"symbol": normalized}},
-                )
-                anomalies.add(normalized)
-                age_seconds = Decimal("999999")
-            else:
-                age_seconds = Decimal(str(max(0.0, (cycle_now - observed_at).total_seconds())))
+            age_seconds = Decimal(str(max(0.0, (cycle_now - observed_at).total_seconds())))
             fetch_ages.append(age_seconds)
             age_by_symbol[normalized] = age_seconds
             fetched_at_by_symbol[normalized] = observed_at

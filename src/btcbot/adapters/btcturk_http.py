@@ -248,6 +248,9 @@ class BtcturkHttpClient(ExchangeClient):
         self._last_429_ts: datetime | None = None
         self._last_retry_after_seconds: float | None = None
         self._consecutive_network_errors: int = 0
+        self._api_429_backoff_total: int = 0
+        self._orderbook_cache_hits_total: int = 0
+        self._orderbook_requests_total: int = 0
         self._orderbook_cache_ttl_s = max(0.0, orderbook_cache_ttl_s)
         self._orderbook_inflight_wait_timeout_s = max(0.1, orderbook_inflight_wait_timeout_s)
         self._live_rules_require_exchangeinfo = live_rules_require_exchangeinfo
@@ -297,6 +300,7 @@ class BtcturkHttpClient(ExchangeClient):
         state.consecutive_429 += 1
         self._last_429_ts = datetime.now(UTC)
         self._last_retry_after_seconds = retry_after_s
+        self._api_429_backoff_total += 1
         self._rate_limiter.penalize_on_429(group, retry_after_s)
         if state.consecutive_429 >= self._breaker_429_consecutive_threshold:
             cooldown = (
@@ -702,6 +706,7 @@ class BtcturkHttpClient(ExchangeClient):
             cached = self._orderbook_cache.get(key)
             now = monotonic()
             if cached is not None and cached[0] > now:
+                self._orderbook_cache_hits_total += 1
                 get_instrumentation().counter(
                     "orderbook_cache_hits_total", 1, attrs={"pair_symbol": pair_symbol}
                 )
@@ -735,6 +740,7 @@ class BtcturkHttpClient(ExchangeClient):
                 params["limit"] = limit
 
             path = "/api/v2/orderbook"
+            self._orderbook_requests_total += 1
             payload = self._get(path, params=params)
             data = payload.get("data")
             if not isinstance(data, dict):
@@ -768,6 +774,10 @@ class BtcturkHttpClient(ExchangeClient):
             cached = self._orderbook_cache.get(key)
             now = monotonic()
             if cached is not None and cached[0] > now:
+                self._orderbook_cache_hits_total += 1
+                get_instrumentation().counter(
+                    "orderbook_cache_hits_total", 1, attrs={"pair_symbol": pair_symbol}
+                )
                 return cached[1][0], cached[1][1], cached[2]
             inflight = self._orderbook_inflight.get(key)
             if inflight is None:
@@ -790,6 +800,7 @@ class BtcturkHttpClient(ExchangeClient):
             params: dict[str, str | int] = {"pairSymbol": pair_symbol}
             if limit is not None:
                 params["limit"] = limit
+            self._orderbook_requests_total += 1
             payload = self._get("/api/v2/orderbook", params=params)
             data = payload.get("data")
             if not isinstance(data, dict):
@@ -1009,6 +1020,9 @@ class BtcturkHttpClient(ExchangeClient):
             "consecutive_network_errors": self._consecutive_network_errors,
             "degraded": degraded,
             "open_groups": open_groups,
+            "api_429_backoff_total": self._api_429_backoff_total,
+            "orderbook_cache_hits_total": self._orderbook_cache_hits_total,
+            "orderbook_requests_total": self._orderbook_requests_total,
         }
 
     def health_check(self) -> bool:

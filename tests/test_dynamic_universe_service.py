@@ -71,6 +71,25 @@ class _MockExchange:
 
 
 
+class _CountingTimestampClient(_MockClient):
+    def __init__(
+        self,
+        pair_symbols: list[str],
+        books: dict[str, tuple[str, str, str, str]],
+        *,
+        ts: datetime,
+    ) -> None:
+        super().__init__(pair_symbols, books, ts=ts, include_timestamp=True)
+        self.orderbook_calls = 0
+
+    def get_orderbook_with_timestamp(self, symbol: str) -> tuple[str, str, int]:
+        self.orderbook_calls += 1
+        bid_price, _bid_qty, ask_price, _ask_qty = self._books[symbol]
+        return bid_price, ask_price, int(self._ts.timestamp() * 1000)
+
+
+
+
 class _ExchangeTimestampOnly:
     def __init__(self, *, pair_symbols: list[str], books: dict[str, tuple[str, str, str, str]], observed_at: datetime) -> None:
         self._client = _MockClient(pair_symbols, books, ts=observed_at)
@@ -430,4 +449,34 @@ def test_exchange_level_timestamped_orderbook_is_used(tmp_path) -> None:
 
     assert result.ineligible_counts.get("orderbook_unavailable", 0) == 0
     assert result.ineligible_counts.get("depth_unavailable", 0) == 1
+
+
+def test_scan_budget_caps_orderbook_requests(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    symbols = ["AAAATRY", "BBBBTRY", "CCCCTRY", "DDDDTRY", "EEEETRY", "FFFFTRY"]
+    books = {symbol: ("120", "500", "121", "500") for symbol in symbols}
+    client = _CountingTimestampClient(symbols, books, ts=now)
+    exchange = _MockExchange(client)
+    _seed_lookback(store, now, symbols)
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="[]",
+            UNIVERSE_TOP_N=1,
+            UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
+            UNIVERSE_SCAN_BUDGET_SYMBOLS=4,
+            UNIVERSE_MAX_ORDERBOOK_REQUESTS_PER_CYCLE=2,
+        ),
+        now_utc=now,
+        cycle_id="budget-1",
+    )
+
+    assert client.orderbook_calls == 2
+    assert result.ineligible_counts.get("scan_budget_exhausted", 0) == 4
+    assert len(result.selected_symbols) <= 1
 
