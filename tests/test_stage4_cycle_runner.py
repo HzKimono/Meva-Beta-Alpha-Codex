@@ -12,7 +12,7 @@ from btcbot.adapters.btcturk_http import BtcturkHttpClient
 from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import OrderSide, PairInfo
-from btcbot.domain.stage4 import Order
+from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Order
 from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
@@ -1212,3 +1212,154 @@ def test_summary_reject_context_exposes_min_notional_fields() -> None:
     assert context["q_price"] == "100.00"
     assert context["min_required_settings"] == "100"
     assert context["min_required_exchange_rule"] == "100"
+
+
+
+
+def _prefilter_pair_info(min_total: str = "120") -> list[PairInfo]:
+    return [
+        PairInfo(
+            pairSymbol="BTCTRY",
+            numeratorScale=4,
+            denominatorScale=2,
+            minTotalAmount=Decimal(min_total),
+            tickSize=Decimal("0.01"),
+            stepSize=Decimal("0.0001"),
+        )
+    ]
+
+
+def _submit_action(*, price: str, qty: str, cid: str) -> LifecycleAction:
+    return LifecycleAction(
+        action_type=LifecycleActionType.SUBMIT,
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal(price),
+        qty=Decimal(qty),
+        reason="test",
+        client_order_id=cid,
+    )
+def test_prefilter_min_notional_rescues_floor_rounding_gap(caplog) -> None:
+    runner = Stage4CycleRunner()
+    action = _submit_action(price="100.005", qty="1.19995", cid="cid-rescue")
+
+    with caplog.at_level(logging.INFO):
+        filtered, dropped = runner._prefilter_submit_actions_min_notional(
+            actions=[action],
+            pair_info=_prefilter_pair_info(),
+            min_order_notional_try=Decimal("120"),
+            cycle_id="cycle-1",
+        )
+
+    assert dropped == 0
+    assert len(filtered) == 1
+    rescued = filtered[0]
+    assert rescued.qty >= action.qty
+    assert rescued.price * rescued.qty >= Decimal("120")
+    assert all(item.price * item.qty >= Decimal("120") for item in filtered)
+
+    rescue_records = [r for r in caplog.records if r.msg == "stage4_prefilter_min_notional_rescue"]
+    assert len(rescue_records) == 1
+    rescue_extra = rescue_records[0].extra
+    assert {"symbol", "side", "min_required", "before_notional", "after_notional"}.issubset(
+        rescue_extra
+    )
+
+
+def test_prefilter_min_notional_drops_when_intent_below_minimum(caplog) -> None:
+    runner = Stage4CycleRunner()
+    action = _submit_action(price="100", qty="1.19995", cid="cid-drop")
+
+    with caplog.at_level(logging.INFO):
+        filtered, dropped = runner._prefilter_submit_actions_min_notional(
+            actions=[action],
+            pair_info=_prefilter_pair_info(),
+            min_order_notional_try=Decimal("120"),
+            cycle_id="cycle-1",
+        )
+
+    assert filtered == []
+    assert dropped == 1
+    drop_records = [r for r in caplog.records if r.msg == "stage4_prefilter_drop_min_notional"]
+    assert len(drop_records) == 1
+    drop_extra = drop_records[0].extra
+    assert {"symbol", "required_min_notional_try", "reason_code"}.issubset(drop_extra)
+
+
+
+
+def test_resolve_action_intent_notional_precedence() -> None:
+    runner = Stage4CycleRunner()
+    action = _submit_action(price="10", qty="5", cid="cid-resolve")
+
+    assert runner._resolve_action_intent_notional(action) is None
+    object.__setattr__(action, "target_notional_try", Decimal("70"))
+    assert runner._resolve_action_intent_notional(action) == Decimal("70")
+    object.__setattr__(action, "notional_try", Decimal("80"))
+    assert runner._resolve_action_intent_notional(action) == Decimal("80")
+    object.__setattr__(action, "intent_notional_try", Decimal("90"))
+    assert runner._resolve_action_intent_notional(action) == Decimal("90")
+
+def test_prefilter_min_notional_intent_resolution_precedence() -> None:
+    runner = Stage4CycleRunner()
+
+    with_intent = _submit_action(price="100", qty="1.1", cid="cid-intent")
+    object.__setattr__(with_intent, "target_notional_try", Decimal("200"))
+    object.__setattr__(with_intent, "notional_try", Decimal("200"))
+    object.__setattr__(with_intent, "intent_notional_try", Decimal("110"))
+
+    with_notional = _submit_action(price="100", qty="1.1", cid="cid-notional")
+    object.__setattr__(with_notional, "target_notional_try", Decimal("200"))
+    object.__setattr__(with_notional, "notional_try", Decimal("120"))
+
+    with_target = _submit_action(price="100", qty="1.1", cid="cid-target")
+    object.__setattr__(with_target, "target_notional_try", Decimal("120"))
+
+    fallback = _submit_action(price="100.005", qty="1.19995", cid="cid-fallback")
+
+    filtered, dropped = runner._prefilter_submit_actions_min_notional(
+        actions=[with_intent, with_notional, with_target, fallback],
+        pair_info=_prefilter_pair_info(),
+        min_order_notional_try=Decimal("120"),
+        cycle_id="cycle-1",
+    )
+
+    assert dropped == 1
+    ids = {item.client_order_id for item in filtered}
+    assert ids == {"cid-notional", "cid-target", "cid-fallback"}
+
+
+def test_prefilter_min_notional_drops_safely_when_quantized_price_is_zero() -> None:
+    runner = Stage4CycleRunner()
+    zero_price_action = _submit_action(price="0.009", qty="20000", cid="cid-zero-price")
+
+    filtered, dropped = runner._prefilter_submit_actions_min_notional(
+        actions=[zero_price_action],
+        pair_info=_prefilter_pair_info(),
+        min_order_notional_try=Decimal("120"),
+        cycle_id="cycle-1",
+    )
+
+    assert filtered == []
+    assert dropped == 1
+
+
+def test_prefilter_min_notional_is_deterministic_across_calls() -> None:
+    runner = Stage4CycleRunner()
+    action = _submit_action(price="100.005", qty="1.19995", cid="cid-deterministic")
+
+    first_filtered, first_dropped = runner._prefilter_submit_actions_min_notional(
+        actions=[action],
+        pair_info=_prefilter_pair_info(),
+        min_order_notional_try=Decimal("120"),
+        cycle_id="cycle-1",
+    )
+    second_filtered, second_dropped = runner._prefilter_submit_actions_min_notional(
+        actions=[action],
+        pair_info=_prefilter_pair_info(),
+        min_order_notional_try=Decimal("120"),
+        cycle_id="cycle-1",
+    )
+
+    assert first_dropped == second_dropped == 0
+    assert first_filtered == second_filtered

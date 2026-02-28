@@ -2239,7 +2239,47 @@ class Stage4CycleRunner:
             q_qty = Quantizer.quantize_qty(action.qty, rules)
             notional_try = q_price * q_qty
             min_required = max(Decimal(str(min_order_notional_try)), rules.min_notional_try)
+            intent_notional_try = self._resolve_action_intent_notional(action)
+            if intent_notional_try is None:
+                intent_notional_try = action.price * action.qty
             if notional_try < min_required:
+                if intent_notional_try >= min_required and q_price > 0:
+                    qty_needed = min_required / q_price
+                    q_qty_rescued = Quantizer.quantize_qty_up(qty_needed, rules)
+                    rescued_notional_try = q_price * q_qty_rescued
+                    if rescued_notional_try >= min_required:
+                        logger.info(
+                            "stage4_prefilter_min_notional_rescue",
+                            extra={
+                                "extra": {
+                                    "cycle_id": cycle_id,
+                                    "symbol": self.norm(action.symbol),
+                                    "side": str(action.side),
+                                    "client_order_id": action.client_order_id,
+                                    "min_required": str(min_required),
+                                    "intent_notional_try": str(intent_notional_try),
+                                    "before_notional": str(notional_try),
+                                    "after_notional": str(rescued_notional_try),
+                                    "q_price": str(q_price),
+                                    "old_qty": str(q_qty),
+                                    "new_qty": str(q_qty_rescued),
+                                }
+                            },
+                        )
+                        filtered.append(
+                            LifecycleAction(
+                                action_type=action.action_type,
+                                symbol=action.symbol,
+                                side=action.side,
+                                price=q_price,
+                                qty=q_qty_rescued,
+                                reason=action.reason,
+                                client_order_id=action.client_order_id,
+                                exchange_order_id=action.exchange_order_id,
+                                replace_for_client_order_id=action.replace_for_client_order_id,
+                            )
+                        )
+                        continue
                 dropped += 1
                 logger.info(
                     "stage4_prefilter_drop_min_notional",
@@ -2252,6 +2292,7 @@ class Stage4CycleRunner:
                             "q_price": str(q_price),
                             "q_qty": str(q_qty),
                             "order_notional_try": str(notional_try),
+                            "intent_notional_try": str(intent_notional_try),
                             "required_min_notional_try": str(min_required),
                             "reason_code": "prefilter_min_notional",
                         }
@@ -2260,6 +2301,17 @@ class Stage4CycleRunner:
                 continue
             filtered.append(action)
         return filtered, dropped
+
+    def _resolve_action_intent_notional(self, action: LifecycleAction) -> Decimal | None:
+        for attr in ("intent_notional_try", "notional_try", "target_notional_try"):
+            value = getattr(action, attr, None)
+            if value is None:
+                continue
+            try:
+                return Decimal(str(value))
+            except Exception:  # noqa: BLE001
+                continue
+        return None
 
     def _fills_cursor_key(self, symbol: str) -> str:
         return f"fills_cursor:{self.norm(symbol)}"
