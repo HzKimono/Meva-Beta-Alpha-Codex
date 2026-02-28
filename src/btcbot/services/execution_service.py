@@ -118,9 +118,12 @@ class ExecutionService:
         self.unknown_reprobe_escalation_attempts = max(1, unknown_reprobe_escalation_attempts)
         self.unknown_reprobe_force_observe_only = unknown_reprobe_force_observe_only
         self.unknown_reprobe_force_kill_switch = unknown_reprobe_force_kill_switch
-        self.process_role = coerce_process_role(
-            process_role or get_process_role_from_env().value
-        ).value
+        explicit_env_role = os.getenv("PROCESS_ROLE") or os.getenv("APP_ROLE")
+        env_role = get_process_role_from_env().value
+        default_role = (
+            "LIVE" if live_trading_enabled and explicit_env_role is None else env_role
+        )
+        self.process_role = coerce_process_role(process_role or default_role).value
         self.unknown_reprobe_max_lookback_seconds = max(
             60 * 60, unknown_reprobe_max_lookback_seconds
         )
@@ -2200,6 +2203,8 @@ class ExecutionService:
         intent_id: str | None = None,
     ) -> None:
         policy = validate_live_side_effects_policy(
+            process_role=self.process_role,
+            enforce_monitor_role=True,
             dry_run=self.dry_run,
             kill_switch=self.kill_switch,
             live_trading_enabled=self.live_trading_enabled,

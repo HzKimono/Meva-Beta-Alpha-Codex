@@ -101,3 +101,19 @@ def test_policy_reasons_map_to_canonical_reason_codes() -> None:
         ReasonCode.POLICY_BLOCK_NOT_ARMED,
         ReasonCode.POLICY_BLOCK_ACK_MISSING,
     ]
+
+
+def test_monitor_role_always_blocks_side_effects() -> None:
+    result = validate_live_side_effects_policy(
+        process_role="MONITOR",
+        enforce_monitor_role=True,
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+    )
+
+    assert result.allowed is False
+    assert result.reasons == ["MONITOR_ROLE"]
+    assert result.message == "MONITOR role blocks side effects"
+    assert policy_reason_to_code(result.reasons[0]) == ReasonCode.POLICY_BLOCK_MONITOR_ROLE

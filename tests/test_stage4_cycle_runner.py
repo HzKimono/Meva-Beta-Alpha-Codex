@@ -1527,3 +1527,108 @@ def test_stage4_safety_net_failure_logs_marker_and_continues(monkeypatch, tmp_pa
         assert runner.run_one_cycle(settings) == 0
 
     assert any(record.message == "stage4_mark_price_safety_net_failed" for record in caplog.records)
+
+
+def test_live_dynamic_universe_empty_falls_back_to_settings_symbols(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    class _EmptySelectionService:
+        def select(self, **kwargs):
+            del kwargs
+            return type(
+                "Selection",
+                (),
+                {
+                    "selected_symbols": (),
+                    "scores": {},
+                    "filters": {},
+                    "ineligible_counts": {},
+                    "refreshed": True,
+                },
+            )()
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.DynamicUniverseService",
+        lambda: _EmptySelectionService(),
+    )
+
+    db_path = tmp_path / "runner_live_universe_fallback.sqlite"
+    settings = Settings(
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        SAFE_MODE=False,
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS='["BTCTRY", "ETHTRY"]',
+        DYNAMIC_UNIVERSE_ENABLED=True,
+        DYNAMIC_UNIVERSE_LIVE_FALLBACK_ENABLED=True,
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+    orderbook_symbols = {
+        call.split(":", 1)[1]
+        for call in exchange.calls
+        if call.startswith("orderbook:")
+    }
+    assert {"BTCTRY", "ETHTRY"}.issubset(orderbook_symbols)
+
+
+def test_live_dynamic_universe_empty_no_fallback_when_disabled(monkeypatch, tmp_path, caplog) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    class _EmptySelectionService:
+        def select(self, **kwargs):
+            del kwargs
+            return type(
+                "Selection",
+                (),
+                {
+                    "selected_symbols": (),
+                    "scores": {},
+                    "filters": {},
+                    "ineligible_counts": {},
+                    "refreshed": True,
+                },
+            )()
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.DynamicUniverseService",
+        lambda: _EmptySelectionService(),
+    )
+
+    db_path = tmp_path / "runner_live_universe_no_fallback.sqlite"
+    settings = Settings(
+        DRY_RUN=False,
+        KILL_SWITCH=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        SAFE_MODE=False,
+        BTCTURK_API_KEY="key",
+        BTCTURK_API_SECRET="secret",
+        STATE_DB_PATH=str(db_path),
+        SYMBOLS='["BTCTRY", "ETHTRY"]',
+        DYNAMIC_UNIVERSE_ENABLED=True,
+        DYNAMIC_UNIVERSE_LIVE_FALLBACK_ENABLED=False,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert runner.run_one_cycle(settings) == 0
+
+    assert any(call.startswith("orderbook:") for call in exchange.calls)
+    assert any(
+        record.message == "stage4_dynamic_universe_empty_live_no_fallback"
+        for record in caplog.records
+    )

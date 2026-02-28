@@ -15,6 +15,7 @@ from btcbot.services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 _BPS = Decimal("10000")
+_EMPTY_SELECTION_LOG_THRESHOLD = 2
 _STABLE_TOKENS = {
     "USDT",
     "USDC",
@@ -236,6 +237,10 @@ class DynamicUniverseService:
             ineligible_counts["scan_budget_exhausted"] = (
                 ineligible_counts.get("scan_budget_exhausted", 0) + skipped_for_scan_budget
             )
+        diagnostics.setdefault("timestamp_parse_fail_count", 0)
+        diagnostics["depth_unavailable_count"] = ineligible_counts.get("depth_unavailable", 0)
+        diagnostics["orderbook_unavailable_count"] = ineligible_counts.get("orderbook_unavailable", 0)
+        diagnostics["stale_filtered_count"] = ineligible_counts.get("stale_orderbook", 0)
         if diagnostics:
             filters["diagnostics"] = dict(sorted(diagnostics.items()))
         instr.counter("universe_orderbook_requests_per_cycle", orderbook_requests)
@@ -305,6 +310,21 @@ class DynamicUniverseService:
         instr.gauge("universe_selected_count", float(len(selected)))
         instr.gauge("universe_churn_count", float(churn_count))
 
+        if len(selected) <= _EMPTY_SELECTION_LOG_THRESHOLD:
+            logger.info(
+                "dynamic_universe_empty",
+                extra={
+                    "extra": {
+                        "selected": len(selected),
+                        "candidates": len(scanned_symbols),
+                        "parse_fail": diagnostics.get("timestamp_parse_fail_count", 0),
+                        "depth_unavail": ineligible_counts.get("depth_unavailable", 0),
+                        "orderbook_unavail": ineligible_counts.get("orderbook_unavailable", 0),
+                        "stale": ineligible_counts.get("stale_orderbook", 0),
+                    }
+                },
+            )
+
         logger.info(
             "dynamic_universe_selected",
             extra={
@@ -365,7 +385,11 @@ class DynamicUniverseService:
             try:
                 fetched_at = datetime.now(UTC)
                 data = getter(symbol)
-                parsed = self._parse_timestamped_orderbook(data, fallback_observed_at=fetched_at)
+                parsed = self._parse_timestamped_orderbook(
+                    data,
+                    fallback_observed_at=fetched_at,
+                    diagnostics=diagnostics,
+                )
                 if parsed is not None:
                     return parsed
             except Exception:  # noqa: BLE001
@@ -394,6 +418,7 @@ class DynamicUniverseService:
                         data,
                         payload,
                         fallback_observed_at=fetched_at,
+                        diagnostics=diagnostics,
                     )
                     if parsed is not None:
                         return parsed
@@ -434,18 +459,25 @@ class DynamicUniverseService:
         )
 
     def _parse_timestamped_orderbook(
-        self, data: object, *, fallback_observed_at: datetime
+        self,
+        data: object,
+        *,
+        fallback_observed_at: datetime,
+        diagnostics: dict[str, int],
     ) -> _OrderbookMetrics | None:
         if isinstance(data, dict):
             return self._parse_raw_orderbook(
                 data,
                 data,
                 fallback_observed_at=fallback_observed_at,
+                diagnostics=diagnostics,
             )
         if isinstance(data, tuple) and len(data) >= 3:
             bid = Decimal(str(data[0]))
             ask = Decimal(str(data[1]))
-            observed_at = self._parse_timestamp(data[2]) or fallback_observed_at
+            observed_at = (
+                self._parse_timestamp(data[2], diagnostics=diagnostics) or fallback_observed_at
+            )
             if bid <= 0 or ask <= 0 or ask < bid:
                 return None
             mid = (bid + ask) / Decimal("2")
@@ -464,6 +496,7 @@ class DynamicUniverseService:
         payload: dict[str, object] | None = None,
         *,
         fallback_observed_at: datetime,
+        diagnostics: dict[str, int],
     ) -> _OrderbookMetrics | None:
         bids = data.get("bids")
         asks = data.get("asks")
@@ -484,11 +517,11 @@ class DynamicUniverseService:
             return None
         if bid_price <= 0 or ask_price <= 0 or ask_price < bid_price or bid_qty < 0 or ask_qty < 0:
             return None
-        observed_at = self._parse_timestamp(data.get("timestamp"))
+        observed_at = self._parse_timestamp(data.get("timestamp"), diagnostics=diagnostics)
         if observed_at is None and isinstance(payload, dict):
-            observed_at = self._parse_timestamp(payload.get("timestamp"))
+            observed_at = self._parse_timestamp(payload.get("timestamp"), diagnostics=diagnostics)
         if observed_at is None and isinstance(payload, dict):
-            observed_at = self._parse_timestamp(payload.get("serverTime"))
+            observed_at = self._parse_timestamp(payload.get("serverTime"), diagnostics=diagnostics)
         if observed_at is None:
             observed_at = fallback_observed_at
         mid = (bid_price + ask_price) / Decimal("2")
@@ -510,22 +543,33 @@ class DynamicUniverseService:
         return getattr(base, method_name, None)
 
     @staticmethod
-    def _parse_timestamp(raw: object) -> datetime | None:
+    def _parse_timestamp(raw: object, *, diagnostics: dict[str, int] | None = None) -> datetime | None:
+        def _mark_parse_failure() -> None:
+            if diagnostics is not None:
+                diagnostics["timestamp_parse_fail_count"] = (
+                    diagnostics.get("timestamp_parse_fail_count", 0) + 1
+                )
+
         if raw is None:
             return None
         if isinstance(raw, (int, float)):
-            value = float(raw)
-            if value > 1_000_000_000_000:
-                value /= 1000.0
-            return datetime.fromtimestamp(value, tz=UTC)
+            try:
+                value = float(raw)
+                if value > 1_000_000_000_000:
+                    value /= 1000.0
+                return datetime.fromtimestamp(value, tz=UTC)
+            except (OverflowError, OSError, ValueError):
+                _mark_parse_failure()
+                return None
         if isinstance(raw, str):
             text = raw.strip()
             if text.isdigit():
-                return DynamicUniverseService._parse_timestamp(int(text))
+                return DynamicUniverseService._parse_timestamp(int(text), diagnostics=diagnostics)
             try:
                 parsed = datetime.fromisoformat(text)
                 return ensure_utc(parsed)
             except ValueError:
+                _mark_parse_failure()
                 return None
         return None
 

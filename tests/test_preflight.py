@@ -120,3 +120,25 @@ def test_preflight_passes_for_dry_run_profile(tmp_path) -> None:
 
     assert report["profile"] == "dry-run"
     assert report["passed"] is True
+
+
+def test_preflight_includes_role_lock_and_policy_summary(tmp_path) -> None:
+    settings = Settings(
+        DRY_RUN=True,
+        KILL_SWITCH=False,
+        PROCESS_ROLE="MONITOR",
+        STATE_DB_PATH=str(tmp_path / "monitor_state.db"),
+        MAX_NOTIONAL_PER_ORDER_TRY="100",
+    )
+
+    report = run_preflight_checks(
+        settings=settings,
+        profile="dry-run",
+        auth_check=lambda _settings: (False, "should_be_skipped"),
+    )
+
+    assert report["process_role"] == "MONITOR"
+    assert report["os_lock"]["owner_pid_alive"] in {True, False}
+    assert "active_instances" in report["db_instance_lock"]
+    assert report["side_effects_policy"]["allowed"] is False
+    assert report["side_effects_policy"]["reasons"] == ["MONITOR_ROLE"]

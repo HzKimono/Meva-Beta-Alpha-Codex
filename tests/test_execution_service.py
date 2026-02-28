@@ -697,6 +697,23 @@ def test_live_mode_requires_arming(tmp_path) -> None:
         service._ensure_live_side_effects_allowed()
 
 
+def test_monitor_role_blocks_live_side_effects_even_if_live_flags_enabled(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = RecordingExchange()
+    service = ExecutionService(
+        exchange=exchange,
+        state_store=store,
+        dry_run=False,
+        kill_switch=False,
+        live_trading_enabled=True,
+        live_trading_ack=True,
+        process_role="MONITOR",
+    )
+
+    with pytest.raises(LiveTradingNotArmedError, match="MONITOR role blocks side effects"):
+        service._ensure_live_side_effects_allowed()
+
+
 def _stage3_intent() -> Intent:
     return Intent.create(
         cycle_id="cycle-stage3",

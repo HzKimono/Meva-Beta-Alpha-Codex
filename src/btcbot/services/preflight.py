@@ -8,8 +8,11 @@ from typing import Any
 
 from btcbot.adapters.btcturk_http import BtcturkHttpClient
 from btcbot.config import Settings
-from btcbot.obs.process_role import ProcessRole
+from btcbot.obs.process_role import ProcessRole, coerce_process_role
+from btcbot.security.secrets import is_trading_blocked_by_policy
+from btcbot.services.process_lock import get_lock_diagnostics
 from btcbot.services.state_store import StateStore
+from btcbot.services.trading_policy import validate_live_side_effects_policy
 
 
 def _default_private_auth_check(settings: Settings) -> tuple[bool, str]:
@@ -42,6 +45,7 @@ def run_preflight_checks(
     is_live_profile = profile_normalized == "live"
     resolved_db_path = str(Path(db_path or settings.state_db_path).expanduser())
     checks: list[dict[str, Any]] = []
+    process_role = coerce_process_role(getattr(settings, "process_role", None)).value
 
     store: StateStore | None = None
     db_ok = True
@@ -72,7 +76,53 @@ def run_preflight_checks(
                 store.release_instance_lock(status="ended")
             except Exception:  # noqa: BLE001
                 pass
+    os_lock_key = "trader-writer" if process_role == ProcessRole.LIVE.value else "monitor"
+    os_lock = get_lock_diagnostics(db_path=resolved_db_path, account_key=os_lock_key)
     checks.append({"name": "db_lock_and_writable", "ok": db_ok, "detail": db_detail})
+
+    active_instances: list[dict[str, Any]] = []
+    current_instance_id = ""
+    if store is not None:
+        ttl_cutoff = int(datetime.now(UTC).timestamp()) - int(store.process_instance_ttl_seconds)
+        with store.transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT instance_id, pid, heartbeat_at_epoch
+                FROM process_instances
+                WHERE db_path = ? AND status = 'active'
+                ORDER BY heartbeat_at_epoch DESC
+                """,
+                (store.db_path_abs,),
+            ).fetchall()
+        active_instances = [
+            {
+                "instance_id": str(row["instance_id"]),
+                "pid": int(row["pid"]),
+                "heartbeat_at_epoch": int(row["heartbeat_at_epoch"]),
+                "ttl_fresh": int(row["heartbeat_at_epoch"]) >= ttl_cutoff,
+            }
+            for row in rows
+        ]
+        current_instance_id = str(store.instance_id)
+
+    policy = validate_live_side_effects_policy(
+        process_role=process_role,
+        enforce_monitor_role=True,
+        dry_run=bool(settings.dry_run),
+        kill_switch=bool(settings.kill_switch),
+        live_trading_enabled=bool(settings.live_trading),
+        live_trading_ack=bool(settings.live_trading_ack == "I_UNDERSTAND"),
+    )
+    if process_role == ProcessRole.MONITOR.value:
+        policy = validate_live_side_effects_policy(
+            process_role=process_role,
+            enforce_monitor_role=True,
+            dry_run=False,
+            kill_switch=False,
+            live_trading_enabled=True,
+            live_trading_ack=True,
+        )
+    secrets_policy_blocked = bool(is_trading_blocked_by_policy())
 
     live_armed_by_env = bool(settings.is_live_trading_enabled() and not settings.dry_run)
     checks.append(
@@ -177,7 +227,28 @@ def run_preflight_checks(
     passed = all(bool(check["ok"]) for check in checks)
     return {
         "profile": "live" if is_live_profile else "dry-run",
+        "process_role": process_role,
         "db_path": resolved_db_path,
+        "os_lock": {
+            "account_key": os_lock_key,
+            "lock_path": str(os_lock.lock_path),
+            "owner_pid": os_lock.owner_pid,
+            "owner_pid_alive": bool(os_lock.owner_pid_alive),
+        },
+        "db_instance_lock": {
+            "instance_id": current_instance_id,
+            "active_instances": active_instances,
+            "conflict_risk": len([r for r in active_instances if r.get("ttl_fresh")]) > 1,
+        },
+        "side_effects_policy": {
+            "allowed": bool(policy.allowed),
+            "reasons": list(policy.reasons),
+            "message": policy.message,
+        },
+        "trading_secrets_policy": {
+            "blocked": secrets_policy_blocked,
+            "reason": "TRADING_BLOCKED_BY_POLICY" if secrets_policy_blocked else "ok",
+        },
         "passed": passed,
         "checks": checks,
         "ts": datetime.now(UTC).isoformat(),
