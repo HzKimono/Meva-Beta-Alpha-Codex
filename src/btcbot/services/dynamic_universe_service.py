@@ -124,6 +124,7 @@ class DynamicUniverseService:
             "orderbook_request_cap": orderbook_request_cap,
         }
         ineligible_counts: dict[str, int] = {}
+        diagnostics: dict[str, int] = {}
         candidates: list[_Candidate] = []
 
         excluded = {canonical_symbol(item) for item in settings.universe_exclude_symbols}
@@ -153,7 +154,12 @@ class DynamicUniverseService:
                 continue
 
             orderbook_requests += 1
-            metrics = self._fetch_orderbook_metrics(exchange, symbol)
+            metrics = self._fetch_orderbook_metrics(
+                exchange,
+                symbol,
+                cycle_id=cycle_id,
+                diagnostics=diagnostics,
+            )
             if metrics is None:
                 self._inc(ineligible_counts, "orderbook_unavailable")
                 continue
@@ -230,6 +236,8 @@ class DynamicUniverseService:
             ineligible_counts["scan_budget_exhausted"] = (
                 ineligible_counts.get("scan_budget_exhausted", 0) + skipped_for_scan_budget
             )
+        if diagnostics:
+            filters["diagnostics"] = dict(sorted(diagnostics.items()))
         instr.counter("universe_orderbook_requests_per_cycle", orderbook_requests)
         instr.histogram("universe_fetch_orderbooks_ms", (perf_counter() - t_books) * 1000.0)
 
@@ -307,6 +315,7 @@ class DynamicUniverseService:
                     "score_breakdown": score_breakdown,
                     "filters": filters,
                     "ineligible_counts": ineligible_counts,
+                    "diagnostics": diagnostics,
                     "churn_count": churn_count,
                     "refreshed": not guarded,
                     "orderbook_requests": orderbook_requests,
@@ -341,8 +350,16 @@ class DynamicUniverseService:
                 pairs.append(normalized)
         return sorted(set(pairs))
 
-    def _fetch_orderbook_metrics(self, exchange: object, symbol: str) -> _OrderbookMetrics | None:
+    def _fetch_orderbook_metrics(
+        self,
+        exchange: object,
+        symbol: str,
+        *,
+        cycle_id: str,
+        diagnostics: dict[str, int],
+    ) -> _OrderbookMetrics | None:
         base = getattr(exchange, "client", exchange)
+        instr = get_instrumentation()
         getter = self._resolve_method(exchange, "get_orderbook_with_timestamp")
         if callable(getter):
             try:
@@ -352,7 +369,19 @@ class DynamicUniverseService:
                 if parsed is not None:
                     return parsed
             except Exception:  # noqa: BLE001
-                pass
+                self._inc(diagnostics, "orderbook_parse_failure_timestamped")
+                instr.counter("universe_orderbook_parse_failure_timestamped", 1)
+                logger.debug(
+                    "dynamic_universe_orderbook_parse_failed",
+                    extra={
+                        "extra": {
+                            "symbol": symbol,
+                            "cycle_id": cycle_id,
+                            "branch": "get_orderbook_with_timestamp",
+                        }
+                    },
+                    exc_info=True,
+                )
 
         get_raw = getattr(base, "_get", None)
         if callable(get_raw) and not callable(getter):
@@ -369,7 +398,19 @@ class DynamicUniverseService:
                     if parsed is not None:
                         return parsed
             except Exception:  # noqa: BLE001
-                pass
+                self._inc(diagnostics, "orderbook_parse_failure_raw")
+                instr.counter("universe_orderbook_parse_failure_raw", 1)
+                logger.debug(
+                    "dynamic_universe_orderbook_parse_failed",
+                    extra={
+                        "extra": {
+                            "symbol": symbol,
+                            "cycle_id": cycle_id,
+                            "branch": "_get_orderbook_raw",
+                        }
+                    },
+                    exc_info=True,
+                )
 
         get_orderbook = self._resolve_method(exchange, "get_orderbook")
         if not callable(get_orderbook):
