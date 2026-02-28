@@ -99,6 +99,12 @@ class MarketSnapshot:
     dryrun_ws_rest_fallback_used: bool = False
 
 
+@dataclass(frozen=True)
+class MarkPriceSafetyNetResult:
+    success: bool
+    symbol: str | None = None
+
+
 class Stage4ConfigurationError(RuntimeError):
     pass
 
@@ -635,6 +641,69 @@ class Stage4CycleRunner:
                 min_cash_try=settings.risk_min_cash_try,
                 max_fee_try_per_day=settings.risk_max_fee_try_per_day,
             )
+            eligible_symbols = [
+                symbol for symbol in active_symbols if self.norm(symbol) not in failed_symbols
+            ]
+            tradable_symbols_before_coverage = list(eligible_symbols)
+            missing_mark_symbols = [
+                symbol
+                for symbol in eligible_symbols
+                if (
+                    mark_prices.get(self.norm(symbol)) is None
+                    or mark_prices.get(self.norm(symbol), Decimal("0")) <= 0
+                )
+            ]
+            covered_symbols = [
+                symbol
+                for symbol in eligible_symbols
+                if mark_prices.get(self.norm(symbol), Decimal("0")) > 0
+            ]
+
+            performed_safety_net = False
+            safety_net_symbol: str | None = None
+            safety_net_success = False
+            if live_mode and not covered_symbols:
+                performed_safety_net = True
+                coverage_result = self._try_recover_single_mark_price(
+                    exchange=exchange,
+                    active_symbols=active_symbols,
+                    mark_prices=mark_prices,
+                )
+                safety_net_symbol = coverage_result.symbol
+                safety_net_success = coverage_result.success
+                if coverage_result.success and coverage_result.symbol is not None:
+                    covered_symbols = [coverage_result.symbol]
+                    missing_mark_symbols = [
+                        symbol for symbol in missing_mark_symbols if symbol != coverage_result.symbol
+                    ]
+
+            instrumentation.counter(
+                "stage4_mark_price_missing_symbols_total", len(missing_mark_symbols)
+            )
+            if performed_safety_net:
+                instrumentation.counter("stage4_mark_price_safety_net_attempt_total", 1)
+            if safety_net_success:
+                instrumentation.counter("stage4_mark_price_safety_net_success_total", 1)
+
+            logger.info(
+                "stage4_mark_price_coverage",
+                extra={
+                    "extra": {
+                        "event": "stage4_mark_price_coverage",
+                        "cycle_id": cycle_id,
+                        "active_symbols_count": len(active_symbols),
+                        "failed_symbols_count": len(failed_symbols),
+                        "mark_prices_count": len(mark_prices),
+                        "tradable_symbols_count_before": len(tradable_symbols_before_coverage),
+                        "tradable_symbols_count_after": len(covered_symbols),
+                        "missing_mark_symbols_sample": sorted(missing_mark_symbols)[:10],
+                        "performed_safety_net": performed_safety_net,
+                        "safety_net_symbol": safety_net_symbol,
+                        "safety_net_success": safety_net_success,
+                    }
+                },
+            )
+
             budget_decision, prev_mode, peak_equity, fees_today, risk_day = (
                 risk_budget_service.compute_decision(
                     limits=risk_limits,
@@ -644,7 +713,7 @@ class Stage4CycleRunner:
                     realized_today_try=snapshot.realized_today_try,
                     kill_switch_active=effective_kill_switch,
                     live_mode=live_mode,
-                    tradable_symbols=active_symbols,
+                    tradable_symbols=covered_symbols,
                 )
             )
             budget_notional_multiplier = getattr(
@@ -658,11 +727,7 @@ class Stage4CycleRunner:
                     settings=settings,
                     cycle_id=cycle_id,
                     now_utc=cycle_now,
-                    selected_symbols=[
-                        symbol
-                        for symbol in active_symbols
-                        if self.norm(symbol) not in failed_symbols
-                    ],
+                    selected_symbols=covered_symbols,
                     mark_prices=mark_prices,
                     try_cash=try_cash,
                     positions=positions,
@@ -698,7 +763,7 @@ class Stage4CycleRunner:
                     },
                     bootstrap_enabled=settings.stage4_bootstrap_intents,
                     live_mode=live_mode,
-                    preferred_symbols=active_symbols,
+                    preferred_symbols=covered_symbols,
                     aggressive_scores=aggressive_scores,
                     budget_notional_multiplier=budget_notional_multiplier,
                 )
@@ -1687,6 +1752,97 @@ class Stage4CycleRunner:
         if not dec.is_finite() or dec < 0:
             return None
         return dec
+
+    def _choose_mark_price_fallback_symbol(self, active_symbols: list[str]) -> str | None:
+        if not active_symbols:
+            return None
+        normalized = [self.norm(symbol) for symbol in active_symbols]
+        if "BTCTRY" in normalized:
+            return "BTCTRY"
+        return normalized[0]
+
+    def _try_recover_single_mark_price(
+        self,
+        *,
+        exchange: object,
+        active_symbols: list[str],
+        mark_prices: dict[str, Decimal],
+    ) -> MarkPriceSafetyNetResult:
+        fallback_symbol = self._choose_mark_price_fallback_symbol(active_symbols)
+        if fallback_symbol is None:
+            logger.warning(
+                "stage4_mark_price_safety_net_failed",
+                extra={
+                    "extra": {
+                        "event": "stage4_mark_price_safety_net_failed",
+                        "reason": "no_active_symbols",
+                    }
+                },
+            )
+            return MarkPriceSafetyNetResult(success=False, symbol=None)
+
+        base = getattr(exchange, "client", exchange)
+        get_orderbook_with_ts = getattr(exchange, "get_orderbook_with_timestamp", None)
+        if not callable(get_orderbook_with_ts):
+            get_orderbook_with_ts = getattr(base, "get_orderbook_with_timestamp", None)
+        get_orderbook = getattr(exchange, "get_orderbook", None)
+        if not callable(get_orderbook):
+            get_orderbook = getattr(base, "get_orderbook", None)
+
+        if callable(get_orderbook_with_ts):
+            def _fetch_orderbook() -> tuple[object, object]:
+                bid_raw, ask_raw, _observed_at = get_orderbook_with_ts(fallback_symbol)
+                return bid_raw, ask_raw
+        elif callable(get_orderbook):
+            def _fetch_orderbook() -> tuple[object, object]:
+                bid_raw, ask_raw = get_orderbook(fallback_symbol)
+                return bid_raw, ask_raw
+        else:
+            logger.warning(
+                "stage4_mark_price_safety_net_failed",
+                extra={
+                    "extra": {
+                        "event": "stage4_mark_price_safety_net_failed",
+                        "symbol": fallback_symbol,
+                        "reason": "missing_orderbook_method",
+                    }
+                },
+            )
+            return MarkPriceSafetyNetResult(success=False, symbol=fallback_symbol)
+
+        try:
+            bid_raw, ask_raw = _fetch_orderbook()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "stage4_mark_price_safety_net_failed",
+                extra={
+                    "extra": {
+                        "event": "stage4_mark_price_safety_net_failed",
+                        "symbol": fallback_symbol,
+                        "reason": "orderbook_fetch_failed",
+                        "error_type": type(exc).__name__,
+                    }
+                },
+            )
+            return MarkPriceSafetyNetResult(success=False, symbol=fallback_symbol)
+
+        bid = self._safe_decimal(bid_raw)
+        ask = self._safe_decimal(ask_raw)
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            logger.warning(
+                "stage4_mark_price_safety_net_failed",
+                extra={
+                    "extra": {
+                        "event": "stage4_mark_price_safety_net_failed",
+                        "symbol": fallback_symbol,
+                        "reason": "invalid_orderbook",
+                    }
+                },
+            )
+            return MarkPriceSafetyNetResult(success=False, symbol=fallback_symbol)
+
+        mark_prices[self.norm(fallback_symbol)] = (bid + ask) / Decimal("2")
+        return MarkPriceSafetyNetResult(success=True, symbol=self.norm(fallback_symbol))
 
     def resolve_mark_prices(
         self, exchange: object, symbols: list[str], *, cycle_now: datetime | None = None
