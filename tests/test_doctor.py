@@ -631,3 +631,40 @@ def test_doctor_p14_checks_include_consistency_and_monotonicity(
     assert checks[("p1_4", "checkpoint_monotonicity")].status == "pass"
     assert checks[("p1_4", "fill_cursor_monotonicity")].status == "pass"
     assert checks[("p1_4", "accounting_ledger_consistency")].status == "pass"
+
+
+def test_doctor_ops_checks_fail_on_monitor_live_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "btcbot.services.doctor.resolve_effective_universe",
+        lambda settings: type(
+            "EffectiveUniverse",
+            (),
+            {
+                "symbols": settings.symbols,
+                "source": "settings",
+                "metadata_available": True,
+                "rejected_symbols": [],
+                "suggestions": [],
+                "auto_corrected_symbols": [],
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.doctor._check_exchange_rules",
+        lambda settings, symbols, checks, errors, warnings, actions: checks.append(
+            DoctorCheck("exchange_rules", "compatibility", "pass", "ok")
+        ),
+    )
+
+    db_path = tmp_path / "state_live.db"
+    report = run_health_checks(
+        Settings(PROCESS_ROLE="MONITOR", DOCTOR_SLO_ENABLED=False),
+        db_path=str(db_path),
+        dataset_path=None,
+    )
+
+    checks = {(check.category, check.name): check for check in report.checks}
+    assert checks[("ops", "shared_db_between_roles")].status == "fail"
+    assert any("state-db-unlock" in action for action in report.actions)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
@@ -11,9 +13,11 @@ from btcbot.config import Settings
 from btcbot.observability import get_instrumentation
 from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.replay.validate import DatasetValidationReport, validate_replay_dataset
+from btcbot.runtime.guards import enforce_role_db_convention, normalize_db_path
 from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
+from btcbot.services.process_lock import get_lock_diagnostics, get_lock_dir
 from btcbot.services.state_store import StateStore
 
 
@@ -190,6 +194,14 @@ def run_health_checks(
         db_path=db_path,
         checks=checks,
         warnings=warnings,
+    )
+    _run_ops_stability_checks(
+        settings=settings,
+        db_path=db_path,
+        checks=checks,
+        errors=errors,
+        warnings=warnings,
+        actions=actions,
     )
 
     report = DoctorReport(checks=checks, errors=errors, warnings=warnings, actions=actions)
@@ -413,6 +425,113 @@ def _run_slo_checks(
     inst.gauge("doctor_slo_max_drawdown_ratio", metrics["max_drawdown_ratio"])
 
 
+
+
+def _run_ops_stability_checks(
+    *,
+    settings: Settings,
+    db_path: str | None,
+    checks: list[DoctorCheck],
+    errors: list[str],
+    warnings: list[str],
+    actions: list[str],
+) -> None:
+    if db_path is None:
+        checks.append(DoctorCheck("ops", "db_scope", "warn", "db_path not provided; skipping ops checks"))
+        return
+
+    normalized = normalize_db_path(db_path)
+    role = str(getattr(settings, "process_role", "")).strip().upper() or "MONITOR"
+
+    try:
+        enforce_role_db_convention(role, bool(getattr(settings, "live_trading", False)), normalized)
+        checks.append(DoctorCheck("ops", "role_db_convention", "pass", f"role={role} db_path={normalized}"))
+    except ValueError as exc:
+        if role == "MONITOR" and "live" not in str(normalized).lower():
+            checks.append(
+                DoctorCheck(
+                    "ops",
+                    "role_db_convention",
+                    "pass",
+                    "monitor db naming is non-standard but not shared with LIVE",
+                )
+            )
+        else:
+            errors.append(str(exc))
+            checks.append(DoctorCheck("ops", "role_db_convention", "fail", str(exc)))
+
+    lock_dir = get_lock_dir()
+    lock_status = "pass"
+    try:
+        probe = lock_dir / ".doctor-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        lock_status = "fail"
+        errors.append(f"lock dir is not writable: {lock_dir} ({exc})")
+    checks.append(DoctorCheck("ops", "lock_dir", lock_status, f"lock_dir={lock_dir}"))
+
+    account_key = "trader-writer" if role == "LIVE" else "monitor"
+    diagnostics = get_lock_diagnostics(db_path=str(normalized), account_key=account_key)
+    owner = diagnostics.owner_pid if diagnostics.owner_pid is not None else "none"
+    owner_status = "pass"
+    if role == "LIVE" and diagnostics.owner_pid is not None and diagnostics.owner_pid != os.getpid():
+        owner_status = "fail"
+        errors.append(
+            "trader lock is owned by another process "
+            f"owner_pid={diagnostics.owner_pid} current_pid={os.getpid()} lock_path={diagnostics.lock_path}"
+        )
+    checks.append(
+        DoctorCheck(
+            "ops",
+            "lock_owner_sanity",
+            owner_status,
+            f"account_key={account_key} owner_pid={owner} owner_alive={diagnostics.owner_pid_alive} lock_path={diagnostics.lock_path}",
+        )
+    )
+
+    if role == "MONITOR" and "live" in str(normalized).lower():
+        message = (
+            "shared_db_between_roles_detected role=MONITOR db_path="
+            f"{normalized} (override requires --allow-shared-db-for-monitor)"
+        )
+        errors.append(message)
+        checks.append(DoctorCheck("ops", "shared_db_between_roles", "fail", message))
+        actions.append("Set TRADER DB path: $env:STATE_DB_PATH='C:\\btcbot\\live\\state_live.db'")
+        actions.append("Set MONITOR DB path: $env:STATE_DB_PATH='C:\\btcbot\\monitor\\state_monitor.db'")
+        actions.append("Set lock dir explicitly: $env:BTCBOT_LOCK_DIR='C:\\btcbot\\locks'")
+        actions.append(
+            "Clean stale lock metadata (ack required): "
+            "btcbot state-db-unlock --db <DB> --lock-account-key monitor --i-understand"
+        )
+    else:
+        checks.append(
+            DoctorCheck("ops", "shared_db_between_roles", "pass", f"role={role} db_path={normalized}")
+        )
+
+    store = StateStore(db_path=str(normalized))
+    now_epoch = int(datetime.now(UTC).timestamp())
+    ttl = int(store.process_instance_ttl_seconds)
+    with store._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT instance_id, pid, heartbeat_at_epoch, status
+            FROM process_instances
+            WHERE status = 'active'
+            ORDER BY heartbeat_at_epoch ASC
+            """
+        ).fetchall()
+    stale_candidates = [
+        f"{row['instance_id']}:{row['pid']}:{max(0, now_epoch - int(row['heartbeat_at_epoch']))}s"
+        for row in rows
+        if max(0, now_epoch - int(row["heartbeat_at_epoch"])) > ttl
+    ]
+    summary = f"active_locks={len(rows)} stale_candidates={len(stale_candidates)}"
+    if stale_candidates:
+        warnings.append("stale process_instances detected: " + ", ".join(stale_candidates[:3]))
+        checks.append(DoctorCheck("ops", "state_db_locks", "warn", summary + f" top={stale_candidates[:3]}"))
+    else:
+        checks.append(DoctorCheck("ops", "state_db_locks", "pass", summary))
 
 def _run_p14_accounting_checks(
     *,
