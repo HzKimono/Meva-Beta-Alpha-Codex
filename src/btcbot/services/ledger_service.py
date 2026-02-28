@@ -107,7 +107,10 @@ class LedgerService:
         events: list[LedgerEvent] = []
         for fill in fills:
             symbol = normalize_symbol(fill.symbol)
-            fill_event_id = f"fill:{fill.fill_id}"
+            fill_id = (fill.fill_id or "").strip() or (
+                f"{fill.order_id}:{int(fill.ts.timestamp() * 1000)}:{fill.price}:{fill.qty}:{fill.side}"
+            )
+            fill_event_id = f"fill:{fill_id}"
             events.append(
                 LedgerEvent(
                     event_id=fill_event_id,
@@ -119,16 +122,17 @@ class LedgerService:
                     price=fill.price,
                     fee=None,
                     fee_currency=None,
-                    exchange_trade_id=fill.fill_id,
+                    exchange_trade_id=fill_id,
                     exchange_order_id=fill.order_id,
                     client_order_id=None,
                     meta={"source": "stage4_accounting_fill"},
                 )
             )
             if fill.fee > 0:
+                fee_trade_id = f"fee:{fill_id}"
                 events.append(
                     LedgerEvent(
-                        event_id=f"fee:{fill.fill_id}",
+                        event_id=f"fee:{fill_id}",
                         ts=fill.ts.astimezone(UTC),
                         symbol=symbol,
                         type=LedgerEventType.FEE,
@@ -137,11 +141,11 @@ class LedgerService:
                         price=None,
                         fee=fill.fee,
                         fee_currency=fill.fee_asset.upper(),
-                        exchange_trade_id=f"fee:{fill.fill_id}",
+                        exchange_trade_id=fee_trade_id,
                         exchange_order_id=fill.order_id,
                         client_order_id=None,
                         meta={
-                            "linked_fill_id": fill.fill_id,
+                            "linked_fill_id": fill_id,
                             "source": "stage4_accounting_fill_fee",
                         },
                     )

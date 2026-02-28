@@ -6,6 +6,7 @@ import sys
 import threading
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -2746,3 +2747,49 @@ def test_state_db_unlock_force_requires_ack_and_audits(tmp_path, capsys, caplog)
         ).fetchone()
     assert row is not None
     assert str(row["status"]) == "force_unlocked"
+
+
+def test_prepare_runtime_blocks_monitor_shared_live_db_by_default() -> None:
+    settings = Settings(PROCESS_ROLE="MONITOR", STATE_DB_PATH="/tmp/state_live.db", DRY_RUN=True)
+    with pytest.raises(ValueError, match="Shared DB between TRADER and MONITOR"):
+        cli._prepare_runtime(
+            settings,
+            command_name="stage7-report",
+            env_file_arg=None,
+            allow_shared_db_for_monitor=False,
+        )
+
+
+def test_prepare_runtime_allows_monitor_shared_live_db_with_override(monkeypatch) -> None:
+    settings = Settings(PROCESS_ROLE="MONITOR", STATE_DB_PATH="/tmp/state_live.db", DRY_RUN=True)
+    monkeypatch.setenv("BTCBOT_ALLOW_SHARED_DB_FOR_MONITOR", "1")
+
+    prepared = cli._prepare_runtime(
+        settings,
+        command_name="stage7-report",
+        env_file_arg=None,
+        allow_shared_db_for_monitor=False,
+    )
+
+    assert "state_live.db" in prepared.state_db_path
+
+
+def test_run_state_db_unlock_clears_stale_pid_file(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "monitor.db"
+    settings = Settings(PROCESS_ROLE="MONITOR", STATE_DB_PATH=str(db_path), DRY_RUN=True)
+    diagnostics = cli.get_lock_diagnostics(db_path=str(db_path), account_key="monitor")
+    diagnostics.pid_path.write_text("999999\n", encoding="utf-8")
+
+    rc = cli.run_state_db_unlock(
+        settings=settings,
+        db_path=str(db_path),
+        instance_id=None,
+        lock_account_key="monitor",
+        force=False,
+        force_ack=None,
+        i_understand=True,
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["cleared"] is True

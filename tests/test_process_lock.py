@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from btcbot.services.process_lock import single_instance_lock
+from btcbot.services.process_lock import (
+    clear_stale_pid_file,
+    get_lock_diagnostics,
+    single_instance_lock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -122,3 +126,39 @@ def test_single_instance_lock_blocks_across_processes(tmp_path: Path) -> None:
         assert "LOCKED:" in combined
     finally:
         proc_a.wait(timeout=5)
+
+
+def test_single_instance_lock_error_includes_owner_pid(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "state.db")
+    with single_instance_lock(db_path=db_path, account_key="acct") as lock:
+        with pytest.raises(RuntimeError, match=f"owner_pid={lock.pid}"):
+            with single_instance_lock(db_path=db_path, account_key="acct"):
+                pass
+
+
+def test_single_instance_lock_allows_different_role_db_paths(tmp_path: Path) -> None:
+    trader_db = str(tmp_path / "state_live.db")
+    monitor_db = str(tmp_path / "state_monitor.db")
+    with single_instance_lock(db_path=trader_db, account_key="trader-writer"):
+        with single_instance_lock(db_path=monitor_db, account_key="monitor"):
+            pass
+
+
+def test_single_instance_lock_normalizes_db_path_scope(tmp_path: Path) -> None:
+    db_file = tmp_path / "state.db"
+    db_file.touch()
+    relative = os.path.relpath(str(db_file), start=os.getcwd())
+    absolute = str(db_file.resolve())
+    with single_instance_lock(db_path=absolute, account_key="acct"):
+        with pytest.raises(RuntimeError, match="LOCKED:"):
+            with single_instance_lock(db_path=relative, account_key="acct"):
+                pass
+
+
+def test_clear_stale_pid_file_removes_dead_owner_metadata(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "state.db")
+    diagnostics = get_lock_diagnostics(db_path=db_path, account_key="acct")
+    diagnostics.pid_path.write_text("999999\n", encoding="utf-8")
+
+    assert clear_stale_pid_file(db_path=db_path, account_key="acct") is True
+    assert not diagnostics.pid_path.exists()

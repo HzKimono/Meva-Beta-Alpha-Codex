@@ -70,7 +70,12 @@ from btcbot.services.parity import (
 )
 from btcbot.services.portfolio_service import PortfolioService
 from btcbot.services.preflight import run_preflight_checks
-from btcbot.services.process_lock import single_instance_lock
+from btcbot.services.process_lock import (
+    clear_stale_pid_file,
+    get_lock_diagnostics,
+    get_lock_dir,
+    single_instance_lock,
+)
 from btcbot.services.risk_service import RiskService
 from btcbot.services.stage4_cycle_runner import (
     Stage4ConfigurationError,
@@ -106,6 +111,69 @@ logger = logging.getLogger(__name__)
 LIVE_TRADING_NOT_ARMED_MESSAGE = (
     "Live trading is not armed; set LIVE_TRADING=true and LIVE_TRADING_ACK=I_UNDERSTAND"
 )
+
+
+TRADER_LOCK_ACCOUNT_KEY = "trader-writer"
+MONITOR_LOCK_ACCOUNT_KEY = "monitor"
+_STATE_DB_UNLOCK_ACK = "I_UNDERSTAND_STATE_DB_UNLOCK"
+_SHARED_DB_MONITOR_ENV = "BTCBOT_ALLOW_SHARED_DB_FOR_MONITOR"
+
+
+def _allow_shared_db_for_monitor(flag: bool = False) -> bool:
+    if flag:
+        return True
+    raw = os.getenv(_SHARED_DB_MONITOR_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _is_monitor_role(settings: Settings) -> bool:
+    return _canonical_process_role(settings) == ProcessRole.MONITOR.value
+
+
+def _command_lock_account_key(command_name: str) -> str:
+    if command_name in {"run", "stage4-run", "canary"}:
+        return TRADER_LOCK_ACCOUNT_KEY
+    if command_name in {"health", "stage7-report", "stage7-export", "stage7-alerts", "doctor"}:
+        return MONITOR_LOCK_ACCOUNT_KEY
+    return command_name
+
+
+def _build_shared_db_failure_message(*, settings: Settings, command_name: str, db_path: str) -> str:
+    normalized = normalize_db_path(db_path)
+    lock_key = _command_lock_account_key(command_name)
+    diagnostics = get_lock_diagnostics(db_path=str(normalized), account_key=lock_key)
+    owner = diagnostics.owner_pid if diagnostics.owner_pid is not None else "none"
+    return (
+        "Shared DB between TRADER and MONITOR is blocked by default. "
+        f"role={_canonical_process_role(settings)} command={command_name} "
+        f"db_path={db_path} normalized_db_path={normalized} "
+        "expected_naming=TRADER=>*live*.db MONITOR=>*monitor*.db "
+        f"lock_dir={diagnostics.lock_dir} lock_path={diagnostics.lock_path} owner_pid={owner}. "
+        "If you intentionally accept shared-DB risk, re-run with "
+        "--allow-shared-db-for-monitor or set BTCBOT_ALLOW_SHARED_DB_FOR_MONITOR=1. "
+        "To clear stale lock metadata use: btcbot state-db-unlock "
+        f"--db '{normalized}' --lock-account-key {lock_key} --i-understand"
+    )
+
+
+def _enforce_monitor_shared_db_guard(
+    *,
+    settings: Settings,
+    command_name: str,
+    db_path: str,
+    allow_shared_db_for_monitor: bool = False,
+) -> None:
+    if not _is_monitor_role(settings):
+        return
+    normalized = normalize_db_path(db_path)
+    if "live" in str(normalized).lower() and not _allow_shared_db_for_monitor(allow_shared_db_for_monitor):
+        raise ValueError(
+            _build_shared_db_failure_message(
+                settings=settings,
+                command_name=command_name,
+                db_path=str(normalized),
+            )
+        )
 
 
 def _canonical_process_role(settings: Settings) -> str:
@@ -349,12 +417,22 @@ def main() -> int:
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
     )
-    db_unlock_parser.add_argument("--instance-id", required=True, help="Target process instance id")
+    db_unlock_parser.add_argument("--instance-id", required=False, help="Target process instance id")
+    db_unlock_parser.add_argument(
+        "--lock-account-key",
+        required=False,
+        help="Optional lock account key for stale pid-file cleanup (for example trader-writer or monitor)",
+    )
     db_unlock_parser.add_argument("--force", action="store_true", help="Force unlock even if heartbeat is fresh")
     db_unlock_parser.add_argument(
         "--force-ack",
         default=None,
         help="Required with --force: set to I_UNDERSTAND_STATE_DB_UNLOCK",
+    )
+    db_unlock_parser.add_argument(
+        "--i-understand",
+        action="store_true",
+        help="Acknowledge stale pid-file cleanup risk when using --lock-account-key",
     )
 
     stage7_run_parser = subparsers.add_parser("stage7-run", help="Run one Stage 7 dry-run cycle")
@@ -371,7 +449,12 @@ def main() -> int:
         help="Enable adaptation evaluation and parameter persistence during this cycle",
     )
 
-    subparsers.add_parser("health", help="Check exchange connectivity")
+    health_parser = subparsers.add_parser("health", help="Check exchange connectivity")
+    health_parser.add_argument(
+        "--allow-shared-db-for-monitor",
+        action="store_true",
+        help="Allow MONITOR role to use a LIVE-named DB path (unsafe override)",
+    )
 
     report_parser = subparsers.add_parser(
         "stage7-report",
@@ -381,6 +464,11 @@ def main() -> int:
         "--db",
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+    report_parser.add_argument(
+        "--allow-shared-db-for-monitor",
+        action="store_true",
+        help="Allow MONITOR role to use a LIVE-named DB path (unsafe override)",
     )
     report_parser.add_argument("--last", type=int, default=10)
     report_parser.add_argument(
@@ -403,6 +491,11 @@ def main() -> int:
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
     )
+    export_parser.add_argument(
+        "--allow-shared-db-for-monitor",
+        action="store_true",
+        help="Allow MONITOR role to use a LIVE-named DB path (unsafe override)",
+    )
     export_parser.add_argument("--last", type=int, default=50)
     export_parser.add_argument("--format", choices=["csv", "json", "both", "jsonl"], default="csv")
     export_parser.add_argument("--out", required=False, default=None)
@@ -412,6 +505,11 @@ def main() -> int:
         "--db",
         default=None,
         help="State sqlite DB path (defaults to env STATE_DB_PATH)",
+    )
+    alerts_parser.add_argument(
+        "--allow-shared-db-for-monitor",
+        action="store_true",
+        help="Allow MONITOR role to use a LIVE-named DB path (unsafe override)",
     )
     alerts_parser.add_argument("--last", type=int, default=50)
 
@@ -505,6 +603,11 @@ def main() -> int:
         action="store_true",
         help="Allow doctor to run even when role/db naming convention mismatches",
     )
+    doctor_parser.add_argument(
+        "--allow-shared-db-for-monitor",
+        action="store_true",
+        help="Allow MONITOR role to use a LIVE-named DB path (unsafe override)",
+    )
 
     replay_init_parser = subparsers.add_parser(
         "replay-init", help="Initialize replay dataset structure"
@@ -574,6 +677,7 @@ def main() -> int:
         env_file_arg=args.env_file,
         db_override=getattr(args, "db", None),
         prefer_env_db=args.command == "stage7-db-count" and getattr(args, "db", None) is None,
+        allow_shared_db_for_monitor=bool(getattr(args, "allow_shared_db_for_monitor", False)),
     )
     setup_logging(settings.log_level)
     if args.command != "run":
@@ -673,8 +777,10 @@ def main() -> int:
             settings=settings,
             db_path=args.db,
             instance_id=args.instance_id,
+            lock_account_key=args.lock_account_key,
             force=bool(args.force),
             force_ack=args.force_ack,
+            i_understand=bool(args.i_understand),
         )
 
     if args.command == "stage7-run":
@@ -760,6 +866,12 @@ def main() -> int:
         )
         if resolved_db_path:
             try:
+                _enforce_monitor_shared_db_guard(
+                    settings=settings,
+                    command_name="doctor",
+                    db_path=resolved_db_path,
+                    allow_shared_db_for_monitor=bool(args.allow_shared_db_for_monitor),
+                )
                 enforce_role_db_convention(
                     getattr(settings, "process_role", ""),
                     bool(getattr(settings, "live_trading", False)),
@@ -858,6 +970,7 @@ def _prepare_runtime(
     env_file_arg: str | None,
     db_override: str | None = None,
     prefer_env_db: bool = False,
+    allow_shared_db_for_monitor: bool = False,
 ) -> Settings:
     require_no_dotenv(env_file_arg)
     if _command_touches_state_db(command_name):
@@ -876,6 +989,13 @@ def _prepare_runtime(
             settings = settings.model_copy(update={"state_db_path": str(db_path)})
         else:
             settings.state_db_path = str(db_path)
+
+        _enforce_monitor_shared_db_guard(
+            settings=settings,
+            command_name=command_name,
+            db_path=str(db_path),
+            allow_shared_db_for_monitor=allow_shared_db_for_monitor,
+        )
         if _enforce_role_db_convention_for_command(command_name):
             try:
                 enforce_role_db_convention(
@@ -885,17 +1005,24 @@ def _prepare_runtime(
                 )
             except ValueError:
                 if _strict_role_db_convention_for_command(command_name):
-                    raise
-                logger.warning(
-                    "role_db_convention_mismatch",
-                    extra={
-                        "extra": {
-                            "command": command_name,
-                            "role": getattr(settings, "process_role", ""),
-                            "db_path": str(db_path),
-                        }
-                    },
-                )
+                    if _is_monitor_role(settings) and _allow_shared_db_for_monitor(allow_shared_db_for_monitor):
+                        logger.warning(
+                            "role_db_convention_mismatch_bypassed",
+                            extra={"extra": {"command": command_name, "db_path": str(db_path)}},
+                        )
+                    else:
+                        raise
+                else:
+                    logger.warning(
+                        "role_db_convention_mismatch",
+                        extra={
+                            "extra": {
+                                "command": command_name,
+                                "role": getattr(settings, "process_role", ""),
+                                "db_path": str(db_path),
+                            }
+                        },
+                    )
 
     logger.info(
         "startup",
@@ -1115,7 +1242,7 @@ def run_stage3_runtime(
     jitter_seconds: int,
 ) -> int:
     try:
-        with single_instance_lock(db_path=settings.state_db_path, account_key="stage3"):
+        with single_instance_lock(db_path=settings.state_db_path, account_key=TRADER_LOCK_ACCOUNT_KEY):
             configure_instrumentation(
                 enabled=bool(getattr(settings, "observability_enabled", False)),
                 metrics_exporter=str(getattr(settings, "observability_metrics_exporter", "none")),
@@ -1383,7 +1510,7 @@ def run_canary(
         return 2
 
     try:
-        with single_instance_lock(db_path=resolved_db_path, account_key="canary"):
+        with single_instance_lock(db_path=resolved_db_path, account_key=TRADER_LOCK_ACCOUNT_KEY):
             canary_settings = _build_canary_settings(
                 settings,
                 symbol=resolved_symbol,
@@ -2271,10 +2398,6 @@ def run_degrade_override(
 
 
 
-
-_FORCE_UNLOCK_ACK = "I_UNDERSTAND_STATE_DB_UNLOCK"
-
-
 def _pid_appears_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -2314,7 +2437,16 @@ def run_state_db_locks_list(*, settings: Settings, db_path: str | None = None) -
                 "pid_appears_alive": _pid_appears_alive(int(row["pid"])),
             }
         )
-    print(json.dumps({"db_path": str(resolved_db), "locks": payload_rows}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "db_path": str(resolved_db),
+                "lock_dir": str(get_lock_dir()),
+                "locks": payload_rows,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -2322,12 +2454,44 @@ def run_state_db_unlock(
     *,
     settings: Settings,
     db_path: str | None = None,
-    instance_id: str,
-    force: bool,
-    force_ack: str | None,
+    instance_id: str | None = None,
+    lock_account_key: str | None = None,
+    force: bool = False,
+    force_ack: str | None = None,
+    i_understand: bool = False,
 ) -> int:
     resolved_db = normalize_db_path(db_path or settings.state_db_path)
     store = StateStore(str(resolved_db))
+
+    if lock_account_key:
+        if not i_understand:
+            print("--lock-account-key requires --i-understand")
+            return 2
+        cleaned = clear_stale_pid_file(db_path=str(resolved_db), account_key=lock_account_key)
+        if not cleaned:
+            diagnostics = get_lock_diagnostics(db_path=str(resolved_db), account_key=lock_account_key)
+            print(
+                "No stale pid metadata cleared "
+                f"for lock_account_key={lock_account_key} owner_pid={diagnostics.owner_pid} "
+                f"owner_alive={diagnostics.owner_pid_alive}"
+            )
+            return 2
+        print(
+            json.dumps(
+                {
+                    "cleared": True,
+                    "db_path": str(resolved_db),
+                    "lock_account_key": lock_account_key,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if not instance_id:
+        print("Either --instance-id or --lock-account-key is required")
+        return 2
+
     now_epoch = int(datetime.now(UTC).timestamp())
     ttl_seconds = int(store.process_instance_ttl_seconds)
     with store._connect() as conn:
@@ -2350,11 +2514,11 @@ def run_state_db_unlock(
         if appears_active and not force:
             print(
                 "Refusing to unlock active instance. Re-run with --force "
-                f"--force-ack={_FORCE_UNLOCK_ACK} only if you are sure the process is dead."
+                f"--force-ack={_STATE_DB_UNLOCK_ACK} only if you are sure the process is dead."
             )
             return 2
-        if force and force_ack != _FORCE_UNLOCK_ACK:
-            print(f"--force requires --force-ack={_FORCE_UNLOCK_ACK}")
+        if force and force_ack != _STATE_DB_UNLOCK_ACK:
+            print(f"--force requires --force-ack={_STATE_DB_UNLOCK_ACK}")
             return 2
 
         conn.execute(
@@ -2423,7 +2587,7 @@ def run_cycle_stage4(
         return 2
 
     try:
-        with single_instance_lock(db_path=resolved_db_path, account_key="stage4"):
+        with single_instance_lock(db_path=resolved_db_path, account_key=TRADER_LOCK_ACCOUNT_KEY):
             logger.info("Running Stage 4 cycle")
             result = cycle_runner.run_one_cycle(effective_settings)
             return result
@@ -2477,7 +2641,7 @@ def run_cycle_stage7(
         update={"dry_run": True, "kill_switch": False, "state_db_path": resolved_db_path}
     )
     try:
-        with single_instance_lock(db_path=resolved_db_path, account_key="stage7"):
+        with single_instance_lock(db_path=resolved_db_path, account_key=TRADER_LOCK_ACCOUNT_KEY):
             return runner.run_one_cycle(
                 effective_settings,
                 enable_adaptation=include_adaptation,
@@ -2503,7 +2667,7 @@ def run_preflight(*, settings: Settings, db_path: str | None = None, profile: st
 
 
 def run_health(settings: Settings) -> int:
-    with single_instance_lock(db_path=settings.state_db_path, account_key="health"):
+    with single_instance_lock(db_path=settings.state_db_path, account_key=MONITOR_LOCK_ACCOUNT_KEY):
         StateStore(db_path=settings.state_db_path)
 
     client = BtcturkHttpClient(
@@ -2665,7 +2829,7 @@ def run_stage7_report(
     if resolved_db_path is None:
         return 2
 
-    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-report"):
+    with single_instance_lock(db_path=resolved_db_path, account_key=MONITOR_LOCK_ACCOUNT_KEY):
         store = StateStore(db_path=resolved_db_path)
         cycle_rows = build_cycle_rows(store=store, limit=last)
         validations = validate_cycle_rows(cycle_rows)
@@ -2833,7 +2997,7 @@ def run_stage7_export(
     )
     if resolved_db_path is None:
         return 2
-    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-export"):
+    with single_instance_lock(db_path=resolved_db_path, account_key=MONITOR_LOCK_ACCOUNT_KEY):
         store = StateStore(db_path=resolved_db_path)
         cycle_rows = build_cycle_rows(store=store, limit=last)
     validations = validate_cycle_rows(cycle_rows)
@@ -2879,7 +3043,7 @@ def run_stage7_alerts(settings: Settings, db_path: str | None, last: int) -> int
     )
     if resolved_db_path is None:
         return 2
-    with single_instance_lock(db_path=resolved_db_path, account_key="stage7-alerts"):
+    with single_instance_lock(db_path=resolved_db_path, account_key=MONITOR_LOCK_ACCOUNT_KEY):
         store = StateStore(db_path=resolved_db_path)
         rows = store.fetch_stage7_run_metrics(limit=last, order_desc=True)
     print("cycle_id ts alerts")
@@ -3186,7 +3350,7 @@ def run_doctor(
     json_output: bool = False,
 ) -> int:
     if db_path:
-        with single_instance_lock(db_path=db_path, account_key="doctor"):
+        with single_instance_lock(db_path=db_path, account_key=MONITOR_LOCK_ACCOUNT_KEY):
             report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)
     else:
         report = run_health_checks(settings, db_path=db_path, dataset_path=dataset_path)

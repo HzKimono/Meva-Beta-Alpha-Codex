@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
 
@@ -10,9 +13,11 @@ from btcbot.config import Settings
 from btcbot.observability import get_instrumentation
 from btcbot.persistence.sqlite.sqlite_connection import sqlite_connection_context
 from btcbot.replay.validate import DatasetValidationReport, validate_replay_dataset
+from btcbot.runtime.guards import enforce_role_db_convention, normalize_db_path
 from btcbot.services.effective_universe import resolve_effective_universe
 from btcbot.services.exchange_factory import build_exchange_stage4
 from btcbot.services.exchange_rules_service import ExchangeRulesService
+from btcbot.services.process_lock import get_lock_diagnostics, get_lock_dir
 from btcbot.services.state_store import StateStore
 
 
@@ -182,6 +187,19 @@ def run_health_checks(
         settings=settings,
         db_path=db_path,
         checks=checks,
+        warnings=warnings,
+        actions=actions,
+    )
+    _run_p14_accounting_checks(
+        db_path=db_path,
+        checks=checks,
+        warnings=warnings,
+    )
+    _run_ops_stability_checks(
+        settings=settings,
+        db_path=db_path,
+        checks=checks,
+        errors=errors,
         warnings=warnings,
         actions=actions,
     )
@@ -406,6 +424,279 @@ def _run_slo_checks(
     inst.gauge("doctor_slo_latency_ms", metrics["latency_p95_ms"])
     inst.gauge("doctor_slo_max_drawdown_ratio", metrics["max_drawdown_ratio"])
 
+
+
+
+def _run_ops_stability_checks(
+    *,
+    settings: Settings,
+    db_path: str | None,
+    checks: list[DoctorCheck],
+    errors: list[str],
+    warnings: list[str],
+    actions: list[str],
+) -> None:
+    if db_path is None:
+        checks.append(DoctorCheck("ops", "db_scope", "warn", "db_path not provided; skipping ops checks"))
+        return
+
+    normalized = normalize_db_path(db_path)
+    role = str(getattr(settings, "process_role", "")).strip().upper() or "MONITOR"
+
+    try:
+        enforce_role_db_convention(role, bool(getattr(settings, "live_trading", False)), normalized)
+        checks.append(DoctorCheck("ops", "role_db_convention", "pass", f"role={role} db_path={normalized}"))
+    except ValueError as exc:
+        if role == "MONITOR" and "live" not in str(normalized).lower():
+            checks.append(
+                DoctorCheck(
+                    "ops",
+                    "role_db_convention",
+                    "pass",
+                    "monitor db naming is non-standard but not shared with LIVE",
+                )
+            )
+        else:
+            errors.append(str(exc))
+            checks.append(DoctorCheck("ops", "role_db_convention", "fail", str(exc)))
+
+    lock_dir = get_lock_dir()
+    lock_status = "pass"
+    try:
+        probe = lock_dir / ".doctor-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        lock_status = "fail"
+        errors.append(f"lock dir is not writable: {lock_dir} ({exc})")
+    checks.append(DoctorCheck("ops", "lock_dir", lock_status, f"lock_dir={lock_dir}"))
+
+    account_key = "trader-writer" if role == "LIVE" else "monitor"
+    diagnostics = get_lock_diagnostics(db_path=str(normalized), account_key=account_key)
+    owner = diagnostics.owner_pid if diagnostics.owner_pid is not None else "none"
+    owner_status = "pass"
+    if role == "LIVE" and diagnostics.owner_pid is not None and diagnostics.owner_pid != os.getpid():
+        owner_status = "fail"
+        errors.append(
+            "trader lock is owned by another process "
+            f"owner_pid={diagnostics.owner_pid} current_pid={os.getpid()} lock_path={diagnostics.lock_path}"
+        )
+    checks.append(
+        DoctorCheck(
+            "ops",
+            "lock_owner_sanity",
+            owner_status,
+            f"account_key={account_key} owner_pid={owner} owner_alive={diagnostics.owner_pid_alive} lock_path={diagnostics.lock_path}",
+        )
+    )
+
+    if role == "MONITOR" and "live" in str(normalized).lower():
+        message = (
+            "shared_db_between_roles_detected role=MONITOR db_path="
+            f"{normalized} (override requires --allow-shared-db-for-monitor)"
+        )
+        errors.append(message)
+        checks.append(DoctorCheck("ops", "shared_db_between_roles", "fail", message))
+        actions.append("Set TRADER DB path: $env:STATE_DB_PATH='C:\\btcbot\\live\\state_live.db'")
+        actions.append("Set MONITOR DB path: $env:STATE_DB_PATH='C:\\btcbot\\monitor\\state_monitor.db'")
+        actions.append("Set lock dir explicitly: $env:BTCBOT_LOCK_DIR='C:\\btcbot\\locks'")
+        actions.append(
+            "Clean stale lock metadata (ack required): "
+            "btcbot state-db-unlock --db <DB> --lock-account-key monitor --i-understand"
+        )
+    else:
+        checks.append(
+            DoctorCheck("ops", "shared_db_between_roles", "pass", f"role={role} db_path={normalized}")
+        )
+
+    store = StateStore(db_path=str(normalized))
+    now_epoch = int(datetime.now(UTC).timestamp())
+    ttl = int(store.process_instance_ttl_seconds)
+    with store._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT instance_id, pid, heartbeat_at_epoch, status
+            FROM process_instances
+            WHERE status = 'active'
+            ORDER BY heartbeat_at_epoch ASC
+            """
+        ).fetchall()
+    stale_candidates = [
+        f"{row['instance_id']}:{row['pid']}:{max(0, now_epoch - int(row['heartbeat_at_epoch']))}s"
+        for row in rows
+        if max(0, now_epoch - int(row["heartbeat_at_epoch"])) > ttl
+    ]
+    summary = f"active_locks={len(rows)} stale_candidates={len(stale_candidates)}"
+    if stale_candidates:
+        warnings.append("stale process_instances detected: " + ", ".join(stale_candidates[:3]))
+        checks.append(DoctorCheck("ops", "state_db_locks", "warn", summary + f" top={stale_candidates[:3]}"))
+    else:
+        checks.append(DoctorCheck("ops", "state_db_locks", "pass", summary))
+
+def _run_p14_accounting_checks(
+    *,
+    db_path: str | None,
+    checks: list[DoctorCheck],
+    warnings: list[str],
+) -> None:
+    if db_path is None:
+        checks.append(DoctorCheck("p1_4", "coverage", "warn", "db_path not provided; skipping P1.4 checks"))
+        return
+
+    store = StateStore(db_path=db_path)
+    with store._connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM ledger_events").fetchone()
+        ledger_event_count = int(row["c"]) if row is not None else 0
+        max_row = conn.execute("SELECT COALESCE(MAX(rowid), 0) AS m FROM ledger_events").fetchone()
+        max_rowid = int(max_row["m"]) if max_row is not None else 0
+        cp_rows = conn.execute("SELECT scope_id, last_rowid FROM ledger_reducer_checkpoints").fetchall()
+        applied_row = conn.execute("SELECT COUNT(*) AS c FROM applied_fills").fetchone()
+        applied_count = int(applied_row["c"]) if applied_row is not None else 0
+        stage4_count_row = conn.execute("SELECT COUNT(*) AS c FROM stage4_fills").fetchone()
+        stage4_fill_count = int(stage4_count_row["c"]) if stage4_count_row is not None else 0
+        cursor_rows = conn.execute(
+            "SELECT key, value FROM cursors WHERE key LIKE 'fills_cursor:%'"
+        ).fetchall()
+        duplicate_rows = conn.execute(
+            """
+            SELECT COALESCE(SUM(events_appended), 0) AS attempted,
+                   COALESCE(SUM(events_ignored), 0) AS ignored
+            FROM (
+                SELECT events_appended, events_ignored
+                FROM stage7_run_metrics
+                ORDER BY ts DESC
+                LIMIT 20
+            )
+            """
+        ).fetchone()
+        stage4_snapshots = conn.execute(
+            "SELECT ts, total_equity_try FROM pnl_snapshots ORDER BY ts DESC LIMIT 5"
+        ).fetchall()
+        stage7_metrics = conn.execute(
+            "SELECT ts, equity_try, net_pnl_try FROM stage7_ledger_metrics ORDER BY ts DESC LIMIT 5"
+        ).fetchall()
+
+    checks.append(
+        DoctorCheck(
+            "p1_4",
+            "ledger_event_count",
+            "pass",
+            f"event_count={ledger_event_count} max_rowid={max_rowid}",
+        )
+    )
+
+    cp_status = "pass"
+    cp_msg = f"checkpoints={len(cp_rows)} max_rowid={max_rowid}"
+    for cp in cp_rows:
+        last_rowid = int(cp["last_rowid"])
+        if last_rowid > max_rowid:
+            cp_status = "fail"
+            cp_msg = (
+                "checkpoint_rowid_monotonicity_violation "
+                f"scope_id={cp['scope_id']} checkpoint_rowid={last_rowid} max_rowid={max_rowid}"
+            )
+            break
+    checks.append(DoctorCheck("p1_4", "checkpoint_monotonicity", cp_status, cp_msg))
+
+    applied_status = "pass"
+    applied_msg = f"applied_fills={applied_count} stage4_fills={stage4_fill_count}"
+    if applied_count < stage4_fill_count:
+        applied_status = "fail"
+        applied_msg = (
+            "applied_fills_monotonicity_violation "
+            f"applied_fills={applied_count} stage4_fills={stage4_fill_count}"
+        )
+    checks.append(DoctorCheck("p1_4", "applied_fills_monotonicity", applied_status, applied_msg))
+
+    with store._connect() as conn:
+        max_fill_by_symbol = {
+            str(row["symbol"]): int(row["ts_ms"])
+            for row in conn.execute(
+                """
+                SELECT symbol, COALESCE(MAX(CAST(strftime('%s', ts) AS INTEGER) * 1000), 0) AS ts_ms
+                FROM stage4_fills
+                GROUP BY symbol
+                """
+            ).fetchall()
+        }
+
+    cursor_issues: list[str] = []
+    for row in cursor_rows:
+        key = str(row["key"])
+        value = str(row["value"])
+        symbol = key.split(":", 1)[1] if ":" in key else ""
+        if not value.isdigit():
+            continue
+        cursor_ms = int(value)
+        max_fill_ms = max_fill_by_symbol.get(symbol, 0)
+        if cursor_ms < max_fill_ms:
+            cursor_issues.append(f"{key} cursor={cursor_ms} max_fill_ms={max_fill_ms}")
+    if cursor_issues:
+        checks.append(
+            DoctorCheck(
+                "p1_4",
+                "fill_cursor_monotonicity",
+                "fail",
+                "fill cursor moved backwards: " + "; ".join(cursor_issues),
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck(
+                "p1_4",
+                "fill_cursor_monotonicity",
+                "pass",
+                f"fill cursors checked={len(cursor_rows)}",
+            )
+        )
+
+    attempted = int(duplicate_rows["attempted"]) if duplicate_rows is not None else 0
+    ignored = int(duplicate_rows["ignored"]) if duplicate_rows is not None else 0
+    duplicate_ratio = (Decimal(ignored) / Decimal(attempted)) if attempted > 0 else Decimal("0")
+    duplicate_status = "pass"
+    if attempted >= 10 and duplicate_ratio > Decimal("0.50"):
+        duplicate_status = "warn"
+        warnings.append(
+            f"high ledger dedupe ratio ignored={ignored} attempted={attempted} ratio={duplicate_ratio:.4f}"
+        )
+    checks.append(
+        DoctorCheck(
+            "p1_4",
+            "ledger_dedupe_rate",
+            duplicate_status,
+            f"attempted={attempted} ignored={ignored} ratio={duplicate_ratio:.4f}",
+        )
+    )
+
+    mismatch_status = "pass"
+    mismatch_msg = "insufficient snapshots for comparison"
+    pairs = min(len(stage4_snapshots), len(stage7_metrics))
+    if pairs > 0:
+        equity_diffs: list[Decimal] = []
+        pnl_diffs: list[Decimal] = []
+        stage4_baseline = Decimal(str(stage4_snapshots[-1]["total_equity_try"]))
+        for idx in range(pairs):
+            s4 = stage4_snapshots[idx]
+            s7 = stage7_metrics[idx]
+            stage4_equity = Decimal(str(s4["total_equity_try"]))
+            stage7_equity = Decimal(str(s7["equity_try"]))
+            stage4_net = stage4_equity - stage4_baseline
+            stage7_net = Decimal(str(s7["net_pnl_try"]))
+            equity_diffs.append(abs(stage4_equity - stage7_equity))
+            pnl_diffs.append(abs(stage4_net - stage7_net))
+        max_equity_diff = max(equity_diffs)
+        max_pnl_diff = max(pnl_diffs)
+        if max_equity_diff > Decimal("1") or max_pnl_diff > Decimal("1"):
+            mismatch_status = "warn"
+            warnings.append(
+                "accounting_vs_ledger_mismatch "
+                f"max_equity_diff={max_equity_diff} max_net_pnl_diff={max_pnl_diff}"
+            )
+        mismatch_msg = (
+            f"pairs={pairs} max_equity_diff={max_equity_diff} "
+            f"max_net_pnl_diff={max_pnl_diff}"
+        )
+    checks.append(DoctorCheck("p1_4", "accounting_ledger_consistency", mismatch_status, mismatch_msg))
 
 def _slo_metric_check(
     name: str,

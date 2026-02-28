@@ -568,3 +568,103 @@ def test_main_doctor_without_stage7_db_is_warn(monkeypatch, capsys) -> None:
         check["category"] == "slo" and check["name"] == "coverage" and check["status"] == "warn"
         for check in payload["checks"]
     )
+
+
+def test_doctor_p14_checks_include_consistency_and_monotonicity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "btcbot.services.doctor.resolve_effective_universe",
+        lambda settings: type(
+            "EffectiveUniverse",
+            (),
+            {
+                "symbols": settings.symbols,
+                "source": "settings",
+                "metadata_available": True,
+                "rejected_symbols": [],
+                "suggestions": [],
+                "auto_corrected_symbols": [],
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.doctor._check_exchange_rules",
+        lambda settings, symbols, checks, errors, warnings, actions: checks.append(
+            DoctorCheck("exchange_rules", "compatibility", "pass", "ok")
+        ),
+    )
+
+    db_path = tmp_path / "doctor-p14.db"
+    from btcbot.services.state_store import StateStore
+
+    store = StateStore(db_path=str(db_path))
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO stage4_fills(fill_id, order_id, symbol, side, price, qty, fee, fee_asset, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("f1", "o1", "BTCTRY", "BUY", "100", "1", "0", "TRY", "2024-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO applied_fills(fill_id) VALUES (?)",
+            ("f1",),
+        )
+        conn.execute(
+            "INSERT INTO cursors(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            ("fills_cursor:BTCTRY", "1704067200000"),
+        )
+        conn.execute(
+            "INSERT INTO pnl_snapshots(total_equity_try, realized_today_try, realized_total_try, drawdown_pct, ts) VALUES (?, ?, ?, ?, ?)",
+            ("1000", "0", "0", "0", "2024-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO stage7_cycle_trace(cycle_id, ts, selected_universe_json, intents_summary_json, mode_json, order_decisions_json) VALUES (?, ?, '[]', '{}', '{}', '{}')",
+            ("c1", "2024-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO stage7_ledger_metrics(cycle_id, ts, gross_pnl_try, realized_pnl_try, unrealized_pnl_try, net_pnl_try, fees_try, slippage_try, turnover_try, equity_try, max_drawdown, max_drawdown_ratio) VALUES (?, ?, '0', '0', '0', '0', '0', '0', '0', '1000', '0', '0')",
+            ("c1", "2024-01-01T00:00:00+00:00"),
+        )
+
+    report = run_health_checks(Settings(DOCTOR_SLO_ENABLED=False), db_path=str(db_path), dataset_path=None)
+
+    checks = {(check.category, check.name): check for check in report.checks}
+    assert checks[("p1_4", "checkpoint_monotonicity")].status == "pass"
+    assert checks[("p1_4", "fill_cursor_monotonicity")].status == "pass"
+    assert checks[("p1_4", "accounting_ledger_consistency")].status == "pass"
+
+
+def test_doctor_ops_checks_fail_on_monitor_live_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "btcbot.services.doctor.resolve_effective_universe",
+        lambda settings: type(
+            "EffectiveUniverse",
+            (),
+            {
+                "symbols": settings.symbols,
+                "source": "settings",
+                "metadata_available": True,
+                "rejected_symbols": [],
+                "suggestions": [],
+                "auto_corrected_symbols": [],
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "btcbot.services.doctor._check_exchange_rules",
+        lambda settings, symbols, checks, errors, warnings, actions: checks.append(
+            DoctorCheck("exchange_rules", "compatibility", "pass", "ok")
+        ),
+    )
+
+    db_path = tmp_path / "state_live.db"
+    report = run_health_checks(
+        Settings(PROCESS_ROLE="MONITOR", DOCTOR_SLO_ENABLED=False),
+        db_path=str(db_path),
+        dataset_path=None,
+    )
+
+    checks = {(check.category, check.name): check for check in report.checks}
+    assert checks[("ops", "shared_db_between_roles")].status == "fail"
+    assert any("state-db-unlock" in action for action in report.actions)
