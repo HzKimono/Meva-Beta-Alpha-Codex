@@ -38,6 +38,13 @@ class RiskSignals:
     gross_exposure_try: Decimal
     largest_position_pct: Decimal
     fees_try_today: Decimal
+    current_equity_try: Decimal | None = None
+    realized_today_try: Decimal | None = None
+    exposure_try: Decimal | None = None
+    volatility_state: str | None = None
+    loss_streak: int | None = None
+    missing_mark_prices: tuple[str, ...] = ()
+    missing_currencies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

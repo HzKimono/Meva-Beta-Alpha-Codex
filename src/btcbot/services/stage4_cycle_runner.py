@@ -637,12 +637,15 @@ class Stage4CycleRunner:
                     attrs={"currency": missing_currency},
                 )
             ledger_checkpoint = ledger_service.checkpoint()
+            capital_result = None
             try:
-                risk_budget_service.apply_self_financing_checkpoint(
+                capital_result = risk_budget_service.apply_self_financing_checkpoint(
                     cycle_id=cycle_id,
                     realized_pnl_total_try=pnl_report.realized_pnl_total,
-                    ledger_event_count=ledger_checkpoint.event_count,
+                    ledger_event_count=ledger_checkpoint.event_count_total_applied,
                     ledger_checkpoint_id=ledger_checkpoint.checkpoint_id,
+                    # NOTE: seed from available TRY cash for conservative capital bootstrap.
+                    # Switching to equity_estimate would include MTM and is intentionally deferred.
                     seed_trading_capital_try=try_cash,
                 )
             except CapitalPolicyError as exc:
@@ -656,12 +659,34 @@ class Stage4CycleRunner:
                         "scope": "global",
                         "payload": {
                             "checkpoint_id": ledger_checkpoint.checkpoint_id,
-                            "ledger_event_count": ledger_checkpoint.event_count,
+                            "ledger_event_count": ledger_checkpoint.event_count_total_applied,
                             "error": str(exc),
                         },
                     },
                 )
                 raise Stage4InvariantError(str(exc)) from exc
+
+            instrumentation.gauge("stage4.ledger.net_pnl_try", float(pnl_report.realized_pnl_total + pnl_report.unrealized_pnl_total - (pnl_report.fees_total_try or Decimal("0"))))
+            instrumentation.gauge("stage4.ledger.fees_try", float(pnl_report.fees_total_try or Decimal("0")))
+            instrumentation.gauge("stage4.ledger.equity_try", float(pnl_report.equity_estimate))
+            instrumentation.counter(
+                "stage4.ledger.missing_currencies",
+                len(pnl_report.fee_conversion_missing_currencies),
+            )
+            if capital_result is not None:
+                instrumentation.gauge(
+                    "capital_policy.trading_capital_try",
+                    float(capital_result.trading_capital_try),
+                )
+                instrumentation.gauge(
+                    "capital_policy.treasury_try",
+                    float(capital_result.treasury_try),
+                )
+                instrumentation.counter(
+                    "capital_policy.checkpoint_applied",
+                    1,
+                    attrs={"applied": "true" if capital_result.applied else "false"},
+                )
             current_open_orders = state_store.list_stage4_open_orders()
             positions = state_store.list_stage4_positions()
             positions_by_symbol = {self.norm(position.symbol): position for position in positions}
@@ -741,6 +766,7 @@ class Stage4CycleRunner:
 
             budget_decision, prev_mode, peak_equity, fees_today, risk_day = (
                 risk_budget_service.compute_decision(
+                    cycle_id=cycle_id,
                     limits=risk_limits,
                     pnl_report=pnl_report,
                     positions=positions,
@@ -998,6 +1024,17 @@ class Stage4CycleRunner:
                 )
 
             risk_decision = getattr(budget_decision, "risk_decision", budget_decision)
+            instrumentation.gauge("risk_budget.multiplier", float(budget_decision.position_sizing_multiplier))
+            instrumentation.counter(
+                "risk_budget.reasons_count",
+                len(getattr(risk_decision, "reasons", [])),
+                attrs={"mode": risk_decision.mode.value},
+            )
+            instrumentation.counter(
+                "risk_budget.mode",
+                1,
+                attrs={"mode": risk_decision.mode.value},
+            )
             try:
                 risk_budget_service.persist_decision(
                     cycle_id=cycle_id,
@@ -1372,6 +1409,14 @@ class Stage4CycleRunner:
                     logger.warning(
                         "anomaly_events_persist_failed", extra={"extra": {"cycle_id": cycle_id}}
                     )
+            instrumentation.gauge(
+                "stage4.ledger.slippage_try",
+                float(getattr(snapshot, "slippage_try", Decimal("0"))),
+            )
+            instrumentation.gauge(
+                "stage4.ledger.turnover_try",
+                float(getattr(snapshot, "turnover_try", Decimal("0"))),
+            )
             cycle_metrics: CycleMetrics = metrics_service.build_cycle_metrics(
                 cycle_id=cycle_id,
                 cycle_started_at=cycle_started_at,

@@ -91,6 +91,10 @@ class LedgerCheckpoint:
         last_event = self.last_event_id if self.last_event_id is not None else "none"
         return f"{self.event_count}:{last_ts}:{last_event}"
 
+    @property
+    def event_count_total_applied(self) -> int:
+        """Total count of canonical ledger_events rows applied by reducer checkpoints."""
+        return self.event_count
 
 class LedgerService:
     """Canonical Stage7 accounting pipeline.

@@ -42,6 +42,7 @@ def test_risk_budget_fees_try_today_uses_converted_total(tmp_path) -> None:
     )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_risk_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -66,6 +67,7 @@ def test_risk_budget_fee_conversion_missing_degrades_not_observe_only(tmp_path) 
     )
 
     decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_risk_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -78,6 +80,7 @@ def test_risk_budget_fee_conversion_missing_degrades_not_observe_only(tmp_path) 
     assert decision.position_sizing_multiplier <= Decimal("0.25")
 
     kill_switch_decision, *_ = service.compute_decision(
+        cycle_id="test-cycle",
         limits=_risk_limits(),
         pnl_report=pnl_report,
         positions=[],
@@ -86,7 +89,7 @@ def test_risk_budget_fee_conversion_missing_degrades_not_observe_only(tmp_path) 
         kill_switch_active=True,
     )
     assert kill_switch_decision.mode == Mode.OBSERVE_ONLY
-    assert kill_switch_decision.risk_decision.reasons == ["KILL_SWITCH"]
+    assert kill_switch_decision.risk_decision.reasons == ["kill_switch_active"]
 
 
 def test_ledger_fee_conversion_uses_mark_prices_direct_or_inverse(tmp_path) -> None:
