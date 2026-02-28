@@ -779,6 +779,7 @@ class Stage4CycleRunner:
                 ],
                 decisions=decisions_payload,
             )
+            pipeline_orders: list[Order] = []
             if not settings.stage4_use_planning_kernel:
                 pipeline_orders = [
                     order
@@ -806,6 +807,35 @@ class Stage4CycleRunner:
                 intents = pipeline_orders or bootstrap_intents
             else:
                 bootstrap_intents = []
+
+            if (
+                settings.dry_run
+                and not intents
+                and not pipeline_orders
+                and not bootstrap_intents
+                and (
+                    not pair_info
+                    or bootstrap_drop_reasons.get("missing_pair_info", 0) > 0
+                )
+            ):
+                metadata_free_bootstrap = self._build_metadata_free_dry_run_bootstrap_intents(
+                    cycle_id=cycle_id,
+                    min_order_notional_try=Decimal(str(settings.min_order_notional_try)),
+                    bootstrap_notional_try=Decimal(str(settings.stage5_bootstrap_notional_try)),
+                    symbols=[
+                        symbol
+                        for symbol in active_symbols
+                        if self.norm(symbol) not in failed_symbols
+                    ],
+                    mark_prices=mark_prices,
+                    try_cash=try_cash,
+                    open_orders=current_open_orders,
+                    live_mode=live_mode,
+                    now_utc=cycle_now,
+                )
+                if metadata_free_bootstrap:
+                    bootstrap_intents = metadata_free_bootstrap
+                    intents = metadata_free_bootstrap
 
             intents = self._apply_agent_policy(
                 settings=settings,
@@ -2479,6 +2509,76 @@ class Stage4CycleRunner:
                 )
             )
         return intents, drop_reasons
+
+    def _build_metadata_free_dry_run_bootstrap_intents(
+        self,
+        *,
+        cycle_id: str,
+        min_order_notional_try: Decimal,
+        bootstrap_notional_try: Decimal,
+        symbols: list[str],
+        mark_prices: dict[str, Decimal],
+        try_cash: Decimal,
+        open_orders: list[Order],
+        live_mode: bool,
+        now_utc: datetime | None = None,
+    ) -> list[Order]:
+        if live_mode:
+            return []
+
+        timestamp = now_utc or datetime.now(UTC)
+        existing_buy_symbols = {
+            self.norm(order.symbol) for order in open_orders if order.side.lower() == "buy"
+        }
+        min_notional_floor = Decimal("50")
+        min_required_notional_try = max(Decimal(str(min_order_notional_try)), min_notional_floor)
+        if bootstrap_notional_try <= 0 and try_cash < min_required_notional_try:
+            return []
+
+        for symbol in symbols:
+            normalized = self.norm(symbol)
+            if normalized in existing_buy_symbols:
+                continue
+            mark = mark_prices.get(normalized)
+            if mark is None or mark <= 0:
+                continue
+            if try_cash < min_required_notional_try:
+                continue
+
+            budget = min(try_cash, Decimal(str(bootstrap_notional_try)))
+            budget = max(budget, min_required_notional_try)
+            qty = budget / mark
+            if qty <= 0:
+                continue
+
+            logger.info(
+                "stage4_dry_run_metadata_free_bootstrap",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "symbol": normalized,
+                        "price": str(mark),
+                        "qty": str(qty),
+                        "budget_try": str(budget),
+                        "reason_code": "metadata_free_bootstrap",
+                    }
+                },
+            )
+            return [
+                Order(
+                    symbol=normalized,
+                    side="buy",
+                    type="limit",
+                    price=mark,
+                    qty=qty,
+                    status="new",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    client_order_id=f"s4-{cycle_id[:12]}-{normalized.lower()}-buy",
+                    mode=("live" if live_mode else "dry_run"),
+                )
+            ]
+        return []
 
     @staticmethod
     def _translate_kernel_order_intents(
