@@ -2556,18 +2556,24 @@ def run_cycle_stage4(
     settings: Settings, force_dry_run: bool = False, db_path: str | None = None
 ) -> int:
     runtime_settings = settings
-    if force_dry_run and hasattr(settings, "model_copy"):
-        runtime_settings = settings.model_copy(
-            update={
-                # force_dry_run runtime override is invocation-local and never persisted.
-                "process_role": ProcessRole.TRADER.value,
-                "safe_mode": False,
-                "dry_run": True,
-                "kill_switch": bool(getattr(settings, "kill_switch", False)),
-                "symbols": list(getattr(settings, "symbols", [])),
-                "dynamic_universe_enabled": False,
-            }
-        )
+    if force_dry_run:
+        runtime_override = {
+            # force_dry_run runtime override is invocation-local and never persisted.
+            "process_role": ProcessRole.LIVE.value,
+            "safe_mode": False,
+            "dry_run": True,
+            "kill_switch": bool(getattr(settings, "kill_switch", False)),
+            "symbols": list(getattr(settings, "symbols", [])),
+            "dynamic_universe_enabled": False,
+        }
+        if hasattr(settings, "model_copy"):
+            runtime_settings = settings.model_copy(update=runtime_override)
+        else:
+            from copy import deepcopy
+
+            runtime_settings = deepcopy(settings)
+            for key, value in runtime_override.items():
+                setattr(runtime_settings, key, value)
     inputs, live_policy = _compute_live_policy(
         runtime_settings,
         force_dry_run=force_dry_run,
@@ -2618,7 +2624,9 @@ def run_cycle_stage4(
                     effective_settings,
                     force_dry_run_submit=bool(force_dry_run),
                 )
-            except TypeError:
+            except TypeError as exc:
+                if "force_dry_run_submit" not in str(exc):
+                    raise
                 result = cycle_runner.run_one_cycle(effective_settings)
             return result
     except Stage4ConfigurationError as exc:
