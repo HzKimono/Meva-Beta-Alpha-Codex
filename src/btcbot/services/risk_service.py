@@ -32,6 +32,7 @@ class RiskService:
         cycle_id: str,
         intents: list[Intent],
         *,
+        mark_prices: dict[str, Decimal] | None = None,
         try_cash_target: Decimal = Decimal("0"),
         investable_try: Decimal = Decimal("0"),
         account_snapshot: CycleAccountSnapshot | None = None,
@@ -129,6 +130,41 @@ class RiskService:
             account_snapshot.investable_try if account_snapshot is not None else investable_try
         )
 
+        if mark_prices is None:
+            resolved_mark_prices: dict[str, Decimal] = {}
+            logger.warning(
+                "mark_prices_missing_for_risk_context",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "scoped_symbols_count": len(scoped_symbols),
+                    }
+                },
+            )
+        else:
+            normalized_mark_prices = {
+                normalize_symbol(symbol): Decimal(str(price))
+                for symbol, price in mark_prices.items()
+            }
+            resolved_mark_prices = (
+                {
+                    symbol: normalized_mark_prices[symbol]
+                    for symbol in scoped_symbols
+                    if symbol in normalized_mark_prices
+                }
+                if scoped_symbols
+                else normalized_mark_prices
+            )
+
+        missing_mark_symbols = [
+            symbol for symbol in scoped_symbols if symbol not in resolved_mark_prices
+        ]
+        coverage_ratio = (
+            len(resolved_mark_prices) / len(scoped_symbols)
+            if scoped_symbols
+            else 1.0
+        )
+
         if self.balance_debug_enabled:
             logger.debug(
                 "risk_balance_snapshot",
@@ -154,12 +190,24 @@ class RiskService:
             cycle_id=cycle_id,
             open_orders_by_symbol=open_orders_by_symbol,
             last_intent_ts_by_symbol_side=last_intent_ts,
-            mark_prices={},
+            mark_prices=resolved_mark_prices,
             open_order_identifiers_by_symbol=open_order_identifiers_by_symbol,
             open_order_count_origin_by_symbol=open_order_count_origin_by_symbol,
             cash_try_free=resolved_cash_try_free,
             try_cash_target=resolved_try_cash_target,
             investable_try=resolved_investable_try,
+        )
+        logger.info(
+            "risk_policy_context_built",
+            extra={
+                "extra": {
+                    "cycle_id": cycle_id,
+                    "scoped_symbols_count": len(scoped_symbols),
+                    "mark_prices_count": len(resolved_mark_prices),
+                    "mark_prices_coverage_ratio": coverage_ratio,
+                    "missing_mark_symbols_sample": missing_mark_symbols[:10],
+                }
+            },
         )
         approved = self.risk_policy.evaluate(context, intents)
         now = datetime.now(UTC)
