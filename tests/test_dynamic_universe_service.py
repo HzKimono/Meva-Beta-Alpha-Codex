@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -480,3 +481,40 @@ def test_scan_budget_caps_orderbook_requests(tmp_path) -> None:
     assert result.ineligible_counts.get("scan_budget_exhausted", 0) == 4
     assert len(result.selected_symbols) <= 1
 
+
+
+class _RaisingTimestampClient(_MockClient):
+    def get_orderbook_with_timestamp(self, symbol: str) -> tuple[str, str, int]:
+        raise RuntimeError(f"timestamped feed failed for {symbol}")
+
+
+def test_orderbook_parse_failures_are_logged_and_counted(tmp_path, caplog) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = _MockExchange(
+        _RaisingTimestampClient(
+            ["AAAATRY"],
+            {"AAAATRY": ("120", "500", "121", "500")},
+            ts=now,
+        )
+    )
+    _seed_lookback(store, now, ["AAAATRY"])
+
+    with caplog.at_level(logging.DEBUG):
+        result = DynamicUniverseService().select(
+            exchange=exchange,
+            state_store=store,
+            settings=Settings(
+                DRY_RUN=True,
+                KILL_SWITCH=False,
+                SYMBOLS="[]",
+                UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
+            ),
+            now_utc=now,
+            cycle_id="diag-1",
+        )
+
+    assert result.selected_symbols == ()
+    assert result.ineligible_counts["depth_unavailable"] == 1
+    assert result.filters.get("diagnostics", {}).get("orderbook_parse_failure_timestamped") == 1
+    assert any("dynamic_universe_orderbook_parse_failed" in rec.message for rec in caplog.records)

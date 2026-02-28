@@ -91,7 +91,7 @@ class MarketSnapshot:
     anomalies: set[str]
     spreads_bps: dict[str, Decimal]
     age_seconds_by_symbol: dict[str, Decimal]
-    fetched_at_by_symbol: dict[str, datetime | None]
+    fetched_at_by_symbol: dict[str, datetime]
     max_data_age_seconds: Decimal
     dryrun_freshness_stale: bool = False
     dryrun_freshness_age_ms: int | None = None
@@ -1674,7 +1674,7 @@ class Stage4CycleRunner:
         spreads_bps: dict[str, Decimal] = {}
         fetch_ages: list[Decimal] = []
         age_by_symbol: dict[str, Decimal] = {}
-        fetched_at_by_symbol: dict[str, datetime | None] = {}
+        fetched_at_by_symbol: dict[str, datetime] = {}
         anomalies: set[str] = set()
         if not callable(get_orderbook):
             return MarketSnapshot(
@@ -1683,7 +1683,7 @@ class Stage4CycleRunner:
                 anomalies=set(symbols),
                 spreads_bps=spreads_bps,
                 age_seconds_by_symbol={self.norm(symbol): Decimal("999999") for symbol in symbols},
-                fetched_at_by_symbol={self.norm(symbol): None for symbol in symbols},
+                fetched_at_by_symbol={self.norm(symbol): cycle_now for symbol in symbols},
                 max_data_age_seconds=Decimal("999999"),
             )
 
@@ -1693,8 +1693,8 @@ class Stage4CycleRunner:
         for symbol in symbols:
             normalized = self.norm(symbol)
             observed_at: datetime
+            fetch_started_at = datetime.now(UTC)
             try:
-                fetch_started_at = datetime.now(UTC)
                 if callable(get_orderbook_with_ts):
                     bid_raw, ask_raw, observed_raw = get_orderbook_with_ts(symbol)
                     if isinstance(observed_raw, datetime):
@@ -1708,7 +1708,7 @@ class Stage4CycleRunner:
                 anomalies.add(normalized)
                 fetch_ages.append(Decimal("999999"))
                 age_by_symbol[normalized] = Decimal("999999")
-                fetched_at_by_symbol[normalized] = None
+                fetched_at_by_symbol[normalized] = fetch_started_at
                 continue
             bid = self._safe_decimal(bid_raw)
             ask = self._safe_decimal(ask_raw)
