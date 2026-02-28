@@ -115,6 +115,7 @@ LIVE_TRADING_NOT_ARMED_MESSAGE = (
 
 TRADER_LOCK_ACCOUNT_KEY = "trader-writer"
 MONITOR_LOCK_ACCOUNT_KEY = "monitor"
+CANARY_LOCK_ACCOUNT_KEY = "canary"
 _STATE_DB_UNLOCK_ACK = "I_UNDERSTAND_STATE_DB_UNLOCK"
 _SHARED_DB_MONITOR_ENV = "BTCBOT_ALLOW_SHARED_DB_FOR_MONITOR"
 
@@ -131,8 +132,10 @@ def _is_monitor_role(settings: Settings) -> bool:
 
 
 def _command_lock_account_key(command_name: str) -> str:
-    if command_name in {"run", "stage4-run", "canary"}:
+    if command_name in {"run", "stage4-run"}:
         return TRADER_LOCK_ACCOUNT_KEY
+    if command_name == "canary":
+        return CANARY_LOCK_ACCOUNT_KEY
     if command_name in {"health", "stage7-report", "stage7-export", "stage7-alerts", "doctor"}:
         return MONITOR_LOCK_ACCOUNT_KEY
     return command_name
@@ -166,7 +169,8 @@ def _enforce_monitor_shared_db_guard(
     if not _is_monitor_role(settings):
         return
     normalized = normalize_db_path(db_path)
-    if "live" in str(normalized).lower() and not _allow_shared_db_for_monitor(allow_shared_db_for_monitor):
+    db_basename = Path(str(normalized)).name.lower()
+    if "live" in db_basename and not _allow_shared_db_for_monitor(allow_shared_db_for_monitor):
         raise ValueError(
             _build_shared_db_failure_message(
                 settings=settings,
@@ -1510,7 +1514,7 @@ def run_canary(
         return 2
 
     try:
-        with single_instance_lock(db_path=resolved_db_path, account_key=TRADER_LOCK_ACCOUNT_KEY):
+        with single_instance_lock(db_path=resolved_db_path, account_key=CANARY_LOCK_ACCOUNT_KEY):
             canary_settings = _build_canary_settings(
                 settings,
                 symbol=resolved_symbol,
@@ -2401,14 +2405,19 @@ def run_degrade_override(
 def _pid_appears_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
-        return True
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        process.is_running()
+    except Exception:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        return False
     return True
 
 
