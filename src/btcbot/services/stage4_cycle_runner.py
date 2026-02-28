@@ -816,6 +816,7 @@ class Stage4CycleRunner:
                 and (
                     not pair_info
                     or bootstrap_drop_reasons.get("missing_pair_info", 0) > 0
+                    or force_dry_run_submit
                 )
             ):
                 metadata_free_bootstrap = self._build_metadata_free_dry_run_bootstrap_intents(
@@ -1069,6 +1070,13 @@ class Stage4CycleRunner:
                 process_role=process_role,
                 instrumentation=instrumentation,
             )
+            if settings.dry_run and force_dry_run_submit:
+                self._persist_dry_run_planned_order(
+                    state_store=state_store,
+                    cycle_id=cycle_id,
+                    planned_actions=prefiltered_actions,
+                    intents=intents,
+                )
             execution_report = execution_service.execute_with_report(prefiltered_actions)
             self._assert_execution_invariant(execution_report)
 
@@ -2579,6 +2587,48 @@ class Stage4CycleRunner:
                 )
             ]
         return []
+
+    def _persist_dry_run_planned_order(
+        self,
+        *,
+        state_store: StateStore,
+        cycle_id: str,
+        planned_actions: list[LifecycleAction],
+        intents: list[Order],
+    ) -> None:
+        submit_action = next(
+            (action for action in planned_actions if action.action_type == LifecycleActionType.SUBMIT),
+            None,
+        )
+        if submit_action is not None:
+            client_order_id = submit_action.client_order_id or (
+                f"s4-{cycle_id[:12]}-{self.norm(submit_action.symbol).lower()}-{submit_action.side.lower()}"
+            )
+            state_store.record_stage4_order_simulated_submit(
+                symbol=submit_action.symbol,
+                client_order_id=client_order_id,
+                side=submit_action.side,
+                price=submit_action.price,
+                qty=submit_action.qty,
+            )
+            return
+
+        fallback_intent = next((intent for intent in intents if str(intent.side).lower() == "buy"), None)
+        if fallback_intent is None:
+            fallback_intent = intents[0] if intents else None
+        if fallback_intent is None:
+            return
+
+        client_order_id = fallback_intent.client_order_id or (
+            f"s4-{cycle_id[:12]}-{self.norm(fallback_intent.symbol).lower()}-{str(fallback_intent.side).lower()}"
+        )
+        state_store.record_stage4_order_simulated_submit(
+            symbol=fallback_intent.symbol,
+            client_order_id=client_order_id,
+            side=str(fallback_intent.side),
+            price=fallback_intent.price,
+            qty=fallback_intent.qty,
+        )
 
     @staticmethod
     def _translate_kernel_order_intents(

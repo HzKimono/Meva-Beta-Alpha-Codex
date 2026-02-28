@@ -2555,23 +2555,38 @@ def run_state_db_unlock(
 def run_cycle_stage4(
     settings: Settings, force_dry_run: bool = False, db_path: str | None = None
 ) -> int:
+    runtime_settings = settings
+    if force_dry_run and hasattr(settings, "model_copy"):
+        runtime_settings = settings.model_copy(
+            update={
+                # force_dry_run runtime override is invocation-local and never persisted.
+                "process_role": ProcessRole.TRADER.value,
+                "safe_mode": False,
+                "dry_run": True,
+                "kill_switch": bool(getattr(settings, "kill_switch", False)),
+                "symbols": list(getattr(settings, "symbols", [])),
+                "dynamic_universe_enabled": False,
+            }
+        )
     inputs, live_policy = _compute_live_policy(
-        settings, force_dry_run=force_dry_run, include_safe_mode=True
+        runtime_settings,
+        force_dry_run=force_dry_run,
+        include_safe_mode=(not force_dry_run),
     )
     dry_run = inputs["dry_run"]
-    if settings.is_safe_mode_enabled():
+    if runtime_settings.is_safe_mode_enabled():
         logger.warning(
             "SAFE_MODE_ENABLED_OBSERVE_ONLY",
             extra={"extra": {"safe_mode": True, "banner": "*** SAFE MODE ACTIVE ***"}},
         )
-    _log_arm_check(settings, dry_run=dry_run)
+    _log_arm_check(runtime_settings, dry_run=dry_run)
     resolved_db_path = _resolve_stage7_db_path(
-        "stage4-run", db_path=db_path, settings_db_path=settings.state_db_path
+        "stage4-run", db_path=db_path, settings_db_path=runtime_settings.state_db_path
     )
     if resolved_db_path is None:
         return 2
     cycle_runner = Stage4CycleRunner()
-    effective_settings = settings.model_copy(
+    effective_settings = runtime_settings.model_copy(
         update={"dry_run": dry_run, "state_db_path": resolved_db_path}
     )
     cycle_id = uuid4().hex
@@ -2587,10 +2602,10 @@ def run_cycle_stage4(
                 "command": "stage4-run",
                 "dry_run": dry_run,
                 "live_mode": False,
-                "symbols": sorted(normalize_symbol(symbol) for symbol in settings.symbols),
+                "symbols": sorted(normalize_symbol(symbol) for symbol in runtime_settings.symbols),
                 "timestamp_utc": datetime.now(UTC).isoformat(),
-                "live_trading_enabled": settings.is_live_trading_enabled(),
-                "kill_switch": settings.kill_switch,
+                "live_trading_enabled": runtime_settings.is_live_trading_enabled(),
+                "kill_switch": runtime_settings.kill_switch,
             },
         )
         return 2
