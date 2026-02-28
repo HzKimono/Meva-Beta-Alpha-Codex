@@ -4949,7 +4949,19 @@ class StateStore:
         return str(row["value"]) if row else None
 
     def set_cursor(self, key: str, value: str) -> None:
-        with self._connect() as conn:
+        with self.transaction() as conn:
+            current_row = conn.execute(
+                "SELECT value FROM cursors WHERE key=?",
+                (key,),
+            ).fetchone()
+            if current_row is not None:
+                previous = str(current_row["value"])
+                if previous.isdigit() and str(value).isdigit() and int(value) < int(previous):
+                    msg = (
+                        "cursor_monotonicity_violation "
+                        f"key={key} previous={previous} next={value}"
+                    )
+                    raise ValueError(msg)
             conn.execute(
                 """
                 INSERT INTO cursors(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)

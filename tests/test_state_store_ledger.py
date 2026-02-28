@@ -212,3 +212,58 @@ def test_checkpoint_equivalence_full_replay_vs_resume(tmp_path) -> None:
     full_replay_state = apply_events(LedgerState(), store.load_ledger_events())
 
     assert checkpoint_state == full_replay_state
+
+
+def test_ledger_service_ingest_is_idempotent_and_fee_namespaced(tmp_path) -> None:
+    import logging
+
+    from btcbot.domain.stage4 import Fill
+    from btcbot.services.ledger_service import LedgerService
+
+    store = StateStore(db_path=str(tmp_path / "ledger_ingest.db"))
+    service = LedgerService(state_store=store, logger=logging.getLogger(__name__))
+    fill = Fill(
+        fill_id="trade-1",
+        order_id="order-1",
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        fee=Decimal("1"),
+        fee_asset="TRY",
+        ts=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    first = service.ingest_exchange_updates([fill])
+    second = service.ingest_exchange_updates([fill])
+
+    assert first.events_inserted == 2
+    assert second.events_inserted == 0
+    assert second.events_ignored == 2
+    rows = store.load_ledger_events()
+    assert {row.exchange_trade_id for row in rows} == {"trade-1", "fee:trade-1"}
+
+
+def test_append_ledger_events_reports_ignored_count_for_duplicate_batch(tmp_path) -> None:
+    store = StateStore(db_path=str(tmp_path / "ledger_batch.db"))
+    event = LedgerEvent(
+        event_id="e1",
+        ts=datetime(2024, 1, 1, tzinfo=UTC),
+        symbol="BTCTRY",
+        type=LedgerEventType.FILL,
+        side="BUY",
+        qty=Decimal("1"),
+        price=Decimal("100"),
+        fee=None,
+        fee_currency=None,
+        exchange_trade_id="t-batch",
+        exchange_order_id="o1",
+        client_order_id="c1",
+        meta={},
+    )
+
+    result = store.append_ledger_events([event, event])
+
+    assert result.attempted == 2
+    assert result.inserted == 1
+    assert result.ignored == 1

@@ -970,6 +970,13 @@ def test_accounting_fetch_new_fills_applies_lookback_even_with_cursor(store: Sta
     assert exchange.last_since_ms == 1800000
 
 
+
+def test_stage4_fill_cursor_rejects_backwards_updates(store: StateStore) -> None:
+    store.set_cursor("fills_cursor:BTCTRY", "2000")
+    with pytest.raises(ValueError, match="cursor_monotonicity_violation"):
+        store.set_cursor("fills_cursor:BTCTRY", "1999")
+
+
 def test_stage4_fill_import_idempotency_with_lookback(store: StateStore) -> None:
     exchange = FakeExchangeStage4()
     ts = now_utc()
@@ -1037,6 +1044,34 @@ def test_stage4_fill_import_idempotency_with_lookback(store: StateStore) -> None
     assert fee_events == 2
     assert applied_rows == 2
     assert second_ingest.events_ignored >= 2
+
+
+
+def test_stage4_apply_fills_is_idempotent_and_converts_non_try_fee(store: StateStore) -> None:
+    exchange = FakeExchangeStage4()
+    svc = AccountingService(exchange=exchange, state_store=store)
+    ts = now_utc()
+    fill = Fill(
+        fill_id="fill-fee-usdt",
+        order_id="ord-fee-usdt",
+        symbol="BTC_TRY",
+        side="buy",
+        price=Decimal("100"),
+        qty=Decimal("1"),
+        fee=Decimal("2"),
+        fee_asset="USDT",
+        ts=ts,
+    )
+
+    first = svc.apply_fills([fill], mark_prices={"USDT_TRY": Decimal("35")}, try_cash=Decimal("1000"))
+    second = svc.apply_fills([fill], mark_prices={"USDT_TRY": Decimal("35")}, try_cash=Decimal("1000"))
+
+    pos = store.get_stage4_position("BTC_TRY")
+    assert pos is not None
+    assert pos.qty == Decimal("1")
+    assert pos.avg_cost_try == Decimal("170")
+    assert first.total_equity_try == second.total_equity_try
+    assert svc.last_applied_fills_count == 0
 
 
 def test_reconcile_service_resolve_covers_unknown_external_and_enrichment() -> None:
