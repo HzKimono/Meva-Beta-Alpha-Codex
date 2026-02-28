@@ -253,7 +253,6 @@ class MarketDataService:
             or observed_age_ms is None
             or observed_age_ms > max_age_ms
             or not snapshot.connected
-            or bool(snapshot.missing_symbols)
         )
         return MarketDataFreshness(
             is_stale=is_stale,
