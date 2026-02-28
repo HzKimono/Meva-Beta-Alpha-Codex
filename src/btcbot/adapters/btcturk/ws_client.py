@@ -113,12 +113,13 @@ class BtcturkWsClient:
                 if socket is not None:
                     await self._close_socket(socket)
 
-            if self._stop.is_set():
-                break
-
             attempt += 1
             self.metrics.inc("ws_reconnects")
             self.metrics.inc("ws_reconnect_rate")
+
+            if self._stop.is_set():
+                break
+
             with get_instrumentation().trace("ws_reconnect", attrs={"attempt": attempt}):
                 await asyncio.sleep(self._compute_backoff(attempt))
 
