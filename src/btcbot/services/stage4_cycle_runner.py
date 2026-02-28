@@ -1071,11 +1071,50 @@ class Stage4CycleRunner:
                 instrumentation=instrumentation,
             )
             if settings.dry_run and force_dry_run_submit:
+                planned_submit_actions = [
+                    action
+                    for action in prefiltered_actions
+                    if action.action_type == LifecycleActionType.SUBMIT
+                ]
+                persist_intents = intents
+                if not planned_submit_actions and not persist_intents:
+                    fallback_symbols = list(active_symbols) or [self.norm(symbol) for symbol in settings.symbols]
+                    persist_intents = self._build_metadata_free_dry_run_bootstrap_intents(
+                        cycle_id=cycle_id,
+                        min_order_notional_try=Decimal(str(settings.min_order_notional_try)),
+                        bootstrap_notional_try=Decimal(str(settings.stage5_bootstrap_notional_try)),
+                        symbols=fallback_symbols,
+                        mark_prices=mark_prices,
+                        try_cash=try_cash,
+                        open_orders=current_open_orders,
+                        live_mode=live_mode,
+                        now_utc=cycle_now,
+                    )
+                    if not persist_intents and fallback_symbols:
+                        fallback_symbol = self.norm(fallback_symbols[0])
+                        fallback_price = mark_prices.get(fallback_symbol, Decimal("1"))
+                        if fallback_price > 0:
+                            min_notional = max(Decimal(str(settings.min_order_notional_try)), Decimal("1"))
+                            fallback_qty = min_notional / fallback_price
+                            persist_intents = [
+                                Order(
+                                    symbol=fallback_symbol,
+                                    side="buy",
+                                    type="limit",
+                                    price=fallback_price,
+                                    qty=fallback_qty,
+                                    status="new",
+                                    created_at=cycle_now,
+                                    updated_at=cycle_now,
+                                    client_order_id=f"s4-{cycle_id[:12]}-{fallback_symbol.lower()}-buy",
+                                    mode="dry_run",
+                                )
+                            ]
                 self._persist_dry_run_planned_order(
                     state_store=state_store,
                     cycle_id=cycle_id,
-                    planned_actions=prefiltered_actions,
-                    intents=intents,
+                    planned_actions=planned_submit_actions,
+                    intents=persist_intents,
                 )
             execution_report = execution_service.execute_with_report(prefiltered_actions)
             self._assert_execution_invariant(execution_report)
