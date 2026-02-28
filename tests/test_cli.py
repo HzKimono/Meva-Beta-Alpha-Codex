@@ -2809,3 +2809,63 @@ def test_run_state_db_unlock_clears_stale_pid_file(tmp_path: Path, capsys) -> No
     assert rc == 0
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["cleared"] is True
+
+
+def test_run_preflight_prints_role_policy_and_lock_context(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        cli,
+        "run_preflight_checks",
+        lambda **kwargs: {
+            "profile": "live",
+            "process_role": "MONITOR",
+            "db_path": "/tmp/monitor_state.db",
+            "passed": False,
+            "checks": [{"name": "db_lock_and_writable", "ok": True, "detail": "ok"}],
+            "os_lock": {"owner_pid": 123, "owner_pid_alive": True},
+            "db_instance_lock": {
+                "instance_id": "iid-1",
+                "active_instances": [{"instance_id": "iid-1", "ttl_fresh": True}],
+                "conflict_risk": False,
+            },
+            "side_effects_policy": {
+                "allowed": False,
+                "reasons": ["MONITOR_ROLE"],
+                "message": "MONITOR role blocks side effects",
+            },
+        },
+    )
+
+    rc = cli.run_preflight(settings=Settings(DRY_RUN=True), profile="live")
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert "Preflight context: role=MONITOR" in out
+    assert "side_effects_allowed=False" in out
+    assert "reasons=MONITOR_ROLE" in out
+    assert "Lock status:" in out
+
+
+def test_run_doctor_prints_compact_policy_context(monkeypatch, capsys, tmp_path) -> None:
+    from btcbot.services.doctor import DoctorReport
+
+    report = DoctorReport(checks=[], errors=[], warnings=[], actions=[])
+    monkeypatch.setattr(cli, "run_health_checks", lambda *args, **kwargs: report)
+    monkeypatch.setattr(
+        cli,
+        "get_lock_diagnostics",
+        lambda **kwargs: type("Diag", (), {"owner_pid": None, "owner_pid_alive": False})(),
+    )
+
+    settings = Settings(
+        DRY_RUN=True,
+        PROCESS_ROLE="MONITOR",
+        STATE_DB_PATH=str(tmp_path / "monitor_state.db"),
+    )
+
+    rc = cli.run_doctor(settings, db_path=str(tmp_path / "monitor_state.db"), dataset_path=None)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "doctor_context: role=MONITOR" in out
+    assert "side_effects_allowed=False" in out
+    assert "reasons=MONITOR_ROLE" in out

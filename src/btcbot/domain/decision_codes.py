@@ -4,6 +4,7 @@ from enum import StrEnum
 
 
 class ReasonCode(StrEnum):
+    POLICY_BLOCK_MONITOR_ROLE = "policy_block:monitor_role"
     POLICY_BLOCK_KILL_SWITCH = "policy_block:kill_switch"
     POLICY_BLOCK_DRY_RUN = "policy_block:dry_run"
     POLICY_BLOCK_NOT_ARMED = "policy_block:not_armed"
