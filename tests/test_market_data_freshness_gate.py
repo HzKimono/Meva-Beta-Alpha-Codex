@@ -91,7 +91,7 @@ def test_market_data_ws_age_stale_falls_back_to_rest_when_enabled() -> None:
     assert exchange.orderbook_hits == 1
 
 
-def test_market_data_missing_symbols_sets_stale_flag() -> None:
+def test_market_data_missing_symbols_are_reported_without_global_stale() -> None:
     now = datetime(2025, 1, 1, tzinfo=UTC)
 
     def _clock() -> datetime:
@@ -103,7 +103,7 @@ def test_market_data_missing_symbols_sets_stale_flag() -> None:
 
     _bids, freshness = service.get_best_bids_with_freshness(["BTC_TRY", "ETH_TRY"], max_age_ms=500)
 
-    assert freshness.is_stale is True
+    assert freshness.is_stale is False
     assert freshness.missing_symbols == ("ETH_TRY",)
 
 
