@@ -69,6 +69,23 @@ class _MockExchange:
         self.client = client
 
 
+
+
+class _ExchangeTimestampOnly:
+    def __init__(self, *, pair_symbols: list[str], books: dict[str, tuple[str, str, str, str]], observed_at: datetime) -> None:
+        self._client = _MockClient(pair_symbols, books, ts=observed_at)
+        self.client = type("NoOrderbookClient", (), {"get_exchange_info": self._client.get_exchange_info})()
+        self._books = books
+        self._observed_at = observed_at
+
+    def get_exchange_info(self) -> list[PairInfo]:
+        return self._client.get_exchange_info()
+
+    def get_orderbook_with_timestamp(self, symbol: str) -> tuple[str, str, datetime]:
+        bid_price, _bid_qty, ask_price, _ask_qty = self._books[symbol]
+        return bid_price, ask_price, self._observed_at
+
+
 def _seed_lookback(store: StateStore, now: datetime, symbols: list[str]) -> None:
     for symbol in symbols:
         store.upsert_universe_price_snapshot(
@@ -368,3 +385,49 @@ def test_aggressive_allocation_respects_cash_target_invariant() -> None:
     remaining_cash = report.cash_try - planned_plus_fees
     assert report.planned_total_try > Decimal("0")
     assert remaining_cash >= Decimal("300")
+
+def test_missing_orderbook_timestamp_falls_back_to_fetch_time(tmp_path) -> None:
+    now = datetime.now(UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = _MockExchange(
+        _MockClient(
+            ["AAAATRY"],
+            {"AAAATRY": ("120", "500", "121", "500")},
+            ts=now,
+            include_timestamp=False,
+        )
+    )
+    _seed_lookback(store, now, ["AAAATRY"])
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="[]", UNIVERSE_SPREAD_MAX_BPS=Decimal("200")),
+        now_utc=now,
+        cycle_id="cts1",
+    )
+
+    assert "orderbook_no_timestamp" not in result.ineligible_counts
+
+
+def test_exchange_level_timestamped_orderbook_is_used(tmp_path) -> None:
+    now = datetime.now(UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+    exchange = _ExchangeTimestampOnly(
+        pair_symbols=["AAAATRY"],
+        books={"AAAATRY": ("120", "500", "121", "500")},
+        observed_at=now,
+    )
+    _seed_lookback(store, now, ["AAAATRY"])
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(DRY_RUN=True, KILL_SWITCH=False, SYMBOLS="[]", UNIVERSE_SPREAD_MAX_BPS=Decimal("200")),
+        now_utc=now,
+        cycle_id="cts2",
+    )
+
+    assert result.ineligible_counts.get("orderbook_unavailable", 0) == 0
+    assert result.ineligible_counts.get("depth_unavailable", 0) == 1
+
