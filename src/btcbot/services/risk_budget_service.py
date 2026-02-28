@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from btcbot.accounting.models import PortfolioAccountingState
+from btcbot.accounting.models import PortfolioAccountingState, quantize_money
 from btcbot.config import Settings
 from btcbot.domain.risk_budget import Mode, RiskDecision, RiskLimits, RiskSignals, decide_mode
 from btcbot.domain.risk_mode_codec import parse_risk_mode
@@ -191,11 +191,16 @@ class RiskBudgetService:
             )
 
         realized_delta = realized_pnl_total_try - last_realized_total
-        next_trading, next_treasury = self.budget_policy.apply_self_financing(
-            trading_capital_try=trading_capital,
-            treasury_try=treasury,
-            realized_pnl_delta_try=realized_delta,
-        )
+        next_trading = trading_capital
+        next_treasury = treasury
+        if realized_delta > 0:
+            next_trading, next_treasury = self.budget_policy.apply_self_financing(
+                trading_capital_try=trading_capital,
+                treasury_try=treasury,
+                realized_pnl_delta_try=realized_delta,
+            )
+        elif realized_delta < 0:
+            next_trading = quantize_money(trading_capital + realized_delta)
 
         if next_trading < 0 or next_treasury < 0:
             emit_decision(
