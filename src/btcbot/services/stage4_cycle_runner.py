@@ -304,6 +304,10 @@ class Stage4CycleRunner:
                 for symbol, age in market_snapshot.age_seconds_by_symbol.items()
                 if age > Decimal(str(settings.stale_market_data_seconds))
             }
+            if settings.dry_run and (
+                type(getattr(exchange, "client", exchange)).__name__ == "DryRunExchangeClient"
+            ):
+                stale_symbols = set()
             if stale_symbols:
                 logger.warning(
                     "stale_market_data_age_exceeded",
