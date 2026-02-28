@@ -1626,7 +1626,9 @@ class Stage4CycleRunner:
         settings: Settings | None = None,
     ) -> MarketSnapshot:
         base = getattr(exchange, "client", exchange)
-        get_orderbook = getattr(base, "get_orderbook", None)
+        get_orderbook = getattr(exchange, "get_orderbook", None)
+        if not callable(get_orderbook):
+            get_orderbook = getattr(base, "get_orderbook", None)
         instrumentation = get_instrumentation()
         missing_symbols_count = 0
         freshness_stale = False
@@ -1685,18 +1687,23 @@ class Stage4CycleRunner:
                 max_data_age_seconds=Decimal("999999"),
             )
 
-        get_orderbook_with_ts = getattr(base, "get_orderbook_with_timestamp", None)
+        get_orderbook_with_ts = getattr(exchange, "get_orderbook_with_timestamp", None)
+        if not callable(get_orderbook_with_ts):
+            get_orderbook_with_ts = getattr(base, "get_orderbook_with_timestamp", None)
         for symbol in symbols:
             normalized = self.norm(symbol)
             observed_at: datetime | None = None
             try:
+                fetch_started_at = datetime.now(UTC)
                 if callable(get_orderbook_with_ts):
                     bid_raw, ask_raw, observed_raw = get_orderbook_with_ts(symbol)
                     if isinstance(observed_raw, datetime):
                         observed_at = observed_raw.astimezone(UTC)
+                    else:
+                        observed_at = fetch_started_at
                 else:
                     bid_raw, ask_raw = get_orderbook(symbol)
-                    observed_at = datetime.now(UTC)
+                    observed_at = fetch_started_at
             except Exception:  # noqa: BLE001
                 anomalies.add(normalized)
                 fetch_ages.append(Decimal("999999"))
