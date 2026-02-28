@@ -466,7 +466,8 @@ def test_risk_budget_live_missing_mark_price_fail_closed(tmp_path) -> None:
     )
 
     assert decision.mode == Mode.OBSERVE_ONLY
-    assert decision.risk_decision.reasons == ["mark_price_missing_fail_closed"]
+    assert decision.risk_decision.reasons[0] == "mark_price_missing_fail_closed"
+    assert any(reason.startswith("missing_symbols_count=") for reason in decision.risk_decision.reasons)
 
 
 def test_risk_budget_live_non_positive_mark_price_fail_closed(tmp_path) -> None:
@@ -494,4 +495,113 @@ def test_risk_budget_live_non_positive_mark_price_fail_closed(tmp_path) -> None:
     )
 
     assert decision.mode == Mode.OBSERVE_ONLY
-    assert decision.risk_decision.reasons == ["mark_price_missing_fail_closed"]
+    assert decision.risk_decision.reasons[0] == "mark_price_missing_fail_closed"
+    assert any(reason.startswith("missing_symbols_count=") for reason in decision.risk_decision.reasons)
+
+
+def test_self_financing_checkpoint_idempotent_and_split(tmp_path) -> None:
+    db = StateStore(str(tmp_path / "capital_policy.sqlite"))
+    service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
+
+    first = service.apply_self_financing_checkpoint(
+        cycle_id="c1",
+        realized_pnl_total_try=Decimal("100"),
+        ledger_event_count=10,
+        ledger_checkpoint_id="cp-10",
+        seed_trading_capital_try=Decimal("1000"),
+    )
+    assert first.applied is True
+    assert first.trading_capital_try == Decimal("1060")
+    assert first.treasury_try == Decimal("40")
+
+    second = service.apply_self_financing_checkpoint(
+        cycle_id="c1-repeat",
+        realized_pnl_total_try=Decimal("100"),
+        ledger_event_count=10,
+        ledger_checkpoint_id="cp-10",
+        seed_trading_capital_try=Decimal("1000"),
+    )
+    assert second.applied is False
+    assert second.trading_capital_try == Decimal("1060")
+    assert second.treasury_try == Decimal("40")
+
+
+def test_self_financing_checkpoint_negative_delta_only_reduces_trading(tmp_path) -> None:
+    db = StateStore(str(tmp_path / "capital_policy_loss.sqlite"))
+    service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
+
+    db.upsert_capital_policy_state(
+        trading_capital_try=Decimal("1060"),
+        treasury_try=Decimal("40"),
+        last_realized_pnl_total_try=Decimal("100"),
+        last_event_count=10,
+        last_checkpoint_id="cp-10",
+        last_cycle_id="seed",
+    )
+
+    result = service.apply_self_financing_checkpoint(
+        cycle_id="c2",
+        realized_pnl_total_try=Decimal("80"),
+        ledger_event_count=11,
+        ledger_checkpoint_id="cp-11",
+        seed_trading_capital_try=Decimal("1000"),
+    )
+    assert result.applied is True
+    assert result.realized_pnl_delta_try == Decimal("-20")
+    assert result.trading_capital_try == Decimal("1040")
+    assert result.treasury_try == Decimal("40")
+
+
+def test_compute_decision_live_missing_mark_prices_fail_closed() -> None:
+    db = StateStore(":memory:")
+    service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
+    pnl_report = PnlReport(
+        realized_pnl_total=Decimal("0"),
+        unrealized_pnl_total=Decimal("0"),
+        fees_total_by_currency={"TRY": Decimal("1")},
+        per_symbol=[],
+        equity_estimate=Decimal("1000"),
+        fees_total_try=Decimal("1"),
+    )
+
+    decision, *_ = service.compute_decision(
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=False,
+        live_mode=True,
+        tradable_symbols=["BTCTRY", "ETHTRY"],
+    )
+
+    assert decision.mode == Mode.OBSERVE_ONLY
+    assert decision.risk_decision.reasons[0] == "mark_price_missing_fail_closed"
+    assert "missing_symbols_count=2" in decision.risk_decision.reasons[1]
+
+
+def test_compute_decision_fee_conversion_missing_rate_reduces_risk() -> None:
+    db = StateStore(":memory:")
+    service = RiskBudgetService(db, now_provider=lambda: datetime(2026, 1, 2, 12, 0, tzinfo=UTC))
+    pnl_report = PnlReport(
+        realized_pnl_total=Decimal("0"),
+        unrealized_pnl_total=Decimal("0"),
+        fees_total_by_currency={"USDT": Decimal("2")},
+        per_symbol=[],
+        equity_estimate=Decimal("1000"),
+        fees_total_try=Decimal("0"),
+        fee_conversion_missing_currencies=("USDT",),
+    )
+
+    decision, *_ = service.compute_decision(
+        limits=_limits(),
+        pnl_report=pnl_report,
+        positions=[],
+        mark_prices={},
+        realized_today_try=Decimal("0"),
+        kill_switch_active=False,
+    )
+
+    assert decision.mode == Mode.REDUCE_RISK_ONLY
+    assert decision.risk_decision.reasons == ["fee_conversion_missing_rate"]
+    assert decision.risk_decision.signals.missing_currencies == ("USDT",)
