@@ -3,6 +3,7 @@ from __future__ import annotations
 # P0.2 diagnostics: standardize Stage4 reject reason labels and attach min-notional numeric context.
 import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
