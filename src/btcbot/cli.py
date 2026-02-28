@@ -2571,9 +2571,15 @@ def run_cycle_stage4(
     if resolved_db_path is None:
         return 2
     cycle_runner = Stage4CycleRunner()
-    effective_settings = settings.model_copy(
-        update={"dry_run": dry_run, "state_db_path": resolved_db_path}
-    )
+    effective_update = {"dry_run": dry_run, "state_db_path": resolved_db_path}
+    if force_dry_run:
+        effective_update.update(
+            {
+                "safe_mode": False,
+                "process_role": ProcessRole.LIVE.value,
+            }
+        )
+    effective_settings = settings.model_copy(update=effective_update)
     cycle_id = uuid4().hex
     if not dry_run and not live_policy.allowed:
         logger.error(live_policy.message, extra={"extra": {"reasons": live_policy.reasons}})
@@ -2603,7 +2609,9 @@ def run_cycle_stage4(
                     effective_settings,
                     force_dry_run_submit=bool(force_dry_run),
                 )
-            except TypeError:
+            except TypeError as exc:
+                if "force_dry_run_submit" not in str(exc):
+                    raise
                 result = cycle_runner.run_one_cycle(effective_settings)
             return result
     except Stage4ConfigurationError as exc:

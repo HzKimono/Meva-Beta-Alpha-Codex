@@ -1071,6 +1071,11 @@ class Stage4CycleRunner:
             )
             execution_report = execution_service.execute_with_report(prefiltered_actions)
             self._assert_execution_invariant(execution_report)
+            orders_submitted_effective = (
+                execution_report.submitted
+                if not settings.dry_run
+                else (execution_report.submitted + execution_report.simulated)
+            )
 
             cycle_ended_at = datetime.now(UTC)
             updated_cycle_duration_ms = int(
@@ -1235,7 +1240,7 @@ class Stage4CycleRunner:
                 fills_persisted_count=accounting_service.last_applied_fills_count,
                 ledger_append_result=ledger_ingest,
                 pnl_report=pnl_report,
-                orders_submitted=execution_report.submitted,
+                orders_submitted=orders_submitted_effective,
                 orders_canceled=execution_report.canceled,
                 rejects_count=execution_report.rejected,
                 mark_prices=mark_prices,
@@ -1365,7 +1370,7 @@ class Stage4CycleRunner:
                         intents_created=len(intents),
                         intents_after_risk=len(accepted_actions),
                         intents_executed=execution_report.executed_total,
-                        orders_submitted=execution_report.submitted,
+                        orders_submitted=orders_submitted_effective,
                         rejects_by_code=rejects_by_code,
                         intent_skip_reasons=[
                             getattr(item, "skip_reason", None)
@@ -1376,7 +1381,7 @@ class Stage4CycleRunner:
                     intents_created=len(intents),
                     intents_after_risk=len(accepted_actions),
                     intents_executed=execution_report.executed_total,
-                    orders_submitted=execution_report.submitted,
+                    orders_submitted=orders_submitted_effective,
                     rejects_by_code=rejects_by_code,
                     breaker_state=("open" if breaker_is_open else "closed"),
                     degraded_mode=degraded_mode,
@@ -1399,7 +1404,7 @@ class Stage4CycleRunner:
                         "cycle_duration_ms": updated_cycle_duration_ms,
                         "intents_created": len(intents),
                         "intents_executed": execution_report.executed_total,
-                        "orders_submitted": execution_report.submitted,
+                        "orders_submitted": orders_submitted_effective,
                         "orders_failed": execution_report.rejected,
                         "rejects_by_code": rejects_by_code,
                         "breaker_open": bool((api_snapshot or {}).get("breaker_open", False)),
