@@ -2774,6 +2774,22 @@ def test_prepare_runtime_allows_monitor_shared_live_db_with_override(monkeypatch
     assert "state_live.db" in prepared.state_db_path
 
 
+def test_prepare_runtime_allows_monitor_db_when_parent_dir_contains_live() -> None:
+    settings = Settings(
+        PROCESS_ROLE="MONITOR",
+        STATE_DB_PATH="C:/work/Meva-Live/btcbot_state.db",
+        DRY_RUN=True,
+    )
+
+    prepared = cli._prepare_runtime(
+        settings,
+        command_name="stage7-report",
+        env_file_arg=None,
+        allow_shared_db_for_monitor=False,
+    )
+
+    assert prepared.state_db_path.endswith("btcbot_state.db")
+
 def test_run_state_db_unlock_clears_stale_pid_file(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "monitor.db"
     settings = Settings(PROCESS_ROLE="MONITOR", STATE_DB_PATH=str(db_path), DRY_RUN=True)

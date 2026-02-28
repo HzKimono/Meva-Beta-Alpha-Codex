@@ -66,15 +66,19 @@ def _read_pid_text(pid_path: Path) -> str | None:
 def _pid_appears_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
-        # Portable process probing is unreliable without pywin32; assume unknown as alive.
-        return True
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        process.is_running()
+    except Exception:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        return False
     return True
 
 
