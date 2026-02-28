@@ -13,7 +13,8 @@ from btcbot.config import Settings
 from btcbot.domain.accounting import TradeFill
 from btcbot.domain.models import OrderSide, PairInfo
 from btcbot.domain.stage4 import LifecycleAction, LifecycleActionType, Order
-from btcbot.services.stage4_cycle_runner import Stage4CycleRunner
+from btcbot.services.risk_budget_service import RiskBudgetService
+from btcbot.services.stage4_cycle_runner import MarketSnapshot, Stage4CycleRunner
 from btcbot.services.state_store import StateStore
 
 
@@ -1363,3 +1364,166 @@ def test_prefilter_min_notional_is_deterministic_across_calls() -> None:
 
     assert first_dropped == second_dropped == 0
     assert first_filtered == second_filtered
+
+
+def test_stage4_risk_budget_not_fail_closed_when_some_symbols_missing_marks(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+    exchange = FakeExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    cycle_now = datetime(2025, 1, 1, tzinfo=UTC)
+
+    def _snapshot(self, *args, **kwargs):
+        del self, args, kwargs
+        return MarketSnapshot(
+            mark_prices={"BTCTRY": Decimal("100")},
+            orderbooks={"BTCTRY": (Decimal("99"), Decimal("101"))},
+            anomalies=set(),
+            spreads_bps={"BTCTRY": Decimal("10")},
+            age_seconds_by_symbol={"BTCTRY": Decimal("0"), "ETHTRY": Decimal("0")},
+            fetched_at_by_symbol={"BTCTRY": cycle_now, "ETHTRY": cycle_now},
+            max_data_age_seconds=Decimal("0"),
+        )
+
+    monkeypatch.setattr(Stage4CycleRunner, "_resolve_market_snapshot", _snapshot)
+
+    captured: dict[str, object] = {}
+    original_compute = RiskBudgetService.compute_decision
+
+    def _wrapped_compute(self, **kwargs):
+        captured["tradable_symbols"] = list(kwargs.get("tradable_symbols") or [])
+        decision, prev_mode, peak_equity, fees_today, risk_day = original_compute(self, **kwargs)
+        captured["reasons"] = list(decision.risk_decision.reasons)
+        return decision, prev_mode, peak_equity, fees_today, risk_day
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.RiskBudgetService.compute_decision",
+        _wrapped_compute,
+    )
+
+    settings = Settings(
+        DRY_RUN=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="k",
+        BTCTURK_API_SECRET="s",
+        SAFE_MODE=False,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "runner_mark_coverage.sqlite"),
+        SYMBOLS="BTC_TRY,ETH_TRY",
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+    assert captured["tradable_symbols"] == ["BTCTRY"]
+    assert "mark_price_missing_fail_closed" not in captured["reasons"]
+
+
+def test_stage4_safety_net_recovers_single_symbol_when_all_marks_missing(monkeypatch, tmp_path) -> None:
+    runner = Stage4CycleRunner()
+
+    class SafetyNetExchange(FakeExchange):
+        def get_orderbook_with_timestamp(self, symbol: str):
+            self.calls.append(f"orderbook_ts:{symbol}")
+            return (Decimal("100"), Decimal("102"), datetime(2025, 1, 1, tzinfo=UTC))
+
+    exchange = SafetyNetExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    cycle_now = datetime(2025, 1, 1, tzinfo=UTC)
+
+    def _snapshot(self, *args, **kwargs):
+        del self, args, kwargs
+        return MarketSnapshot(
+            mark_prices={},
+            orderbooks={},
+            anomalies=set(),
+            spreads_bps={},
+            age_seconds_by_symbol={"BTCTRY": Decimal("0")},
+            fetched_at_by_symbol={"BTCTRY": cycle_now},
+            max_data_age_seconds=Decimal("0"),
+        )
+
+    monkeypatch.setattr(Stage4CycleRunner, "_resolve_market_snapshot", _snapshot)
+
+    captured: dict[str, object] = {}
+    original_compute = RiskBudgetService.compute_decision
+
+    def _wrapped_compute(self, **kwargs):
+        captured["tradable_symbols"] = list(kwargs.get("tradable_symbols") or [])
+        captured["mark_prices"] = dict(kwargs.get("mark_prices") or {})
+        return original_compute(self, **kwargs)
+
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.RiskBudgetService.compute_decision",
+        _wrapped_compute,
+    )
+
+    settings = Settings(
+        DRY_RUN=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="k",
+        BTCTURK_API_SECRET="s",
+        SAFE_MODE=False,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "runner_mark_safety_net.sqlite"),
+        SYMBOLS="BTC_TRY",
+    )
+
+    assert runner.run_one_cycle(settings) == 0
+    assert captured["tradable_symbols"] == ["BTCTRY"]
+    assert captured["mark_prices"]["BTCTRY"] == Decimal("101")
+
+
+def test_stage4_safety_net_failure_logs_marker_and_continues(monkeypatch, tmp_path, caplog) -> None:
+    runner = Stage4CycleRunner()
+
+    class FailingSafetyNetExchange(FakeExchange):
+        def get_orderbook_with_timestamp(self, symbol: str):
+            self.calls.append(f"orderbook_ts:{symbol}")
+            raise RuntimeError("boom")
+
+    exchange = FailingSafetyNetExchange()
+    monkeypatch.setattr(
+        "btcbot.services.stage4_cycle_runner.build_exchange_stage4",
+        lambda settings, dry_run: exchange,
+    )
+
+    cycle_now = datetime(2025, 1, 1, tzinfo=UTC)
+
+    def _snapshot(self, *args, **kwargs):
+        del self, args, kwargs
+        return MarketSnapshot(
+            mark_prices={},
+            orderbooks={},
+            anomalies=set(),
+            spreads_bps={},
+            age_seconds_by_symbol={"BTCTRY": Decimal("0")},
+            fetched_at_by_symbol={"BTCTRY": cycle_now},
+            max_data_age_seconds=Decimal("0"),
+        )
+
+    monkeypatch.setattr(Stage4CycleRunner, "_resolve_market_snapshot", _snapshot)
+
+    settings = Settings(
+        DRY_RUN=False,
+        LIVE_TRADING=True,
+        LIVE_TRADING_ACK="I_UNDERSTAND",
+        BTCTURK_API_KEY="k",
+        BTCTURK_API_SECRET="s",
+        SAFE_MODE=False,
+        KILL_SWITCH=False,
+        STATE_DB_PATH=str(tmp_path / "runner_mark_safety_net_fail.sqlite"),
+        SYMBOLS="BTC_TRY",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert runner.run_one_cycle(settings) == 0
+
+    assert any(record.message == "stage4_mark_price_safety_net_failed" for record in caplog.records)
