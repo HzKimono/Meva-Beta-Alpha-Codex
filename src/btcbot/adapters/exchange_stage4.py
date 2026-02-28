@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -35,5 +36,9 @@ class ExchangeClientStage4(Protocol):
     def cancel_order_by_client_order_id(self, client_order_id: str) -> bool: ...
 
     def get_recent_fills(self, symbol: str, since_ms: int | None = None) -> list[TradeFill]: ...
+
+    def get_orderbook_with_timestamp(
+        self, symbol: str, limit: int | None = None
+    ) -> tuple[Decimal, Decimal, datetime | None]: ...
 
     def close(self) -> None: ...
