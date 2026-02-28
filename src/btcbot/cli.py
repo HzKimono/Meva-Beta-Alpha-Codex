@@ -2099,6 +2099,7 @@ def run_cycle(
                 approved_intents = risk_service.filter(
                     cycle_id=cycle_id,
                     intents=raw_intents,
+                    mark_prices=mark_prices,
                     try_cash_target=try_cash_target,
                     investable_try=investable_try,
                     account_snapshot=account_snapshot,
