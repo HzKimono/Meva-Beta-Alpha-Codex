@@ -518,3 +518,46 @@ def test_orderbook_parse_failures_are_logged_and_counted(tmp_path, caplog) -> No
     assert result.ineligible_counts["depth_unavailable"] == 1
     assert result.filters.get("diagnostics", {}).get("orderbook_parse_failure_timestamped") == 1
     assert any("dynamic_universe_orderbook_parse_failed" in rec.message for rec in caplog.records)
+
+
+def test_unparseable_timestamp_is_soft_failure_with_fetch_time_fallback(tmp_path) -> None:
+    now = datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+    store = StateStore(db_path=str(tmp_path / "state.db"))
+
+    class _UnparseableTimestampClient(_MockClient):
+        def get_orderbook_with_timestamp(self, symbol: str) -> dict[str, object]:
+            bid_price, bid_qty, ask_price, ask_qty = self._books[symbol]
+            return {
+                "bids": [[bid_price, bid_qty]],
+                "asks": [[ask_price, ask_qty]],
+                "timestamp": "not-a-real-timestamp",
+            }
+
+    exchange = _MockExchange(
+        _UnparseableTimestampClient(
+            ["AAAATRY"],
+            {"AAAATRY": ("120", "500", "121", "500")},
+            ts=now,
+        )
+    )
+    _seed_lookback(store, now, ["AAAATRY"])
+
+    result = DynamicUniverseService().select(
+        exchange=exchange,
+        state_store=store,
+        settings=Settings(
+            DRY_RUN=True,
+            KILL_SWITCH=False,
+            SYMBOLS="[]",
+            UNIVERSE_SPREAD_MAX_BPS=Decimal("200"),
+            UNIVERSE_MIN_DEPTH_TRY=Decimal("1"),
+        ),
+        now_utc=now,
+        cycle_id="parse-soft-1",
+    )
+
+    assert result.selected_symbols == ("AAAATRY",)
+    diagnostics = result.filters.get("diagnostics", {})
+    assert diagnostics.get("timestamp_parse_fail_count", 0) >= 1
+    assert diagnostics.get("orderbook_unavailable_count") == 0
+    assert diagnostics.get("depth_unavailable_count") == 0
