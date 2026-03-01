@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import random
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
@@ -55,6 +56,10 @@ class BtcturkWsClient:
         heartbeat_interval_seconds: float | None = None,
         heartbeat_payload_factory: Callable[[], str] | None = None,
         process_role: str | None = None,
+        ws_reconnect_storm_threshold: int = 6,
+        ws_reconnect_storm_window_seconds: int = 120,
+        ws_reconnect_storm_log_cooldown_seconds: int = 300,
+        now_fn: Callable[[], float] = monotonic,
     ) -> None:
         self.url = url
         self.subscription_factory = subscription_factory
@@ -70,10 +75,19 @@ class BtcturkWsClient:
             process_role or get_process_role_from_env().value
         ).value
         self.heartbeat_payload_factory = heartbeat_payload_factory
+        # Storm detector: reconnect bursts indicate upstream instability and need early triage.
+        self.ws_reconnect_storm_threshold = max(1, int(ws_reconnect_storm_threshold))
+        self.ws_reconnect_storm_window_seconds = max(1, int(ws_reconnect_storm_window_seconds))
+        self.ws_reconnect_storm_log_cooldown_seconds = max(
+            1, int(ws_reconnect_storm_log_cooldown_seconds)
+        )
+        self._now_fn = now_fn
 
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._last_message_ts = monotonic()
+        self._reconnect_timestamps: deque[float] = deque()
+        self._last_storm_log_at: float = -1.0
 
     async def run(self) -> None:
         attempt = 0
@@ -101,13 +115,14 @@ class BtcturkWsClient:
                     err = task.exception()
                     if err is not None:
                         raise err
-            except Exception:
+            except Exception as exc:
                 self.metrics.inc("ws_drops")
                 inc_counter(
                     "bot_ws_disconnects_total",
                     labels={"exchange": "btcturk", "process_role": self.process_role},
                 )
                 logger.exception("BTCTurk websocket disconnected")
+                self._record_reconnect_event(last_exception=exc)
             finally:
                 await self._cancel_tasks()
                 if socket is not None:
@@ -122,6 +137,41 @@ class BtcturkWsClient:
 
             with get_instrumentation().trace("ws_reconnect", attrs={"attempt": attempt}):
                 await asyncio.sleep(self._compute_backoff(attempt))
+
+    def _record_reconnect_event(self, *, last_exception: Exception | None) -> None:
+        now = self._now_fn()
+        window_start = now - float(self.ws_reconnect_storm_window_seconds)
+        self._reconnect_timestamps.append(now)
+        while self._reconnect_timestamps and self._reconnect_timestamps[0] < window_start:
+            self._reconnect_timestamps.popleft()
+
+        reconnects_in_window = len(self._reconnect_timestamps)
+        instrumentation = get_instrumentation()
+        attrs = {"exchange": "btcturk", "process_role": self.process_role}
+        instrumentation.gauge("ws_reconnects_in_window", float(reconnects_in_window), attrs=attrs)
+        if reconnects_in_window < self.ws_reconnect_storm_threshold:
+            return
+
+        instrumentation.counter("ws_reconnect_storm_total", 1, attrs=attrs)
+        if (
+            self._last_storm_log_at >= 0
+            and now - self._last_storm_log_at < self.ws_reconnect_storm_log_cooldown_seconds
+        ):
+            return
+
+        self._last_storm_log_at = now
+        logger.warning(
+            "ws_reconnect_storm",
+            extra={
+                "extra": {
+                    "event": "ws_reconnect_storm",
+                    "reconnects_in_window": reconnects_in_window,
+                    "storm_threshold": self.ws_reconnect_storm_threshold,
+                    "window_seconds": self.ws_reconnect_storm_window_seconds,
+                    "last_exception": type(last_exception).__name__ if last_exception else None,
+                }
+            },
+        )
 
     async def shutdown(self) -> None:
         self._stop.set()

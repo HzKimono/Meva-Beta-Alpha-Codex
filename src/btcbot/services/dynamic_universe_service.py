@@ -311,6 +311,16 @@ class DynamicUniverseService:
         instr.gauge("universe_churn_count", float(churn_count))
 
         if len(selected) <= _EMPTY_SELECTION_LOG_THRESHOLD:
+            instr.counter("universe_empty_selection_total", 1)
+            reason_keys = {
+                "depth_unavailable": ineligible_counts.get("depth_unavailable", 0),
+                "orderbook_unavailable": ineligible_counts.get("orderbook_unavailable", 0),
+                "stale_orderbook": ineligible_counts.get("stale_orderbook", 0),
+                "parse_fail": diagnostics.get("timestamp_parse_fail_count", 0),
+            }
+            for reason, count in reason_keys.items():
+                if count > 0:
+                    instr.counter("universe_empty_reason_total", count, attrs={"reason": reason})
             logger.info(
                 "dynamic_universe_empty",
                 extra={

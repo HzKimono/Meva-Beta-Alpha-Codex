@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,6 +10,11 @@ from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_METRIC_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+
+def _sanitize_metric_name(name: str) -> str:
+    return _METRIC_NAME_RE.sub("_", name).strip("_") or "invalid_metric"
 
 
 @dataclass(frozen=True)
@@ -106,25 +112,28 @@ class OTelInstrumentation(Instrumentation):
         self._meter = meter
 
     def counter(self, name: str, value: int = 1, *, attrs: dict[str, Any] | None = None) -> None:
-        counter = self._counters.get(name)
+        safe_name = _sanitize_metric_name(name)
+        counter = self._counters.get(safe_name)
         if counter is None:
-            counter = self._meter.create_counter(name)
-            self._counters[name] = counter
+            counter = self._meter.create_counter(safe_name)
+            self._counters[safe_name] = counter
         counter.add(value, attrs or {})
 
     def gauge(self, name: str, value: float, *, attrs: dict[str, Any] | None = None) -> None:
         # Use up/down counter as a portable synchronous gauge surrogate.
-        gauge = self._gauges.get(name)
+        safe_name = _sanitize_metric_name(name)
+        gauge = self._gauges.get(safe_name)
         if gauge is None:
-            gauge = self._meter.create_up_down_counter(name)
-            self._gauges[name] = gauge
+            gauge = self._meter.create_up_down_counter(safe_name)
+            self._gauges[safe_name] = gauge
         gauge.add(value, attrs or {})
 
     def histogram(self, name: str, value: float, *, attrs: dict[str, Any] | None = None) -> None:
-        histogram = self._histograms.get(name)
+        safe_name = _sanitize_metric_name(name)
+        histogram = self._histograms.get(safe_name)
         if histogram is None:
-            histogram = self._meter.create_histogram(name)
-            self._histograms[name] = histogram
+            histogram = self._meter.create_histogram(safe_name)
+            self._histograms[safe_name] = histogram
         histogram.record(value, attrs or {})
 
     @contextmanager
@@ -146,6 +155,7 @@ class OTelInstrumentation(Instrumentation):
 
 _LOCK = threading.Lock()
 _INSTRUMENTATION: Instrumentation = NoopInstrumentation()
+_CONFIGURED_ONCE = False
 
 
 def configure_instrumentation(
@@ -156,8 +166,11 @@ def configure_instrumentation(
     otlp_endpoint: str | None = None,
     prometheus_port: int = 9464,
 ) -> Instrumentation:
-    global _INSTRUMENTATION
+    global _INSTRUMENTATION, _CONFIGURED_ONCE
     with _LOCK:
+        if _CONFIGURED_ONCE:
+            return _INSTRUMENTATION
+        _CONFIGURED_ONCE = True
         if not enabled:
             _INSTRUMENTATION = NoopInstrumentation()
             return _INSTRUMENTATION

@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     btcturk_ws_url: str = Field(default="wss://ws-feed-pro.btcturk.com", alias="BTCTURK_WS_URL")
     btcturk_ws_idle_reconnect_ms: int = Field(default=30_000, alias="BTCTURK_WS_IDLE_RECONNECT_MS")
     btcturk_ws_queue_max: int = Field(default=1_000, alias="BTCTURK_WS_QUEUE_MAX")
+    ws_reconnect_storm_threshold: int = Field(default=6, alias="WS_RECONNECT_STORM_THRESHOLD")
+    ws_reconnect_storm_window_seconds: int = Field(default=120, alias="WS_RECONNECT_STORM_WINDOW_SECONDS")
+    ws_reconnect_storm_log_cooldown_seconds: int = Field(default=300, alias="WS_RECONNECT_STORM_LOG_COOLDOWN_SECONDS")
     btcturk_rest_reliability_enabled: bool = Field(
         default=True,
         alias="BTCTURK_REST_RELIABILITY_ENABLED",
@@ -325,6 +328,12 @@ class Settings(BaseSettings):
     )
     latency_spike_ms: int | None = Field(default=2000, alias="LATENCY_SPIKE_MS")
     cursor_stall_cycles: int = Field(default=5, alias="CURSOR_STALL_CYCLES")
+    stuck_cycle_seconds: int = Field(default=120, alias="STUCK_CYCLE_SECONDS")
+    mark_price_min_coverage_ratio: float = Field(default=0.80, alias="MARK_PRICE_MIN_COVERAGE_RATIO")
+    mark_price_missing_symbols_warn_threshold: int = Field(
+        default=3,
+        alias="MARK_PRICE_MISSING_SYMBOLS_WARN_THRESHOLD",
+    )
     pnl_divergence_try_warn: Decimal = Field(default=Decimal("50"), alias="PNL_DIVERGENCE_TRY_WARN")
     pnl_divergence_try_error: Decimal = Field(
         default=Decimal("200"), alias="PNL_DIVERGENCE_TRY_ERROR"
@@ -676,12 +685,21 @@ class Settings(BaseSettings):
     @field_validator(
         "reject_spike_threshold",
         "cursor_stall_cycles",
+        "stuck_cycle_seconds",
+        "mark_price_missing_symbols_warn_threshold",
         "degrade_warn_window_cycles",
         "degrade_warn_threshold",
     )
     def validate_min_one_anomaly_counts(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Anomaly count thresholds must be >= 1")
+        return value
+
+
+    @field_validator("mark_price_min_coverage_ratio")
+    def validate_mark_price_min_coverage_ratio(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("MARK_PRICE_MIN_COVERAGE_RATIO must be in [0, 1]")
         return value
 
     @field_validator("latency_spike_ms")

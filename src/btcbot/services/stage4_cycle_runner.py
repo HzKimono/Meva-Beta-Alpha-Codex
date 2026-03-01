@@ -214,6 +214,10 @@ class Stage4CycleRunner:
                 dynamic_universe_fallback_reason = "live_empty_selection"
             elif live_mode:
                 dynamic_universe_fallback_reason = "live_empty_selection_fallback_disabled"
+                instrumentation.counter(
+                    "stage4_dynamic_universe_empty_live_no_fallback_total",
+                    1,
+                )
                 logger.warning(
                     "stage4_dynamic_universe_empty_live_no_fallback",
                     extra={
@@ -224,6 +228,14 @@ class Stage4CycleRunner:
                         }
                     },
                 )
+
+            if dynamic_universe_fallback_triggered or dynamic_universe_fallback_reason != "not_needed":
+                instrumentation.counter(
+                    "stage4_dynamic_universe_fallback_total",
+                    1,
+                    attrs={"reason": dynamic_universe_fallback_reason},
+                )
+            instrumentation.gauge("stage4_active_symbols_count", float(len(active_symbols)))
 
             logger.info(
                 "stage4_dynamic_universe_resolution",
@@ -737,15 +749,26 @@ class Stage4CycleRunner:
                         symbol for symbol in missing_mark_symbols if symbol != coverage_result.symbol
                     ]
 
+            coverage_ratio = self._compute_mark_price_coverage_ratio(
+                covered_symbols=covered_symbols,
+                tradeable_symbols_requested=tradable_symbols_before_coverage,
+            )
             instrumentation.counter(
                 "stage4_mark_price_missing_symbols_total", len(missing_mark_symbols)
             )
+            instrumentation.gauge("stage4_mark_price_coverage_ratio", coverage_ratio)
+            if coverage_ratio < float(settings.mark_price_min_coverage_ratio):
+                instrumentation.counter("stage4_mark_price_coverage_below_min_total", 1)
             if performed_safety_net:
                 instrumentation.counter("stage4_mark_price_safety_net_attempt_total", 1)
             if safety_net_success:
                 instrumentation.counter("stage4_mark_price_safety_net_success_total", 1)
 
-            logger.info(
+            log_mark_price_coverage = logger.warning if (
+                len(missing_mark_symbols) >= settings.mark_price_missing_symbols_warn_threshold
+                or coverage_ratio < float(settings.mark_price_min_coverage_ratio)
+            ) else logger.info
+            log_mark_price_coverage(
                 "stage4_mark_price_coverage",
                 extra={
                     "extra": {
@@ -756,6 +779,9 @@ class Stage4CycleRunner:
                         "mark_prices_count": len(mark_prices),
                         "tradable_symbols_count_before": len(tradable_symbols_before_coverage),
                         "tradable_symbols_count_after": len(covered_symbols),
+                        "coverage_ratio": coverage_ratio,
+                        "coverage_ratio_min": float(settings.mark_price_min_coverage_ratio),
+                        "missing_mark_symbols_count": len(missing_mark_symbols),
                         "missing_mark_symbols_sample": sorted(missing_mark_symbols)[:10],
                         "performed_safety_net": performed_safety_net,
                         "safety_net_symbol": safety_net_symbol,
@@ -1106,6 +1132,37 @@ class Stage4CycleRunner:
 
             cycle_observed_at = datetime.now(UTC)
             cycle_duration_ms = int((cycle_observed_at - cycle_started_at).total_seconds() * 1000)
+            cycle_duration_seconds = float(cycle_duration_ms) / 1000.0
+            instrumentation.gauge("stage4_cycle_duration_seconds", cycle_duration_seconds)
+            max_cursor_stall_cycles = max(cursor_stall_by_symbol.values(), default=0)
+            now_epoch = int(cycle_observed_at.timestamp())
+            if max_cursor_stall_cycles >= int(settings.cursor_stall_cycles):
+                instrumentation.counter(
+                    "stage4_stuck_cycles_total",
+                    1,
+                    attrs={"reason": "cursor_stall"},
+                )
+                self._alert_store.record("stage4_stuck_cycle_cursor_stall_total", 1, now_epoch)
+            if cycle_duration_seconds >= float(settings.stuck_cycle_seconds):
+                instrumentation.counter(
+                    "stage4_stuck_cycles_total",
+                    1,
+                    attrs={"reason": "duration"},
+                )
+                self._alert_store.record("stage4_stuck_cycle_duration_total", 1, now_epoch)
+            logger.info(
+                "stage4_cycle_health",
+                extra={
+                    "extra": {
+                        "cycle_id": cycle_id,
+                        "duration_seconds": cycle_duration_seconds,
+                        "cursor_before_count": sum(1 for value in cursor_before.values() if value is not None),
+                        "cursor_after_count": sum(1 for value in cursor_after.values() if value is not None),
+                        "cursor_stall_by_symbol_count": sum(1 for value in cursor_stall_by_symbol.values() if value > 0),
+                        "max_cursor_stall_cycles": max_cursor_stall_cycles,
+                    }
+                },
+            )
             anomalies = anomaly_detector.detect(
                 market_data_age_seconds={
                     k: float(v) for k, v in market_snapshot.age_seconds_by_symbol.items()
@@ -1832,6 +1889,14 @@ class Stage4CycleRunner:
         if not dec.is_finite() or dec < 0:
             return None
         return dec
+
+    @staticmethod
+    def _compute_mark_price_coverage_ratio(
+        *,
+        covered_symbols: list[str],
+        tradeable_symbols_requested: list[str],
+    ) -> float:
+        return float(len(covered_symbols)) / float(max(1, len(tradeable_symbols_requested)))
 
     def _choose_mark_price_fallback_symbol(self, active_symbols: list[str]) -> str | None:
         if not active_symbols:
